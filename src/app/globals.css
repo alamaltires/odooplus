@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #f3f7fc;
+  --card: #ffffff;
+  --ink: #122235;
+  --ink-soft: #54677b;
+  --line: #cfdaea;
+  --brand: #2062b0;
+  --brand-soft: #a8c4e8;
+  --accent: #4ab848;
+  --accent-soft: #bde7bc;
+  --mint-soft: var(--accent-soft);
+  --chip: #ebf2fb;
+  --chip-hover: #dce8f8;
+}
+
+@theme inline {
+  --font-sans: var(--font-body);
+}
+
+body {
+  color: var(--ink);
+  background:
+    radial-gradient(1200px 500px at 0% -10%, rgba(32, 98, 176, 0.28), transparent 60%),
+    radial-gradient(1000px 500px at 100% 100%, rgba(74, 184, 72, 0.24), transparent 60%),
+    var(--bg);
+  font-family: var(--font-body), sans-serif;
+}
+
+.font-display {
+  font-family: var(--font-display), sans-serif;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}
