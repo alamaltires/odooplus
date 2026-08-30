@@ -1,1 +1,0 @@
-- [Deploy & inventory webhook](deploy-and-webhook.md) — deploy = push to main; webhook needs Odoo to send qty_available (no server Odoo creds)
