@@ -3,7 +3,7 @@ import nodemailer from "nodemailer";
 import { getUserIdFromRequest } from "@/lib/server/auth-helpers";
 
 type SalesTargetEmailRow = {
-    categoryName: string;
+    brandName: string;
     targetAmount: number;
     achieved: number;
     progress: number;
@@ -53,7 +53,7 @@ function buildEmailHtml(payload: SalesTargetEmailRequest) {
             return `
                 <tr>
                     <td style="padding: 12px 0; border-bottom: 1px solid #e7edf4;">
-                        <div style="font-weight: 600; color: #0f2742; margin-bottom: 6px;">${escapeHtml(row.categoryName)}</div>
+                        <div style="font-weight: 600; color: #0f2742; margin-bottom: 6px;">${escapeHtml(row.brandName)}</div>
                         <div style="font-size: 13px; color: #4d647d; margin-bottom: 8px;">
                             ${formatCurrency(row.achieved)} / ${formatCurrency(row.targetAmount)}
                         </div>
@@ -93,14 +93,14 @@ function buildEmailHtml(payload: SalesTargetEmailRequest) {
           <tr>
             <td style="padding:20px 24px 0;">
               <h2 style="margin:0 0 8px;font-size:20px;color:#0f2742;">Set Monthly Targets</h2>
-              <p style="margin:0;font-size:14px;color:#5f7288;">Saved category targets and their achieved values.</p>
+              <p style="margin:0;font-size:14px;color:#5f7288;">Saved brand targets and their achieved values.</p>
             </td>
           </tr>
 
           <tr>
             <td style="padding:8px 24px 0;">
               <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
-                ${rowsHtml || `<tr><td style="padding:12px 0;color:#5f7288;">No category targets saved for this period.</td></tr>`}
+                ${rowsHtml || `<tr><td style="padding:12px 0;color:#5f7288;">No brand targets saved for this period.</td></tr>`}
               </table>
             </td>
           </tr>

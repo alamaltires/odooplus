@@ -9,12 +9,14 @@ export async function POST(request: Request) {
         const {
             categoryId,
             categoryModel,
+            brandId,
             startDate,
             endDate,
             stockDurationMonths,
         } = (await request.json()) as {
-            categoryId: number;
+            categoryId?: number | null;
             categoryModel?: "product.public.category" | "product.category";
+            brandId?: number | null;
             startDate: string;
             endDate: string;
             stockDurationMonths: number;
@@ -23,6 +25,7 @@ export async function POST(request: Request) {
         const report = await getPurchaseOrderReport(credentials, {
             categoryId,
             categoryModel,
+            brandId,
             startDate,
             endDate,
             stockDurationMonths,

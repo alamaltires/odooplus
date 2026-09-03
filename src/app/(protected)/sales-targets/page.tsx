@@ -5,21 +5,21 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Gauge, ListTree, Mail, Plus, Target, Trash2 } from "lucide-react";
 import {
     getSalesTarget,
-    markSalesTargetCategoryMarketingEmailSent,
+    markSalesTargetBrandMarketingEmailSent,
     saveSalesTarget,
 } from "@/lib/firestore-settings";
 import {
-    getProductCategories,
+    getProductBrands,
     getSalespeople,
     sendSalesTargetEmail,
-    sendSalesTargetCategoryMarketingEmail,
+    sendSalesTargetBrandMarketingEmail,
     getSalespersonMonthlyInvoices,
 } from "@/lib/client-odoo";
 import { useAuth } from "@/lib/auth-context";
 import {
     OdooSalesperson,
     OdooSalespersonMonthlyInvoices,
-    SalesTargetCategory,
+    SalesTargetBrand,
     SalesTargetRecord,
 } from "@/types/odoo";
 
@@ -45,8 +45,8 @@ function formatNumber(value: number) {
     });
 }
 
-function formatCurrency(value: number) {
-    return `AED ${formatNumber(value)}`;
+function formatCurrency(value: number, currencyCode = "AED") {
+    return `${currencyCode} ${formatNumber(value)}`;
 }
 
 function currentMonth() {
@@ -57,8 +57,11 @@ function currentYear() {
     return new Date().getFullYear();
 }
 
-const GENERAL_CATEGORY_VALUE = "general";
-const REPORT_STATE_STORAGE_KEY = "sales-targets:report-state";
+const GENERAL_BRAND_VALUE = "general";
+// Bump the "v4" suffix whenever the persisted report shape changes, so a
+// stale cached report from an older build (missing newer fields, e.g.
+// brandTotals) is discarded instead of silently restored with defaults.
+const REPORT_STATE_STORAGE_KEY = "sales-targets:report-state:v4";
 
 type PersistedReportState = {
     selectedSalespersonId: string;
@@ -70,26 +73,50 @@ type PersistedReportState = {
     target: SalesTargetRecord | null;
 };
 
-type ProductCategory = {
+type Brand = {
     id: number;
     name: string;
-    model: "product.public.category" | "product.category";
-    parentPath?: string;
 };
 
 type TargetEntryInput = {
-    categoryValue: string;
+    brandValue: string;
     targetAmount: string;
 };
 
+/**
+ * Reports can be restored from sessionStorage (see REPORT_STATE_STORAGE_KEY),
+ * including ones cached by an older build that didn't have the currency
+ * fields below. Backfill them so rendering never has to assume they exist.
+ */
+function normalizeReport(report: OdooSalespersonMonthlyInvoices): OdooSalespersonMonthlyInvoices {
+    return {
+        ...report,
+        primaryCurrencyCode: report.primaryCurrencyCode || "AED",
+        currencyTotals: Array.isArray(report.currencyTotals) ? report.currencyTotals : [],
+        creditNoteCurrencyTotals: Array.isArray(report.creditNoteCurrencyTotals)
+            ? report.creditNoteCurrencyTotals
+            : [],
+        brandTotals: Array.isArray(report.brandTotals) ? report.brandTotals : [],
+        creditNoteBrandTotals: Array.isArray(report.creditNoteBrandTotals) ? report.creditNoteBrandTotals : [],
+    };
+}
+
 function emptyTargetEntry(): TargetEntryInput {
     return {
-        categoryValue: GENERAL_CATEGORY_VALUE,
+        brandValue: GENERAL_BRAND_VALUE,
         targetAmount: "",
     };
 }
 
-function ProgressBar({ total, target }: { total: number; target: number }) {
+function ProgressBar({
+    total,
+    target,
+    currencyCode,
+}: {
+    total: number;
+    target: number;
+    currencyCode: string;
+}) {
     const progress = target > 0 ? Math.min((total / target) * 100, 100) : 0;
     const exceeded = Math.max(0, total - target);
 
@@ -98,13 +125,13 @@ function ProgressBar({ total, target }: { total: number; target: number }) {
             <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                     <p className="text-sm text-(--ink-soft)">Target Progress</p>
-                    <p className="mt-1 font-display text-3xl">{formatCurrency(total)}</p>
+                    <p className="mt-1 font-display text-3xl">{formatCurrency(total, currencyCode)}</p>
                 </div>
                 <div className="text-right">
                     <p className="text-sm text-(--ink-soft)">Target</p>
-                    <p className="mt-1 text-lg font-medium">{formatCurrency(target)}</p>
+                    <p className="mt-1 text-lg font-medium">{formatCurrency(target, currencyCode)}</p>
                     {exceeded > 0 ? (
-                        <p className="mt-1 text-sm font-medium text-(--accent)">+{formatCurrency(exceeded)} exceeded</p>
+                        <p className="mt-1 text-sm font-medium text-(--accent)">+{formatCurrency(exceeded, currencyCode)} exceeded</p>
                     ) : null}
                 </div>
             </div>
@@ -121,7 +148,7 @@ function ProgressBar({ total, target }: { total: number; target: number }) {
 
             <div className="flex items-center justify-between text-sm text-(--ink-soft)">
                 <span>{progress.toFixed(1)}% achieved</span>
-                <span>{formatCurrency(Math.max(0, target - total))} remaining</span>
+                <span>{formatCurrency(Math.max(0, target - total), currencyCode)} remaining</span>
             </div>
         </div>
     );
@@ -136,9 +163,9 @@ export default function SalesTargetsPage() {
     const [salespeopleLoading, setSalespeopleLoading] = useState(true);
     const [salespeopleError, setSalespeopleError] = useState<string | null>(null);
 
-    const [categories, setCategories] = useState<ProductCategory[]>([]);
-    const [categoriesLoading, setCategoriesLoading] = useState(false);
-    const [categoriesError, setCategoriesError] = useState<string | null>(null);
+    const [brands, setBrands] = useState<Brand[]>([]);
+    const [brandsLoading, setBrandsLoading] = useState(false);
+    const [brandsError, setBrandsError] = useState<string | null>(null);
 
     const [selectedSalespersonId, setSelectedSalespersonId] = useState("");
     const [selectedMonth, setSelectedMonth] = useState(String(currentMonth()));
@@ -157,7 +184,7 @@ export default function SalesTargetsPage() {
     const [emailModalOpen, setEmailModalOpen] = useState(false);
     const [recipientEmail, setRecipientEmail] = useState("");
     const [sendingEmail, setSendingEmail] = useState(false);
-    const [sendingCategoryEmailId, setSendingCategoryEmailId] = useState<number | null>(null);
+    const [sendingBrandEmailId, setSendingBrandEmailId] = useState<number | null>(null);
     const [generalBreakdownOpen, setGeneralBreakdownOpen] = useState(false);
     const [message, setMessage] = useState<string | null>(null);
 
@@ -202,9 +229,9 @@ export default function SalesTargetsPage() {
     useEffect(() => {
         if (!user) {
             hasRestoredReportStateRef.current = false;
-            setCategories([]);
-            setCategoriesLoading(false);
-            setCategoriesError(null);
+            setBrands([]);
+            setBrandsLoading(false);
+            setBrandsError(null);
 
             if (typeof window !== "undefined") {
                 window.sessionStorage.removeItem(REPORT_STATE_STORAGE_KEY);
@@ -235,7 +262,7 @@ export default function SalesTargetsPage() {
             setSelectedYear(String(parsed.selectedYear));
             setIncludeCreditNotes(parsed.includeCreditNotes === "true");
             setCreditNotesApplied(parsed.creditNotesApplied === "true");
-            setReport(parsed.report as OdooSalespersonMonthlyInvoices);
+            setReport(normalizeReport(parsed.report as OdooSalespersonMonthlyInvoices));
             setTarget((parsed.target as SalesTargetRecord | null) ?? null);
         } catch {
             window.sessionStorage.removeItem(REPORT_STATE_STORAGE_KEY);
@@ -260,31 +287,31 @@ export default function SalesTargetsPage() {
         window.sessionStorage.setItem(REPORT_STATE_STORAGE_KEY, JSON.stringify(payload));
     }, [report, selectedMonth, selectedSalespersonId, selectedYear, includeCreditNotes, creditNotesApplied, target, user]);
 
-    async function ensureCategoriesLoaded() {
-        if (!user || categories.length > 0 || categoriesLoading) {
+    async function ensureBrandsLoaded() {
+        if (!user || brands.length > 0 || brandsLoading) {
             return;
         }
 
-        setCategoriesLoading(true);
-        setCategoriesError(null);
+        setBrandsLoading(true);
+        setBrandsError(null);
 
         try {
-            const data = await getProductCategories();
-            setCategories(data.categories.filter((category) => category.model === "product.category"));
+            const data = await getProductBrands();
+            setBrands(data.brands);
         } catch (loadError) {
-            setCategoriesError(
+            setBrandsError(
                 loadError instanceof Error
                     ? loadError.message
-                    : "Failed to load product categories."
+                    : "Failed to load product brands."
             );
         } finally {
-            setCategoriesLoading(false);
+            setBrandsLoading(false);
         }
     }
 
     const savedTargets = useMemo(() => {
         if (!target) {
-            return [] as SalesTargetCategory[];
+            return [] as SalesTargetBrand[];
         }
 
         if (target.targets.length > 0) {
@@ -294,8 +321,8 @@ export default function SalesTargetsPage() {
         if (Number.isFinite(target.targetAmount) && Number(target.targetAmount) > 0) {
             return [
                 {
-                    categoryId: null,
-                    categoryName: "General",
+                    brandId: null,
+                    brandName: "General",
                     targetAmount: Number(target.targetAmount),
                     isGeneral: true,
                 },
@@ -315,92 +342,71 @@ export default function SalesTargetsPage() {
         [report]
     );
 
+    const currencyCode = report?.primaryCurrencyCode || "AED";
+
+    const unconvertedCurrencyTotals = useMemo(() => {
+        if (!report) {
+            return [];
+        }
+
+        return (report.currencyTotals ?? []).filter((total) => !total.includedInTotal);
+    }, [report]);
+
     const marketingEmailsSentAt = useMemo(() => target?.marketingEmailsSentAt ?? {}, [target]);
 
-    const categoryNameById = useMemo(() => {
+    const brandNameById = useMemo(() => {
         const lookup = new Map<number, string>();
-        for (const category of categories) {
-            lookup.set(category.id, category.name);
+        for (const brand of brands) {
+            lookup.set(brand.id, brand.name);
         }
         return lookup;
-    }, [categories]);
+    }, [brands]);
 
-    const coveredLeafCategoryIds = useMemo(() => {
+    const targetedBrandIds = useMemo(() => {
         const covered = new Set<number>();
-        if (!report) {
-            return covered;
-        }
-
         for (const item of savedTargets) {
-            if (item.isGeneral || typeof item.categoryId !== "number") {
-                continue;
-            }
-
-            for (const categoryTotal of report.categoryTotals) {
-                const isCovered =
-                    categoryTotal.categoryId === item.categoryId ||
-                    categoryTotal.ancestorCategoryIds.includes(Number(item.categoryId));
-
-                if (isCovered) {
-                    covered.add(categoryTotal.categoryId);
-                }
+            if (!item.isGeneral && typeof item.brandId === "number") {
+                covered.add(item.brandId);
             }
         }
-
         return covered;
-    }, [report, savedTargets]);
+    }, [savedTargets]);
 
     const targetProgressRows = useMemo(() => {
         if (!report) {
             return [];
         }
 
-        const creditNoteCategoryTotals = creditNotesApplied ? (report.creditNoteCategoryTotals ?? []) : [];
+        const creditNoteBrandTotals = creditNotesApplied ? (report.creditNoteBrandTotals ?? []) : [];
 
-        const achievedByTargetCategoryId = new Map<number, number>();
+        const achievedByTargetBrandId = new Map<number, number>();
         for (const item of savedTargets) {
-            if (item.isGeneral || typeof item.categoryId !== "number") {
+            if (item.isGeneral || typeof item.brandId !== "number") {
                 continue;
             }
 
-            let achieved = 0;
-            for (const categoryTotal of report.categoryTotals) {
-                const leafCategoryId = categoryTotal.categoryId;
-                const matchesTarget =
-                    leafCategoryId === item.categoryId ||
-                    categoryTotal.ancestorCategoryIds.includes(Number(item.categoryId));
+            const achieved = report.brandTotals
+                .filter((brandTotal) => brandTotal.brandId === item.brandId)
+                .reduce((sum, brandTotal) => sum + Number(brandTotal.totalInvoiced || 0), 0);
 
-                if (matchesTarget) {
-                    achieved += Number(categoryTotal.totalInvoiced || 0);
-                }
-            }
+            const creditNoteDeduction = creditNoteBrandTotals
+                .filter((cnBrandTotal) => cnBrandTotal.brandId === item.brandId)
+                .reduce((sum, cnBrandTotal) => sum + Number(cnBrandTotal.totalInvoiced || 0), 0);
 
-            let creditNoteDeduction = 0;
-            for (const cnCategoryTotal of creditNoteCategoryTotals) {
-                const leafCategoryId = cnCategoryTotal.categoryId;
-                const matchesTarget =
-                    leafCategoryId === item.categoryId ||
-                    cnCategoryTotal.ancestorCategoryIds.includes(Number(item.categoryId));
-
-                if (matchesTarget) {
-                    creditNoteDeduction += Number(cnCategoryTotal.totalInvoiced || 0);
-                }
-            }
-
-            achievedByTargetCategoryId.set(item.categoryId, Number(Math.max(0, achieved - creditNoteDeduction).toFixed(2)));
+            achievedByTargetBrandId.set(item.brandId, Number(Math.max(0, achieved - creditNoteDeduction).toFixed(2)));
         }
 
-        const targetedAchieved = report.categoryTotals.reduce((sum, categoryTotal) => {
-            if (coveredLeafCategoryIds.has(categoryTotal.categoryId)) {
-                return sum + Number(categoryTotal.totalInvoiced || 0);
+        const targetedAchieved = report.brandTotals.reduce((sum, brandTotal) => {
+            if (targetedBrandIds.has(brandTotal.brandId)) {
+                return sum + Number(brandTotal.totalInvoiced || 0);
             }
 
             return sum;
         }, 0);
 
-        const targetedCreditNoteDeduction = creditNoteCategoryTotals.reduce((sum, cnCategoryTotal) => {
-            if (coveredLeafCategoryIds.has(cnCategoryTotal.categoryId)) {
-                return sum + Number(cnCategoryTotal.totalInvoiced || 0);
+        const targetedCreditNoteDeduction = creditNoteBrandTotals.reduce((sum, cnBrandTotal) => {
+            if (targetedBrandIds.has(cnBrandTotal.brandId)) {
+                return sum + Number(cnBrandTotal.totalInvoiced || 0);
             }
 
             return sum;
@@ -411,7 +417,7 @@ export default function SalesTargetsPage() {
         return savedTargets.map((item) => {
             const achieved = item.isGeneral
                 ? Math.max(0, baseTotal - Math.max(0, targetedAchieved - targetedCreditNoteDeduction))
-                : achievedByTargetCategoryId.get(Number(item.categoryId)) ?? 0;
+                : achievedByTargetBrandId.get(Number(item.brandId)) ?? 0;
             const progress = item.targetAmount > 0
                 ? Math.min((achieved / item.targetAmount) * 100, 100)
                 : 0;
@@ -422,7 +428,7 @@ export default function SalesTargetsPage() {
                 progress,
             };
         });
-    }, [coveredLeafCategoryIds, creditNotesApplied, effectiveSales, report, savedTargets]);
+    }, [creditNotesApplied, effectiveSales, report, savedTargets, targetedBrandIds]);
 
     const generalBreakdown = useMemo(() => {
         if (!report) {
@@ -434,42 +440,42 @@ export default function SalesTargetsPage() {
             return null;
         }
 
-        const creditNoteByCategoryId = new Map<number, number>();
+        const creditNoteByBrandId = new Map<number, number>();
         if (creditNotesApplied) {
-            for (const cnCategoryTotal of report.creditNoteCategoryTotals ?? []) {
-                creditNoteByCategoryId.set(
-                    cnCategoryTotal.categoryId,
-                    (creditNoteByCategoryId.get(cnCategoryTotal.categoryId) ?? 0) +
-                        Number(cnCategoryTotal.totalInvoiced || 0)
+            for (const cnBrandTotal of report.creditNoteBrandTotals ?? []) {
+                creditNoteByBrandId.set(
+                    cnBrandTotal.brandId,
+                    (creditNoteByBrandId.get(cnBrandTotal.brandId) ?? 0) +
+                        Number(cnBrandTotal.totalInvoiced || 0)
                 );
             }
         }
 
-        const netByCategoryId = new Map<number, number>();
-        for (const categoryTotal of report.categoryTotals) {
-            if (coveredLeafCategoryIds.has(categoryTotal.categoryId)) {
+        const netByBrandId = new Map<number, number>();
+        for (const brandTotal of report.brandTotals) {
+            if (targetedBrandIds.has(brandTotal.brandId)) {
                 continue;
             }
 
-            netByCategoryId.set(
-                categoryTotal.categoryId,
-                (netByCategoryId.get(categoryTotal.categoryId) ?? 0) + Number(categoryTotal.totalInvoiced || 0)
+            netByBrandId.set(
+                brandTotal.brandId,
+                (netByBrandId.get(brandTotal.brandId) ?? 0) + Number(brandTotal.totalInvoiced || 0)
             );
         }
 
         let categorizedTotal = 0;
-        const rows: Array<{ categoryId: number | null; categoryName: string; amount: number }> = [];
+        const rows: Array<{ brandId: number | null; brandName: string; amount: number }> = [];
 
-        for (const [categoryId, grossAmount] of netByCategoryId) {
-            const amount = Number((grossAmount - (creditNoteByCategoryId.get(categoryId) ?? 0)).toFixed(2));
+        for (const [brandId, grossAmount] of netByBrandId) {
+            const amount = Number((grossAmount - (creditNoteByBrandId.get(brandId) ?? 0)).toFixed(2));
             if (amount === 0) {
                 continue;
             }
 
             categorizedTotal += amount;
             rows.push({
-                categoryId,
-                categoryName: categoryNameById.get(categoryId) ?? `Category #${categoryId}`,
+                brandId,
+                brandName: brandNameById.get(brandId) ?? `Brand #${brandId}`,
                 amount,
             });
         }
@@ -478,11 +484,11 @@ export default function SalesTargetsPage() {
 
         const residual = Number((generalRow.achieved - categorizedTotal).toFixed(2));
         if (Math.abs(residual) >= 0.01) {
-            rows.push({ categoryId: null, categoryName: "Uncategorized", amount: residual });
+            rows.push({ brandId: null, brandName: "No Brand", amount: residual });
         }
 
         return { rows, total: generalRow.achieved };
-    }, [categoryNameById, coveredLeafCategoryIds, creditNotesApplied, report, targetProgressRows]);
+    }, [brandNameById, creditNotesApplied, report, targetProgressRows, targetedBrandIds]);
 
     async function loadSavedTarget(salespersonId: number, year: number, month: number) {
         if (!user) {
@@ -510,14 +516,14 @@ export default function SalesTargetsPage() {
             const year = Number(selectedYear);
             const month = Number(selectedMonth);
 
-            await ensureCategoriesLoaded();
+            await ensureBrandsLoaded();
 
             const [reportData, savedTarget] = await Promise.all([
                 getSalespersonMonthlyInvoices({ salespersonId, year, month, includeCreditNotes }),
                 loadSavedTarget(salespersonId, year, month),
             ]);
 
-            setReport(reportData);
+            setReport(normalizeReport(reportData));
             setTarget(savedTarget);
             setCreditNotesApplied(includeCreditNotes);
         } catch (loadError) {
@@ -542,47 +548,47 @@ export default function SalesTargetsPage() {
         }
 
         const selectedValues = new Set<string>();
-        const normalizedTargets: SalesTargetCategory[] = [];
+        const normalizedTargets: SalesTargetBrand[] = [];
 
         for (const entry of targetEntries) {
-            if (!entry.categoryValue) {
-                setError("Please select a product category for each target.");
+            if (!entry.brandValue) {
+                setError("Please select a product brand for each target.");
                 return;
             }
 
-            if (selectedValues.has(entry.categoryValue)) {
-                setError("Each product category can only be selected once.");
+            if (selectedValues.has(entry.brandValue)) {
+                setError("Each product brand can only be selected once.");
                 return;
             }
 
-            selectedValues.add(entry.categoryValue);
+            selectedValues.add(entry.brandValue);
 
             const targetAmount = Number(entry.targetAmount);
             if (!Number.isFinite(targetAmount) || targetAmount <= 0) {
-                setError("Please enter a valid target amount for each category.");
+                setError("Please enter a valid target amount for each brand.");
                 return;
             }
 
-            if (entry.categoryValue === GENERAL_CATEGORY_VALUE) {
+            if (entry.brandValue === GENERAL_BRAND_VALUE) {
                 normalizedTargets.push({
-                    categoryId: null,
-                    categoryName: "General",
+                    brandId: null,
+                    brandName: "General",
                     targetAmount,
                     isGeneral: true,
                 });
                 continue;
             }
 
-            const categoryId = Number(entry.categoryValue);
-            const category = categories.find((item) => item.id === categoryId);
-            if (!category) {
-                setError("One or more selected categories are invalid.");
+            const brandId = Number(entry.brandValue);
+            const brand = brands.find((item) => item.id === brandId);
+            if (!brand) {
+                setError("One or more selected brands are invalid.");
                 return;
             }
 
             normalizedTargets.push({
-                categoryId: category.id,
-                categoryName: category.name,
+                brandId: brand.id,
+                brandName: brand.name,
                 targetAmount,
                 isGeneral: false,
             });
@@ -616,10 +622,10 @@ export default function SalesTargetsPage() {
     }
 
     async function openTargetEditor() {
-        await ensureCategoriesLoaded();
+        await ensureBrandsLoaded();
 
         const existingEntries = savedTargets.map((item) => ({
-            categoryValue: item.isGeneral ? GENERAL_CATEGORY_VALUE : String(item.categoryId),
+            brandValue: item.isGeneral ? GENERAL_BRAND_VALUE : String(item.brandId),
             targetAmount: String(item.targetAmount),
         }));
 
@@ -635,9 +641,9 @@ export default function SalesTargetsPage() {
             return;
         }
 
-        // Report state can be restored from sessionStorage without categories being fetched,
-        // and the breakdown needs them to resolve category names.
-        await ensureCategoriesLoaded();
+        // Report state can be restored from sessionStorage without brands being fetched,
+        // and the breakdown needs them to resolve brand names.
+        await ensureBrandsLoaded();
         setGeneralBreakdownOpen(true);
     }
 
@@ -694,7 +700,7 @@ export default function SalesTargetsPage() {
                 totalInvoiced: creditNotesApplied ? effectiveSales : report.totalInvoiced,
                 totalTargetAmount,
                 rows: targetProgressRows.map((item) => ({
-                    categoryName: item.categoryName,
+                    brandName: item.brandName,
                     targetAmount: item.targetAmount,
                     achieved: item.achieved,
                     progress: item.progress,
@@ -712,49 +718,49 @@ export default function SalesTargetsPage() {
         }
     }
 
-    async function handleSendCategoryMarketingRequest(item: {
-        categoryId: number | null;
-        categoryName: string;
+    async function handleSendBrandMarketingRequest(item: {
+        brandId: number | null;
+        brandName: string;
         targetAmount: number;
         achieved: number;
     }) {
-        if (!report || typeof item.categoryId !== "number") {
+        if (!report || typeof item.brandId !== "number") {
             return;
         }
 
-        if (marketingEmailsSentAt[String(item.categoryId)]) {
-            setMessage(`Marketing support request was already sent for ${item.categoryName} this month.`);
+        if (marketingEmailsSentAt[String(item.brandId)]) {
+            setMessage(`Marketing support request was already sent for ${item.brandName} this month.`);
             return;
         }
 
         const monthLabel = months.find((month) => month.value === report.month)?.label ?? String(report.month);
 
-        setSendingCategoryEmailId(item.categoryId);
+        setSendingBrandEmailId(item.brandId);
         setError(null);
         setMessage(null);
 
         try {
-            await sendSalesTargetCategoryMarketingEmail({
+            await sendSalesTargetBrandMarketingEmail({
                 salespersonName: report.salesperson.name,
                 monthLabel,
                 year: report.year,
-                categoryName: item.categoryName,
+                brandName: item.brandName,
                 targetAmount: item.targetAmount,
                 achieved: item.achieved,
                 remaining: Math.max(0, item.targetAmount - item.achieved),
             });
 
             if (user) {
-                await markSalesTargetCategoryMarketingEmailSent({
+                await markSalesTargetBrandMarketingEmailSent({
                     salespersonId: report.salesperson.id,
                     year: report.year,
                     month: report.month,
-                    categoryId: item.categoryId,
+                    brandId: item.brandId,
                 });
             }
 
             setTarget((previous) => {
-                if (!previous || typeof item.categoryId !== "number") {
+                if (!previous || typeof item.brandId !== "number") {
                     return previous;
                 }
 
@@ -762,16 +768,16 @@ export default function SalesTargetsPage() {
                     ...previous,
                     marketingEmailsSentAt: {
                         ...(previous.marketingEmailsSentAt ?? {}),
-                        [String(item.categoryId)]: new Date().toISOString(),
+                        [String(item.brandId)]: new Date().toISOString(),
                     },
                 };
             });
 
-            setMessage(`Marketing support request sent for ${item.categoryName}.`);
+            setMessage(`Marketing support request sent for ${item.brandName}.`);
         } catch (sendError) {
             setError(sendError instanceof Error ? sendError.message : "Failed to send marketing support request.");
         } finally {
-            setSendingCategoryEmailId(null);
+            setSendingBrandEmailId(null);
         }
     }
 
@@ -884,15 +890,17 @@ export default function SalesTargetsPage() {
                         </article>
 
                         <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
-                            <p className="text-sm text-(--ink-soft)">Posted Invoice Total</p>
-                            <p className="mt-3 font-display text-3xl">{formatCurrency(report.totalInvoiced)}</p>
-                            <p className="mt-2 text-sm text-(--ink-soft)">{report.invoiceCount} invoices posted in the selected month.</p>
+                            <p className="text-sm text-(--ink-soft)">Posted Invoice Total ({currencyCode})</p>
+                            <p className="mt-3 font-display text-3xl">{formatCurrency(report.totalInvoiced, currencyCode)}</p>
+                            <p className="mt-2 text-sm text-(--ink-soft)">
+                                {report.invoiceCount} invoices posted in the selected month, converted to {currencyCode} at the configured rate.
+                            </p>
                         </article>
 
                         {creditNotesApplied ? (
                             <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
                                 <p className="text-sm text-(--ink-soft)">Credit Notes</p>
-                                <p className="mt-3 font-display text-3xl text-red-500">-{formatCurrency(report.creditNoteTotal ?? 0)}</p>
+                                <p className="mt-3 font-display text-3xl text-red-500">-{formatCurrency(report.creditNoteTotal ?? 0, currencyCode)}</p>
                                 <p className="mt-2 text-sm text-(--ink-soft)">Credit notes (refunds) issued in the selected month.</p>
                             </article>
                         ) : null}
@@ -900,7 +908,7 @@ export default function SalesTargetsPage() {
                         {creditNotesApplied ? (
                             <article className="rounded-2xl border-2 border-(--brand) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
                                 <p className="text-sm text-(--ink-soft)">Effective Sales</p>
-                                <p className="mt-3 font-display text-3xl">{formatCurrency(effectiveSales)}</p>
+                                <p className="mt-3 font-display text-3xl">{formatCurrency(effectiveSales, currencyCode)}</p>
                                 <p className="mt-2 text-sm text-(--ink-soft)">Total invoiced minus credit notes.</p>
                             </article>
                         ) : null}
@@ -909,10 +917,10 @@ export default function SalesTargetsPage() {
                             <div className="flex items-start justify-between gap-4">
                                 <div>
                                     <p className="text-sm text-(--ink-soft)">Target Status</p>
-                                    <p className="mt-3 font-display text-3xl">{savedTargets.length > 0 ? formatCurrency(totalTargetAmount) : "Not Set"}</p>
+                                    <p className="mt-3 font-display text-3xl">{savedTargets.length > 0 ? formatCurrency(totalTargetAmount, currencyCode) : "Not Set"}</p>
                                     <p className="mt-2 text-sm text-(--ink-soft)">
                                         {savedTargets.length > 0
-                                            ? `${savedTargets.length} category target${savedTargets.length > 1 ? "s" : ""} saved for this period.`
+                                            ? `${savedTargets.length} brand target${savedTargets.length > 1 ? "s" : ""} saved for this period.`
                                             : "No target saved for the selected period."}
                                     </p>
                                 </div>
@@ -921,12 +929,58 @@ export default function SalesTargetsPage() {
                         </article>
                     </div>
 
+                    {report.currencyTotals.length > 0 ? (
+                        <div className="rounded-2xl border border-(--line) bg-(--card) p-5">
+                            <h2 className="font-display text-2xl">Sales By Currency</h2>
+                            <p className="mt-1 text-sm text-(--ink-soft)">
+                                Every currency found in this salesperson&apos;s posted invoices this period — raw amounts, not
+                                converted. The totals above convert every currency to {currencyCode} using the exchange rate
+                                already configured under Accounting &gt; Currencies.
+                            </p>
+                            <div className="mt-4 overflow-x-auto rounded-xl border border-(--line)">
+                                <table className="min-w-full divide-y divide-(--line) text-sm">
+                                    <thead className="bg-(--chip) text-(--ink-soft)">
+                                        <tr>
+                                            <th className="px-4 py-2.5 text-left font-medium">Currency</th>
+                                            <th className="px-4 py-2.5 text-right font-medium">Total Sales</th>
+                                            <th className="px-4 py-2.5 text-right font-medium">Invoices</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-(--line) bg-white">
+                                        {report.currencyTotals.map((total) => (
+                                            <tr key={total.currencyId}>
+                                                <td className="px-4 py-2.5 font-medium">
+                                                    {total.currencyCode}
+                                                    {total.currencyCode === currencyCode ? (
+                                                        <span className="ml-2 rounded-full bg-(--chip) px-2 py-0.5 text-xs font-normal text-(--ink-soft)">
+                                                            Target Currency
+                                                        </span>
+                                                    ) : null}
+                                                </td>
+                                                <td className="px-4 py-2.5 text-right">{formatCurrency(total.total, total.currencyCode)}</td>
+                                                <td className="px-4 py-2.5 text-right text-(--ink-soft)">{total.invoiceCount}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                            {unconvertedCurrencyTotals.length > 0 ? (
+                                <p className="mt-3 text-sm text-red-600">
+                                    No exchange rate is configured for{" "}
+                                    {unconvertedCurrencyTotals.map((total) => total.currencyCode).join(", ")} at your
+                                    home company — these amounts are excluded from the totals above. Set a rate under
+                                    Accounting &gt; Currencies to include them.
+                                </p>
+                            ) : null}
+                        </div>
+                    ) : null}
+
                     <div className="rounded-2xl border border-(--line) bg-(--card) p-5">
                         <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
                             <div>
                                 <h2 className="font-display text-2xl">Set Monthly Targets</h2>
                                 <p className="text-sm text-(--ink-soft)">
-                                    Add one or more product category targets. The General target applies to all categories except the specifically configured ones.
+                                    Add one or more product brand targets. The General target applies to all brands except the specifically configured ones.
                                 </p>
                             </div>
 
@@ -954,17 +1008,17 @@ export default function SalesTargetsPage() {
 
                         {savedTargets.length > 0 ? (
                             <div className="mt-4 rounded-xl border border-(--line) bg-white p-4">
-                                <p className="text-sm font-medium text-(--ink)">Saved category targets</p>
+                                <p className="text-sm font-medium text-(--ink)">Saved brand targets</p>
                                 <div className="mt-3 space-y-3">
                                     {targetProgressRows.map((item, index) => (
                                         <div
-                                            key={`${item.isGeneral ? "general" : item.categoryId}-${index}`}
+                                            key={`${item.isGeneral ? "general" : item.brandId}-${index}`}
                                             className="space-y-2 rounded-lg bg-(--chip) px-3 py-3 text-sm"
                                         >
                                             <div className="flex items-center justify-between gap-3">
-                                                <span className="font-medium">{item.categoryName}</span>
+                                                <span className="font-medium">{item.brandName}</span>
                                                 <span>
-                                                    {formatCurrency(item.achieved)} / {formatCurrency(item.targetAmount)}
+                                                    {formatCurrency(item.achieved, currencyCode)} / {formatCurrency(item.targetAmount, currencyCode)}
                                                 </span>
                                             </div>
                                             <div className="h-2 overflow-hidden rounded-full bg-white/80">
@@ -979,29 +1033,29 @@ export default function SalesTargetsPage() {
                                             <div className="flex items-center justify-between text-xs text-(--ink-soft)">
                                                 <span>{item.progress.toFixed(1)}% achieved</span>
                                                 <span>
-                                                    {formatCurrency(Math.max(0, item.targetAmount - item.achieved))} remaining
+                                                    {formatCurrency(Math.max(0, item.targetAmount - item.achieved), currencyCode)} remaining
                                                 </span>
                                             </div>
-                                            {!item.isGeneral && typeof item.categoryId === "number" ? (
+                                            {!item.isGeneral && typeof item.brandId === "number" ? (
                                                 <div className="flex flex-wrap items-center gap-2 pt-1">
                                                     <button
                                                         type="button"
-                                                        onClick={() => void handleSendCategoryMarketingRequest(item)}
+                                                        onClick={() => void handleSendBrandMarketingRequest(item)}
                                                         disabled={
-                                                            sendingCategoryEmailId === item.categoryId ||
-                                                            Boolean(marketingEmailsSentAt[String(item.categoryId)])
+                                                            sendingBrandEmailId === item.brandId ||
+                                                            Boolean(marketingEmailsSentAt[String(item.brandId)])
                                                         }
                                                         className="inline-flex items-center gap-1.5 rounded-lg border border-(--line) bg-white px-3 py-1.5 text-xs font-medium text-(--ink) hover:bg-(--chip) disabled:cursor-not-allowed disabled:opacity-70"
                                                     >
                                                         <Mail className="h-3.5 w-3.5" aria-hidden="true" />
-                                                        {sendingCategoryEmailId === item.categoryId
+                                                        {sendingBrandEmailId === item.brandId
                                                             ? "Sending..."
-                                                            : marketingEmailsSentAt[String(item.categoryId)]
+                                                            : marketingEmailsSentAt[String(item.brandId)]
                                                                 ? "Email Sent"
                                                                 : "Email Marketing"}
                                                     </button>
                                                     <Link
-                                                        href={`/sales-target-details?salespersonId=${report.salesperson.id}&year=${report.year}&month=${report.month}&categoryId=${item.categoryId}`}
+                                                        href={`/sales-target-details?salespersonId=${report.salesperson.id}&year=${report.year}&month=${report.month}&brandId=${item.brandId}`}
                                                         className="inline-flex items-center gap-1.5 rounded-lg border border-(--line) bg-white px-3 py-1.5 text-xs font-medium text-(--ink) hover:bg-(--chip)"
                                                     >
                                                         Details
@@ -1013,11 +1067,11 @@ export default function SalesTargetsPage() {
                                                     <button
                                                         type="button"
                                                         onClick={() => void toggleGeneralBreakdown()}
-                                                        disabled={categoriesLoading}
+                                                        disabled={brandsLoading}
                                                         className="inline-flex items-center gap-1.5 rounded-lg border border-(--line) bg-white px-3 py-1.5 text-xs font-medium text-(--ink) hover:bg-(--chip) disabled:cursor-not-allowed disabled:opacity-70"
                                                     >
                                                         <ListTree className="h-3.5 w-3.5" aria-hidden="true" />
-                                                        {categoriesLoading
+                                                        {brandsLoading
                                                             ? "Loading..."
                                                             : generalBreakdownOpen
                                                                 ? "Hide Breakdown"
@@ -1027,32 +1081,32 @@ export default function SalesTargetsPage() {
                                                     {generalBreakdownOpen && generalBreakdown ? (
                                                         <div className="mt-3 rounded-lg border border-(--line) bg-white p-3">
                                                             <p className="text-xs font-medium text-(--ink)">
-                                                                Sales by category
+                                                                Sales by brand
                                                             </p>
                                                             <p className="mt-0.5 text-xs text-(--ink-soft)">
-                                                                Categories counted toward the General target, excluding those with their own target.
+                                                                Brands counted toward the General target, excluding those with their own target.
                                                             </p>
 
                                                             {generalBreakdown.rows.length === 0 ? (
                                                                 <p className="mt-3 text-xs text-(--ink-soft)">
-                                                                    No category sales found for the General target this period.
+                                                                    No brand sales found for the General target this period.
                                                                 </p>
                                                             ) : (
                                                                 <div className="mt-3 max-h-72 overflow-auto">
                                                                     <table className="min-w-full divide-y divide-(--line) text-xs">
                                                                         <thead className="sticky top-0 bg-(--chip)">
                                                                             <tr>
-                                                                                <th className="px-3 py-2 text-left font-medium">Category</th>
+                                                                                <th className="px-3 py-2 text-left font-medium">Brand</th>
                                                                                 <th className="px-3 py-2 text-right font-medium">Sales</th>
                                                                                 <th className="px-3 py-2 text-right font-medium">Share</th>
                                                                             </tr>
                                                                         </thead>
                                                                         <tbody className="divide-y divide-(--line)">
                                                                             {generalBreakdown.rows.map((row) => (
-                                                                                <tr key={row.categoryId ?? "uncategorized"}>
-                                                                                    <td className="px-3 py-2">{row.categoryName}</td>
+                                                                                <tr key={row.brandId ?? "no-brand"}>
+                                                                                    <td className="px-3 py-2">{row.brandName}</td>
                                                                                     <td className="px-3 py-2 text-right">
-                                                                                        {formatCurrency(row.amount)}
+                                                                                        {formatCurrency(row.amount, currencyCode)}
                                                                                     </td>
                                                                                     <td className="px-3 py-2 text-right text-(--ink-soft)">
                                                                                         {generalBreakdown.total > 0
@@ -1066,7 +1120,7 @@ export default function SalesTargetsPage() {
                                                                             <tr className="border-t border-(--line) font-medium">
                                                                                 <td className="px-3 py-2">Total</td>
                                                                                 <td className="px-3 py-2 text-right">
-                                                                                    {formatCurrency(generalBreakdown.total)}
+                                                                                    {formatCurrency(generalBreakdown.total, currencyCode)}
                                                                                 </td>
                                                                                 <td className="px-3 py-2" />
                                                                             </tr>
@@ -1086,41 +1140,41 @@ export default function SalesTargetsPage() {
 
                         {setTargetOpen ? (
                             <div className="mt-4 space-y-4">
-                                {categoriesError ? <p className="text-sm text-red-600">{categoriesError}</p> : null}
+                                {brandsError ? <p className="text-sm text-red-600">{brandsError}</p> : null}
 
                                 {targetEntries.map((entry, index) => {
                                     const selectedValues = new Set(
                                         targetEntries
-                                            .map((item, itemIndex) => (itemIndex === index ? "" : item.categoryValue))
+                                            .map((item, itemIndex) => (itemIndex === index ? "" : item.brandValue))
                                             .filter(Boolean)
                                     );
 
                                     return (
                                         <div key={`target-entry-${index}`} className="grid gap-3 rounded-xl border border-(--line) bg-white p-4 md:grid-cols-[1.2fr_1fr_auto] md:items-end">
                                             <label className="block">
-                                                <span className="mb-2 block text-sm font-medium">Product Category</span>
+                                                <span className="mb-2 block text-sm font-medium">Product Brand</span>
                                                 <select
-                                                    value={entry.categoryValue}
+                                                    value={entry.brandValue}
                                                     onChange={(event) =>
-                                                        updateTargetRow(index, { categoryValue: event.target.value })
+                                                        updateTargetRow(index, { brandValue: event.target.value })
                                                     }
                                                     className="w-full rounded-xl border border-(--line) bg-white px-4 py-2.5"
-                                                    disabled={categoriesLoading || Boolean(categoriesError)}
+                                                    disabled={brandsLoading || Boolean(brandsError)}
                                                     required
                                                 >
                                                     <option
-                                                        value={GENERAL_CATEGORY_VALUE}
-                                                        disabled={selectedValues.has(GENERAL_CATEGORY_VALUE)}
+                                                        value={GENERAL_BRAND_VALUE}
+                                                        disabled={selectedValues.has(GENERAL_BRAND_VALUE)}
                                                     >
                                                         General
                                                     </option>
-                                                    {categories.map((category) => (
+                                                    {brands.map((brand) => (
                                                         <option
-                                                            key={category.id}
-                                                            value={category.id}
-                                                            disabled={selectedValues.has(String(category.id))}
+                                                            key={brand.id}
+                                                            value={brand.id}
+                                                            disabled={selectedValues.has(String(brand.id))}
                                                         >
-                                                            {category.name}
+                                                            {brand.name}
                                                         </option>
                                                     ))}
                                                 </select>
@@ -1194,6 +1248,7 @@ export default function SalesTargetsPage() {
                                 <ProgressBar
                                     total={creditNotesApplied ? effectiveSales : report.totalInvoiced}
                                     target={totalTargetAmount}
+                                    currencyCode={currencyCode}
                                 />
                             </div>
                         </div>

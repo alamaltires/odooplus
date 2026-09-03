@@ -42,13 +42,13 @@ export default function LoginPage() {
                 <div className="flex items-start justify-between gap-4">
                     <div>
                         <span className="inline-flex rounded-full bg-[rgba(74,184,72,0.12)] px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.12em] text-(--accent)">
-                            DME Sales Hub
+                            Odoo++ Sales Hub
                         </span>
                         <p className="mt-4 font-display text-3xl text-(--brand)">Welcome back</p>
                         <p className="mt-2 text-sm text-(--ink-soft)">Sign in to continue to your Odoo operations workspace.</p>
                     </div>
-                    <div className="rounded-2xl border border-[rgba(32,98,176,0.14)] bg-white px-3 py-2 shadow-[0_10px_24px_rgba(32,98,176,0.08)]">
-                        <Image src="/applogo.png" alt="DME Sales Hub logo" width={116} height={28} className="h-7 w-auto" priority />
+                    <div className="overflow-hidden rounded-2xl shadow-[0_10px_24px_rgba(109,40,217,0.18)]">
+                        <Image src="/logo-odoopp.svg" alt="Odoo++ logo" width={44} height={44} className="h-11 w-11" priority unoptimized />
                     </div>
                 </div>
 

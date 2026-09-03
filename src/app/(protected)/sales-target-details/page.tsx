@@ -29,8 +29,8 @@ function formatNumber(value: number) {
     });
 }
 
-function formatCurrency(value: number) {
-    return `AED ${formatNumber(value)}`;
+function formatCurrency(value: number, currencyCode = "AED") {
+    return `${currencyCode} ${formatNumber(value)}`;
 }
 
 function formatDateTime(value: string) {
@@ -67,10 +67,12 @@ export default function SalesTargetDetailsPage() {
         direction: "desc",
     });
 
+    const currencyCode = details?.primaryCurrencyCode || "AED";
+
     const salespersonId = Number(searchParams.get("salespersonId") ?? 0);
     const year = Number(searchParams.get("year") ?? 0);
     const month = Number(searchParams.get("month") ?? 0);
-    const categoryId = Number(searchParams.get("categoryId") ?? 0);
+    const brandId = Number(searchParams.get("brandId") ?? 0);
 
     const monthLabel = useMemo(
         () => months.find((item) => item.value === month)?.label ?? String(month),
@@ -156,7 +158,7 @@ export default function SalesTargetDetailsPage() {
 
     useEffect(() => {
         async function load() {
-            if (!salespersonId || !year || !month || !categoryId) {
+            if (!salespersonId || !year || !month || !brandId) {
                 setError("Missing required details parameters.");
                 setLoading(false);
                 return;
@@ -170,7 +172,7 @@ export default function SalesTargetDetailsPage() {
                     salespersonId,
                     year,
                     month,
-                    categoryId,
+                    brandId,
                 });
                 setDetails(data);
             } catch (loadError) {
@@ -181,7 +183,7 @@ export default function SalesTargetDetailsPage() {
         }
 
         void load();
-    }, [categoryId, month, salespersonId, year]);
+    }, [brandId, month, salespersonId, year]);
 
     return (
         <section>
@@ -189,7 +191,7 @@ export default function SalesTargetDetailsPage() {
                 <div>
                     <h1 className="font-display text-3xl">Sales Target Details</h1>
                     <p className="mt-1 text-sm text-(--ink-soft)">
-                        Detailed product and customer view for the selected category target.
+                        Detailed product and customer view for the selected brand target.
                     </p>
                 </div>
                 <Link
@@ -222,26 +224,66 @@ export default function SalesTargetDetailsPage() {
                             <p className="mt-1 text-sm text-(--ink-soft)">{monthLabel} {year}</p>
                         </article>
                         <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
-                            <p className="text-sm text-(--ink-soft)">Category</p>
-                            <p className="mt-2 text-xl font-semibold text-(--ink)">{details.categoryName}</p>
-                            <p className="mt-1 text-sm text-(--ink-soft)">ID: {details.categoryId}</p>
+                            <p className="text-sm text-(--ink-soft)">Brand</p>
+                            <p className="mt-2 text-xl font-semibold text-(--ink)">{details.brandName}</p>
+                            <p className="mt-1 text-sm text-(--ink-soft)">ID: {details.brandId}</p>
                         </article>
                         <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
-                            <p className="text-sm text-(--ink-soft)">Category Sales</p>
-                            <p className="mt-2 text-xl font-semibold text-(--ink)">{formatCurrency(details.totalCategorySales)}</p>
+                            <p className="text-sm text-(--ink-soft)">Brand Sales ({currencyCode})</p>
+                            <p className="mt-2 text-xl font-semibold text-(--ink)">{formatCurrency(details.totalBrandSales, currencyCode)}</p>
                             <p className="mt-1 text-sm text-(--ink-soft)">{details.products.length} products, {details.servedCustomers.length} customers</p>
                         </article>
                     </div>
 
+                    {details.otherCurrencyTotals.length > 0 ? (
+                        <div className="rounded-2xl border border-(--line) bg-(--card) p-5">
+                            <h2 className="font-display text-2xl">Sales By Currency</h2>
+                            <p className="mt-1 text-sm text-(--ink-soft)">
+                                Every currency found in this salesperson&apos;s confirmed sales orders for this brand and period.
+                                Only {currencyCode} counts toward the numbers above.
+                            </p>
+                            <div className="mt-4 overflow-x-auto rounded-xl border border-(--line)">
+                                <table className="min-w-full divide-y divide-(--line) text-sm">
+                                    <thead className="bg-(--chip) text-(--ink-soft)">
+                                        <tr>
+                                            <th className="px-4 py-2.5 text-left font-medium">Currency</th>
+                                            <th className="px-4 py-2.5 text-right font-medium">Total Sales</th>
+                                            <th className="px-4 py-2.5 text-right font-medium">Orders</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-(--line) bg-white">
+                                        <tr>
+                                            <td className="px-4 py-2.5 font-medium">
+                                                {currencyCode}
+                                                <span className="ml-2 rounded-full bg-(--chip) px-2 py-0.5 text-xs font-normal text-(--ink-soft)">
+                                                    Target Currency
+                                                </span>
+                                            </td>
+                                            <td className="px-4 py-2.5 text-right">{formatCurrency(details.totalBrandSales, currencyCode)}</td>
+                                            <td className="px-4 py-2.5 text-right text-(--ink-soft)">{details.primaryOrderCount}</td>
+                                        </tr>
+                                        {details.otherCurrencyTotals.map((total) => (
+                                            <tr key={total.currencyCode}>
+                                                <td className="px-4 py-2.5 font-medium">{total.currencyCode}</td>
+                                                <td className="px-4 py-2.5 text-right">{formatCurrency(total.total, total.currencyCode)}</td>
+                                                <td className="px-4 py-2.5 text-right text-(--ink-soft)">{total.orderCount}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    ) : null}
+
                     <div className="rounded-2xl border border-(--line) bg-(--card) p-5">
                         <div className="mb-4 flex items-center gap-2">
                             <Package className="h-5 w-5 text-(--brand)" aria-hidden="true" />
-                            <h2 className="font-display text-2xl">Products Sold In Category</h2>
+                            <h2 className="font-display text-2xl">Products Sold In Brand</h2>
                         </div>
                         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                             <div>
                                 <p className="text-sm text-(--ink-soft)">Total Sales</p>
-                                <p className="text-lg font-semibold text-(--ink)">{formatCurrency(productsTotalSales)}</p>
+                                <p className="text-lg font-semibold text-(--ink)">{formatCurrency(productsTotalSales, currencyCode)}</p>
                             </div>
                             <label className="w-full sm:w-auto">
                                 <span className="sr-only">Search products</span>
@@ -255,7 +297,7 @@ export default function SalesTargetDetailsPage() {
                             </label>
                         </div>
                         {details.products.length === 0 ? (
-                            <p className="text-sm text-(--ink-soft)">No sold products found in this category for the selected period.</p>
+                            <p className="text-sm text-(--ink-soft)">No sold products found in this brand for the selected period.</p>
                         ) : filteredSortedProducts.length === 0 ? (
                             <p className="text-sm text-(--ink-soft)">No products match your search.</p>
                         ) : (
@@ -291,7 +333,7 @@ export default function SalesTargetDetailsPage() {
                                                 <td className="px-4 py-3">{product.productName}</td>
                                                 <td className="px-4 py-3 text-right">{formatNumber(product.quantitySold)}</td>
                                                 <td className="px-4 py-3 text-right">{product.orderCount}</td>
-                                                <td className="px-4 py-3 text-right">{formatCurrency(product.totalSales)}</td>
+                                                <td className="px-4 py-3 text-right">{formatCurrency(product.totalSales, currencyCode)}</td>
                                             </tr>
                                         ))}
                                     </tbody>
@@ -308,7 +350,7 @@ export default function SalesTargetDetailsPage() {
                         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                             <div>
                                 <p className="text-sm text-(--ink-soft)">Total Sales</p>
-                                <p className="text-lg font-semibold text-(--ink)">{formatCurrency(customersTotalSales)}</p>
+                                <p className="text-lg font-semibold text-(--ink)">{formatCurrency(customersTotalSales, currencyCode)}</p>
                             </div>
                             <label className="w-full sm:w-auto">
                                 <span className="sr-only">Search customers</span>
@@ -322,7 +364,7 @@ export default function SalesTargetDetailsPage() {
                             </label>
                         </div>
                         {details.servedCustomers.length === 0 ? (
-                            <p className="text-sm text-(--ink-soft)">No served customers found in this category for the selected period.</p>
+                            <p className="text-sm text-(--ink-soft)">No served customers found in this brand for the selected period.</p>
                         ) : filteredSortedCustomers.length === 0 ? (
                             <p className="text-sm text-(--ink-soft)">No customers match your search.</p>
                         ) : (
@@ -363,7 +405,7 @@ export default function SalesTargetDetailsPage() {
                                                     <div>{customer.city || "-"}</div>
                                                 </td>
                                                 <td className="px-4 py-3 text-right">{customer.orderCount}</td>
-                                                <td className="px-4 py-3 text-right">{formatCurrency(customer.totalSales)}</td>
+                                                <td className="px-4 py-3 text-right">{formatCurrency(customer.totalSales, currencyCode)}</td>
                                                 <td className="px-4 py-3">{formatDateTime(customer.lastSaleDate)}</td>
                                             </tr>
                                         ))}

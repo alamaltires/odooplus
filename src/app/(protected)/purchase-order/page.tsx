@@ -4,12 +4,17 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Download, FileSpreadsheet, Search } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
-import { getProductCategories, getPurchaseOrderReport } from "@/lib/client-odoo";
+import { getProductBrands, getProductCategories, getPurchaseOrderReport } from "@/lib/client-odoo";
 
 type Category = {
     id: number;
     name: string;
     model: "product.public.category" | "product.category";
+};
+
+type Brand = {
+    id: number;
+    name: string;
 };
 
 type ReportRow = {
@@ -73,6 +78,7 @@ function sanitizeFileName(value: string) {
 export default function PurchaseOrderPage() {
     const { user } = useAuth();
     const hasLoadedCategoriesRef = useRef(false);
+    const hasLoadedBrandsRef = useRef(false);
 
     const [categories, setCategories] = useState<Category[]>([]);
     const [categoriesLoading, setCategoriesLoading] = useState(true);
@@ -81,6 +87,14 @@ export default function PurchaseOrderPage() {
     const [categoryQuery, setCategoryQuery] = useState("");
     const [categoryMenuOpen, setCategoryMenuOpen] = useState(false);
     const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
+
+    const [brands, setBrands] = useState<Brand[]>([]);
+    const [brandsLoading, setBrandsLoading] = useState(true);
+    const [brandsError, setBrandsError] = useState<string | null>(null);
+
+    const [brandQuery, setBrandQuery] = useState("");
+    const [brandMenuOpen, setBrandMenuOpen] = useState(false);
+    const [selectedBrand, setSelectedBrand] = useState<Brand | null>(null);
 
     const [startDate, setStartDate] = useState(() => {
         const now = new Date();
@@ -131,6 +145,38 @@ export default function PurchaseOrderPage() {
         void loadCategories();
     }, [user]);
 
+    useEffect(() => {
+        async function loadBrands() {
+            if (!user) {
+                hasLoadedBrandsRef.current = false;
+                setBrandsLoading(false);
+                return;
+            }
+
+            if (hasLoadedBrandsRef.current) {
+                setBrandsLoading(false);
+                return;
+            }
+
+            hasLoadedBrandsRef.current = true;
+
+            try {
+                const data = await getProductBrands();
+                setBrands(data.brands);
+            } catch (loadError) {
+                setBrandsError(
+                    loadError instanceof Error
+                        ? loadError.message
+                        : "Failed to load product brands."
+                );
+            } finally {
+                setBrandsLoading(false);
+            }
+        }
+
+        void loadBrands();
+    }, [user]);
+
     const filteredCategories = useMemo(() => {
         if (!categoryQuery.trim()) {
             return categories;
@@ -139,6 +185,15 @@ export default function PurchaseOrderPage() {
         const query = categoryQuery.toLowerCase();
         return categories.filter((category) => category.name.toLowerCase().includes(query));
     }, [categoryQuery, categories]);
+
+    const filteredBrands = useMemo(() => {
+        if (!brandQuery.trim()) {
+            return brands;
+        }
+
+        const query = brandQuery.toLowerCase();
+        return brands.filter((brand) => brand.name.toLowerCase().includes(query));
+    }, [brandQuery, brands]);
 
     const displayRows = useMemo<DisplayReportRow[]>(() => {
         return rows.map((row) => {
@@ -175,13 +230,15 @@ export default function PurchaseOrderPage() {
     }, [filteredDisplayRows, sortColumn, sortDirection]);
 
     const exportFileName = useMemo(() => {
-        const categoryName = (selectedCategory?.name ?? categoryQuery) || "category";
-        return `purchase-report-${sanitizeFileName(categoryName)}-${startDate}-to-${endDate}`;
-    }, [categoryQuery, endDate, selectedCategory?.name, startDate]);
+        const categoryName = selectedCategory?.name ?? categoryQuery;
+        const brandName = selectedBrand?.name ?? brandQuery;
+        const filterName = [categoryName, brandName].filter(Boolean).join("-") || "category";
+        return `purchase-report-${sanitizeFileName(filterName)}-${startDate}-to-${endDate}`;
+    }, [brandQuery, categoryQuery, endDate, selectedBrand?.name, selectedCategory?.name, startDate]);
 
     async function handleGenerateReport(event: FormEvent) {
         event.preventDefault();
-        if (!user || !selectedCategory) {
+        if (!user || (!selectedCategory && !selectedBrand)) {
             return;
         }
 
@@ -192,8 +249,9 @@ export default function PurchaseOrderPage() {
 
         try {
             const data = await getPurchaseOrderReport({
-                categoryId: selectedCategory.id,
-                categoryModel: selectedCategory.model,
+                categoryId: selectedCategory?.id,
+                categoryModel: selectedCategory?.model,
+                brandId: selectedBrand?.id,
                 startDate,
                 endDate,
                 stockDurationMonths,
@@ -331,7 +389,6 @@ export default function PurchaseOrderPage() {
                                 placeholder={categoriesLoading ? "Loading categories..." : "Search categories"}
                                 className="w-full rounded-xl border border-(--line) bg-white py-2 pl-10 pr-3"
                                 disabled={categoriesLoading || Boolean(categoriesError)}
-                                required
                             />
                         </div>
 
@@ -359,6 +416,51 @@ export default function PurchaseOrderPage() {
                             <p className="mt-2 text-xs text-(--ink-soft)">
                                 Selected category source: {selectedCategory.model}
                             </p>
+                        ) : null}
+                    </label>
+
+                    <label className="relative block">
+                        <span className="mb-2 block text-sm font-medium">Brand Selector</span>
+                        <div className="relative">
+                            <Search
+                                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-(--ink-soft)"
+                                aria-hidden="true"
+                            />
+                            <input
+                                value={brandQuery}
+                                onChange={(event) => {
+                                    setBrandQuery(event.target.value);
+                                    setBrandMenuOpen(true);
+                                    setSelectedBrand(null);
+                                }}
+                                onFocus={() => setBrandMenuOpen(true)}
+                                onBlur={() => {
+                                    window.setTimeout(() => setBrandMenuOpen(false), 120);
+                                }}
+                                placeholder={brandsLoading ? "Loading brands..." : "Search brands"}
+                                className="w-full rounded-xl border border-(--line) bg-white py-2 pl-10 pr-3"
+                                disabled={brandsLoading || Boolean(brandsError)}
+                            />
+                        </div>
+
+                        {brandMenuOpen && filteredBrands.length > 0 ? (
+                            <ul className="absolute z-20 mt-2 max-h-64 w-full overflow-auto rounded-xl border border-(--line) bg-white p-1 shadow-lg">
+                                {filteredBrands.map((brand) => (
+                                    <li key={brand.id}>
+                                        <button
+                                            type="button"
+                                            onMouseDown={() => {
+                                                setSelectedBrand(brand);
+                                                setBrandQuery(brand.name);
+                                                setBrandMenuOpen(false);
+                                            }}
+                                            className="w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-(--chip)"
+                                        >
+                                            {brand.name}
+                                        </button>
+                                    </li>
+                                ))}
+                            </ul>
                         ) : null}
                     </label>
 
@@ -405,7 +507,12 @@ export default function PurchaseOrderPage() {
                 <div className="mt-5 flex flex-wrap items-center gap-3">
                     <button
                         type="submit"
-                        disabled={reportLoading || categoriesLoading || !selectedCategory}
+                        disabled={
+                            reportLoading ||
+                            categoriesLoading ||
+                            brandsLoading ||
+                            (!selectedCategory && !selectedBrand)
+                        }
                         className="rounded-xl bg-(--brand) px-5 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
                     >
                         {reportLoading ? "Generating..." : "Generate Report"}
@@ -418,7 +525,14 @@ export default function PurchaseOrderPage() {
                     ) : null}
                 </div>
 
+                {!selectedCategory && !selectedBrand ? (
+                    <p className="mt-4 text-xs text-(--ink-soft)">
+                        Select a category, a brand, or both to generate a report.
+                    </p>
+                ) : null}
+
                 {categoriesError ? <p className="mt-4 text-sm text-red-600">{categoriesError}</p> : null}
+                {brandsError ? <p className="mt-4 text-sm text-red-600">{brandsError}</p> : null}
                 {reportError ? <p className="mt-4 text-sm text-red-600">{reportError}</p> : null}
             </form>
 

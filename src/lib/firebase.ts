@@ -3,13 +3,13 @@ import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
-    apiKey: "AIzaSyB-ewmplkeMfwcN94PoC0KbIA20ISjNxdI",
-    authDomain: "odooplus-b409d.firebaseapp.com",
-    projectId: "odooplus-b409d",
-    storageBucket: "odooplus-b409d.firebasestorage.app",
-    messagingSenderId: "34174854961",
-    appId: "1:34174854961:web:31015f14ff2240c606b210",
-    measurementId: "G-7M8V24RRQ7",
+    apiKey: "AIzaSyAvt6T351QarPsJOhWl_gCOeom6kXvmm50",
+    authDomain: "odooplus-672bc.firebaseapp.com",
+    projectId: "odooplus-672bc",
+    storageBucket: "odooplus-672bc.firebasestorage.app",
+    messagingSenderId: "805058153642",
+    appId: "1:805058153642:web:f3ef867a8658ccc20914d3",
+    measurementId: "G-GXG3HB4HG2",
 };
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);

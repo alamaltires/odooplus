@@ -28,8 +28,8 @@ type SummaryRow = {
     salespersonName: string;
     year: number;
     month: number;
-    categoryId: number | null;
-    categoryName: string;
+    brandId: number | null;
+    brandName: string;
     targetAmount: number;
     isGeneral: boolean;
 };
@@ -50,13 +50,13 @@ function buildRows(records: SalesTargetRecord[]) {
 
         for (const target of targets) {
             rows.push({
-                id: `${record.id}-${String(target.categoryId ?? "general")}`,
+                id: `${record.id}-${String(target.brandId ?? "general")}`,
                 salespersonId: record.salespersonId,
                 salespersonName: record.salespersonName,
                 year: record.year,
                 month: record.month,
-                categoryId: target.categoryId ?? null,
-                categoryName: target.categoryName || "General",
+                brandId: target.brandId ?? null,
+                brandName: target.brandName || "General",
                 targetAmount: Number(target.targetAmount ?? 0),
                 isGeneral: Boolean(target.isGeneral),
             });
@@ -108,9 +108,9 @@ export default function SalesTargetsSummaryPage() {
         return rows.filter((row) => {
             const haystack = [
                 row.salespersonName,
-                row.categoryName,
+                row.brandName,
                 String(row.salespersonId),
-                String(row.categoryId ?? ""),
+                String(row.brandId ?? ""),
                 String(row.month),
                 String(row.year),
             ]
@@ -136,7 +136,7 @@ export default function SalesTargetsSummaryPage() {
                 return salespersonCompare;
             }
 
-            return a.categoryName.localeCompare(b.categoryName);
+            return a.brandName.localeCompare(b.brandName);
         });
     }, [filteredRows]);
 
@@ -149,8 +149,8 @@ export default function SalesTargetsSummaryPage() {
         return new Set(filteredRows.map((row) => row.salespersonId)).size;
     }, [filteredRows]);
 
-    const totalCategories = useMemo(() => {
-        return new Set(filteredRows.map((row) => `${String(row.categoryId ?? "general")}:${row.categoryName}`)).size;
+    const totalBrands = useMemo(() => {
+        return new Set(filteredRows.map((row) => `${String(row.brandId ?? "general")}:${row.brandName}`)).size;
     }, [filteredRows]);
 
     return (
@@ -166,7 +166,7 @@ export default function SalesTargetsSummaryPage() {
                     </Link>
                     <h1 className="mt-3 font-display text-3xl">Sales Targets Summary</h1>
                     <p className="mt-1 text-sm text-(--ink-soft)">
-                        Overview of all category targets assigned to salespeople, with summed targets.
+                        Overview of all brand targets assigned to salespeople, with summed targets.
                     </p>
                 </div>
                 <Target className="h-8 w-8 text-(--brand)" aria-hidden="true" />
@@ -182,8 +182,8 @@ export default function SalesTargetsSummaryPage() {
                     <p className="mt-2 font-display text-3xl">{totalSalespeople}</p>
                 </article>
                 <article className="rounded-2xl border border-(--line) bg-(--card) p-4">
-                    <p className="text-sm text-(--ink-soft)">Target Categories</p>
-                    <p className="mt-2 font-display text-3xl">{totalCategories}</p>
+                    <p className="text-sm text-(--ink-soft)">Target Brands</p>
+                    <p className="mt-2 font-display text-3xl">{totalBrands}</p>
                 </article>
             </div>
 
@@ -197,7 +197,7 @@ export default function SalesTargetsSummaryPage() {
                         type="search"
                         value={search}
                         onChange={(event) => setSearch(event.target.value)}
-                        placeholder="Search salesperson, category, month, year, or ID"
+                        placeholder="Search salesperson, brand, month, year, or ID"
                         className="w-full rounded-xl border border-(--line) bg-white py-2 pl-10 pr-4 text-sm"
                     />
                 </label>
@@ -210,7 +210,7 @@ export default function SalesTargetsSummaryPage() {
             {loading ? <p className="mt-4 text-sm">Loading sales targets summary...</p> : null}
 
             {!loading && sortedRows.length === 0 ? (
-                <p className="mt-4 text-sm text-(--ink-soft)">No saved category targets found.</p>
+                <p className="mt-4 text-sm text-(--ink-soft)">No saved brand targets found.</p>
             ) : null}
 
             {!loading && sortedRows.length > 0 ? (
@@ -220,8 +220,8 @@ export default function SalesTargetsSummaryPage() {
                             <tr>
                                 <th className="px-4 py-3 font-medium">Salesperson</th>
                                 <th className="px-4 py-3 font-medium">Period</th>
-                                <th className="px-4 py-3 font-medium">Category</th>
-                                <th className="px-4 py-3 font-medium">Category ID</th>
+                                <th className="px-4 py-3 font-medium">Brand</th>
+                                <th className="px-4 py-3 font-medium">Brand ID</th>
                                 <th className="px-4 py-3 font-medium">Target Type</th>
                                 <th className="px-4 py-3 font-medium">Target Amount</th>
                             </tr>
@@ -231,9 +231,9 @@ export default function SalesTargetsSummaryPage() {
                                 <tr key={row.id} className="border-t border-(--line)">
                                     <td className="px-4 py-3">{row.salespersonName}</td>
                                     <td className="px-4 py-3">{monthLabel(row.month)} {row.year}</td>
-                                    <td className="px-4 py-3">{row.categoryName}</td>
-                                    <td className="px-4 py-3">{row.categoryId ?? "-"}</td>
-                                    <td className="px-4 py-3">{row.isGeneral ? "General" : "Category"}</td>
+                                    <td className="px-4 py-3">{row.brandName}</td>
+                                    <td className="px-4 py-3">{row.brandId ?? "-"}</td>
+                                    <td className="px-4 py-3">{row.isGeneral ? "General" : "Brand"}</td>
                                     <td className="px-4 py-3 font-medium text-(--ink)">{formatCurrency(row.targetAmount)}</td>
                                 </tr>
                             ))}

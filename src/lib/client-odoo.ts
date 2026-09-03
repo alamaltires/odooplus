@@ -137,10 +137,20 @@ export function getProductCategories() {
     }>("/api/odoo/product-categories", {});
 }
 
+export function getProductBrands() {
+    return post<{
+        brands: Array<{
+            id: number;
+            name: string;
+        }>;
+    }>("/api/odoo/product-brands", {});
+}
+
 export function getPurchaseOrderReport(
     input: {
-        categoryId: number;
-        categoryModel: "product.public.category" | "product.category";
+        categoryId?: number | null;
+        categoryModel?: "product.public.category" | "product.category";
+        brandId?: number | null;
         startDate: string;
         endDate: string;
         stockDurationMonths: number;
@@ -158,6 +168,71 @@ export function getPurchaseOrderReport(
             pendingFromBackorders: number;
         }>;
     }>("/api/odoo/purchase-order-report", input);
+}
+
+export function searchPurchaseOrders(input: { query: string; limit?: number; offset?: number }) {
+    return post<{
+        purchaseOrders: Array<{
+            id: number;
+            name: string;
+            vendorName: string;
+            dateOrder: string;
+        }>;
+        totalCount: number;
+        limit: number;
+        offset: number;
+        hasMore: boolean;
+    }>("/api/odoo/purchase-orders", input);
+}
+
+export function getProductsPerformanceReport(input: {
+    purchaseOrderId?: number | null;
+    productId?: number | null;
+    brandId?: number | null;
+    categoryId?: number | null;
+    startDate: string;
+    endDate: string;
+}) {
+    return post<{
+        startDate: string;
+        endDate: string;
+        currencyCode: string;
+        matchedProductCount: number;
+        rows: Array<{
+            productId: number;
+            productName: string;
+            brandName: string;
+            categoryName: string;
+            lots: string[];
+            soldQty: number;
+            salesValue: number;
+            averageSellingPrice: number;
+            purchasedQty: number;
+            averagePurchasePrice: number;
+            totalStock: number;
+            stockByWarehouse: Array<{
+                warehouseId: number;
+                warehouseName: string;
+                quantity: number;
+            }>;
+        }>;
+        totals: {
+            soldQty: number;
+            salesValue: number;
+            purchasedQty: number;
+            totalStock: number;
+        };
+        unconvertedCurrencyCodes: string[];
+        purchaseOrderDetails: {
+            name: string;
+            vendorName: string;
+            vendorReference: string;
+            confirmationDate: string;
+            expectedArrival: string;
+            arrival: string;
+            deliverTo: string;
+        } | null;
+    }>("/api/odoo/products-performance", input);
 }
 
 export function getSalespeople() {
@@ -214,7 +289,7 @@ export function sendSalesTargetEmail(input: {
     totalInvoiced: number;
     totalTargetAmount: number;
     rows: Array<{
-        categoryName: string;
+        brandName: string;
         targetAmount: number;
         achieved: number;
         progress: number;
@@ -224,11 +299,11 @@ export function sendSalesTargetEmail(input: {
     return post<{ success: boolean }>("/api/odoo/sales-target-email", input);
 }
 
-export function sendSalesTargetCategoryMarketingEmail(input: {
+export function sendSalesTargetBrandMarketingEmail(input: {
     salespersonName: string;
     monthLabel: string;
     year: number;
-    categoryName: string;
+    brandName: string;
     targetAmount: number;
     achieved: number;
     remaining: number;
@@ -257,7 +332,7 @@ export function getSalesTargetDetails(input: {
     salespersonId: number;
     year: number;
     month: number;
-    categoryId: number;
+    brandId: number;
 }) {
     return post<OdooSalesTargetDetailsReport>("/api/odoo/sales-target-details", input);
 }

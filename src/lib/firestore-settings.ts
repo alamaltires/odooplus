@@ -106,12 +106,12 @@ export async function saveSalesTarget(
     await setDoc(ref, payload, { merge: true });
 }
 
-export async function markSalesTargetCategoryMarketingEmailSent(
+export async function markSalesTargetBrandMarketingEmailSent(
     input: {
         salespersonId: number;
         year: number;
         month: number;
-        categoryId: number;
+        brandId: number;
     }
 ) {
     const docId = getSalesTargetDocId(input.salespersonId, input.year, input.month);
@@ -124,7 +124,7 @@ export async function markSalesTargetCategoryMarketingEmailSent(
             year: input.year,
             month: input.month,
             marketingEmailsSentAt: {
-                [String(input.categoryId)]: new Date().toISOString(),
+                [String(input.brandId)]: new Date().toISOString(),
             },
             updatedAt: new Date().toISOString(),
         },
@@ -156,8 +156,8 @@ export async function getSalesTarget(
             : Number.isFinite(data.targetAmount)
                 ? [
                     {
-                        categoryId: null,
-                        categoryName: "General",
+                        brandId: null,
+                        brandName: "General",
                         targetAmount: Number(data.targetAmount),
                         isGeneral: true,
                     },
@@ -188,8 +188,8 @@ export async function getAllSalesTargets(): Promise<SalesTargetRecord[]> {
                 : Number.isFinite(data.targetAmount)
                     ? [
                         {
-                            categoryId: null,
-                            categoryName: "General",
+                            brandId: null,
+                            brandName: "General",
                             targetAmount: Number(data.targetAmount),
                             isGeneral: true,
                         },

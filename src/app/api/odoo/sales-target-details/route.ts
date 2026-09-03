@@ -9,14 +9,14 @@ export async function POST(request: Request) {
             salespersonId?: number;
             year?: number;
             month?: number;
-            categoryId?: number;
+            brandId?: number;
         };
 
         const data = await getSalesTargetDetails(credentials, {
             salespersonId: Number(body.salespersonId),
             year: Number(body.year),
             month: Number(body.month),
-            categoryId: Number(body.categoryId),
+            brandId: Number(body.brandId),
         });
 
         return NextResponse.json(data);

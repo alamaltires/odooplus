@@ -171,6 +171,14 @@ export type OdooCustomerReport = {
     topBrands: OdooCustomerBrandSummary[];
 };
 
+export type OdooCurrencyTotal = {
+    currencyId: number;
+    currencyCode: string;
+    total: number;
+    invoiceCount: number;
+    includedInTotal: boolean;
+};
+
 export type OdooSalespersonMonthlyInvoices = {
     salesperson: OdooSalesperson;
     year: number;
@@ -178,15 +186,16 @@ export type OdooSalespersonMonthlyInvoices = {
     totalInvoiced: number;
     creditNoteTotal: number;
     invoiceCount: number;
-    categoryTotals: Array<{
-        categoryId: number;
+    primaryCurrencyCode: string;
+    currencyTotals: OdooCurrencyTotal[];
+    creditNoteCurrencyTotals: OdooCurrencyTotal[];
+    brandTotals: Array<{
+        brandId: number;
         totalInvoiced: number;
-        ancestorCategoryIds: number[];
     }>;
-    creditNoteCategoryTotals: Array<{
-        categoryId: number;
+    creditNoteBrandTotals: Array<{
+        brandId: number;
         totalInvoiced: number;
-        ancestorCategoryIds: number[];
     }>;
     debug?: {
         invoiceCountFetched: number;
@@ -194,8 +203,8 @@ export type OdooSalespersonMonthlyInvoices = {
         invoiceLineCountFetched: number;
         invoiceLineCountQualified: number;
         productCountFetched: number;
-        productCountMappedToCategory: number;
-        categoryTotalCount: number;
+        productCountMappedToBrand: number;
+        brandTotalCount: number;
     };
 };
 
@@ -219,9 +228,9 @@ export type OdooDashboardStats = {
     salespersonDailyActivities: OdooSalespersonDailyActivity[];
 };
 
-export type SalesTargetCategory = {
-    categoryId: number | null;
-    categoryName: string;
+export type SalesTargetBrand = {
+    brandId: number | null;
+    brandName: string;
     targetAmount: number;
     isGeneral: boolean;
 };
@@ -232,13 +241,13 @@ export type SalesTargetRecord = {
     salespersonName: string;
     year: number;
     month: number;
-    targets: SalesTargetCategory[];
+    targets: SalesTargetBrand[];
     marketingEmailsSentAt?: Record<string, string>;
     targetAmount?: number;
     updatedAt: string;
 };
 
-export type OdooSalesTargetCategoryProduct = {
+export type OdooSalesTargetBrandProduct = {
     productId: number;
     productName: string;
     quantitySold: number;
@@ -246,7 +255,7 @@ export type OdooSalesTargetCategoryProduct = {
     orderCount: number;
 };
 
-export type OdooSalesTargetCategoryCustomer = OdooCustomerSummary & {
+export type OdooSalesTargetBrandCustomer = OdooCustomerSummary & {
     orderCount: number;
     totalSales: number;
     lastSaleDate: string;
@@ -256,11 +265,14 @@ export type OdooSalesTargetDetailsReport = {
     salesperson: OdooSalesperson;
     year: number;
     month: number;
-    categoryId: number;
-    categoryName: string;
+    brandId: number;
+    brandName: string;
     startDate: string;
     endDate: string;
-    totalCategorySales: number;
-    products: OdooSalesTargetCategoryProduct[];
-    servedCustomers: OdooSalesTargetCategoryCustomer[];
+    totalBrandSales: number;
+    primaryCurrencyCode: string;
+    primaryOrderCount: number;
+    otherCurrencyTotals: Array<{ currencyCode: string; total: number; orderCount: number }>;
+    products: OdooSalesTargetBrandProduct[];
+    servedCustomers: OdooSalesTargetBrandCustomer[];
 };

@@ -1,0 +1,46 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    match /users/{userId} {
+      // Client reads its own profile (role, etc.) — see src/lib/auth-context.tsx.
+      allow read: if isOwner(userId);
+      // Profile/role writes only ever happen server-side via the Admin SDK
+      // (src/app/api/users/route.ts), which bypasses these rules entirely.
+      allow write: if false;
+
+      match /integrations/{docId} {
+        // Odoo credentials — owner-only (src/lib/firestore-settings.ts).
+        allow read, write: if isOwner(userId);
+      }
+
+      match /backorders/{orderId} {
+        // Per-user saved backorders (src/lib/firestore-settings.ts).
+        allow read, write: if isOwner(userId);
+      }
+    }
+
+    match /sales-targets/{docId} {
+      // Shared across salespeople/admins in the UI; not owner-scoped
+      // (src/lib/firestore-settings.ts).
+      allow read, write: if isSignedIn();
+    }
+
+    // backorders/{id}, backorder-conversions/{id}, webhook-debug/{doc}, etc.
+    // are only ever touched server-side via the Admin SDK
+    // (src/lib/server/backorders-store.ts), which bypasses these rules.
+    // No direct client access is needed or allowed.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

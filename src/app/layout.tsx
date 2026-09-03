@@ -14,7 +14,7 @@ const manrope = Manrope({
 });
 
 export const metadata: Metadata = {
-  title: "DME Sales Hub 0.1.8",
+  title: "Odoo++ Sales Hub 0.2.0",
   description: "A branded Odoo operations workspace for sales visibility, targets, orders, and customer activity.",
 };
 

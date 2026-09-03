@@ -11,6 +11,11 @@ type ProductCategory = {
     parentPath?: string;
 };
 
+type BrandOption = {
+    id: number;
+    name: string;
+};
+
 type PurchaseOrderReportRow = {
     productId: number;
     productName: string;
@@ -19,6 +24,60 @@ type PurchaseOrderReportRow = {
     averageMonthlySales: number;
     suggestedRestock: number;
     pendingFromBackorders: number;
+};
+
+type PurchaseOrderOption = {
+    id: number;
+    name: string;
+    vendorName: string;
+    dateOrder: string;
+};
+
+type ProductPerformanceWarehouseStock = {
+    warehouseId: number;
+    warehouseName: string;
+    quantity: number;
+};
+
+type ProductPerformanceRow = {
+    productId: number;
+    productName: string;
+    brandName: string;
+    categoryName: string;
+    lots: string[];
+    soldQty: number;
+    salesValue: number;
+    averageSellingPrice: number;
+    purchasedQty: number;
+    averagePurchasePrice: number;
+    totalStock: number;
+    stockByWarehouse: ProductPerformanceWarehouseStock[];
+};
+
+type ProductsPerformancePurchaseOrderDetails = {
+    name: string;
+    vendorName: string;
+    vendorReference: string;
+    confirmationDate: string;
+    expectedArrival: string;
+    arrival: string;
+    deliverTo: string;
+};
+
+type ProductsPerformanceReport = {
+    startDate: string;
+    endDate: string;
+    currencyCode: string;
+    matchedProductCount: number;
+    rows: ProductPerformanceRow[];
+    totals: {
+        soldQty: number;
+        salesValue: number;
+        purchasedQty: number;
+        totalStock: number;
+    };
+    unconvertedCurrencyCodes: string[];
+    purchaseOrderDetails: ProductsPerformancePurchaseOrderDetails | null;
 };
 
 type SalespersonOption = {
@@ -99,6 +158,14 @@ type CustomerReport = {
     topBrands: CustomerBrandSummary[];
 };
 
+type CurrencyTotal = {
+    currencyId: number;
+    currencyCode: string;
+    total: number;
+    invoiceCount: number;
+    includedInTotal: boolean;
+};
+
 type SalespersonMonthlyInvoices = {
     salesperson: SalespersonOption;
     year: number;
@@ -106,15 +173,16 @@ type SalespersonMonthlyInvoices = {
     totalInvoiced: number;
     creditNoteTotal: number;
     invoiceCount: number;
-    categoryTotals: Array<{
-        categoryId: number;
+    primaryCurrencyCode: string;
+    currencyTotals: CurrencyTotal[];
+    creditNoteCurrencyTotals: CurrencyTotal[];
+    brandTotals: Array<{
+        brandId: number;
         totalInvoiced: number;
-        ancestorCategoryIds: number[];
     }>;
-    creditNoteCategoryTotals: Array<{
-        categoryId: number;
+    creditNoteBrandTotals: Array<{
+        brandId: number;
         totalInvoiced: number;
-        ancestorCategoryIds: number[];
     }>;
     debug?: {
         invoiceCountFetched: number;
@@ -122,12 +190,12 @@ type SalespersonMonthlyInvoices = {
         invoiceLineCountFetched: number;
         invoiceLineCountQualified: number;
         productCountFetched: number;
-        productCountMappedToCategory: number;
-        categoryTotalCount: number;
+        productCountMappedToBrand: number;
+        brandTotalCount: number;
     };
 };
 
-type SalesTargetCategoryProduct = {
+type SalesTargetBrandProduct = {
     productId: number;
     productName: string;
     quantitySold: number;
@@ -135,7 +203,7 @@ type SalesTargetCategoryProduct = {
     orderCount: number;
 };
 
-type SalesTargetCategoryCustomer = CustomerSummary & {
+type SalesTargetBrandCustomer = CustomerSummary & {
     orderCount: number;
     totalSales: number;
     lastSaleDate: string;
@@ -145,13 +213,16 @@ type SalesTargetDetailsReport = {
     salesperson: SalespersonOption;
     year: number;
     month: number;
-    categoryId: number;
-    categoryName: string;
+    brandId: number;
+    brandName: string;
     startDate: string;
     endDate: string;
-    totalCategorySales: number;
-    products: SalesTargetCategoryProduct[];
-    servedCustomers: SalesTargetCategoryCustomer[];
+    totalBrandSales: number;
+    primaryCurrencyCode: string;
+    primaryOrderCount: number;
+    otherCurrencyTotals: Array<{ currencyCode: string; total: number; orderCount: number }>;
+    products: SalesTargetBrandProduct[];
+    servedCustomers: SalesTargetBrandCustomer[];
 };
 
 type SalespersonDailyActivity = {
@@ -481,6 +552,212 @@ function getMonthDateRange(year: number, month: number) {
         startDate: start.toISOString().slice(0, 10),
         endDate: end.toISOString().slice(0, 10),
     };
+}
+
+const TARGET_CURRENCY_CODE = "AED";
+
+/**
+ * Sales targets are always entered in this currency, so it's the currency
+ * `totalInvoiced`/`categoryTotals` are computed in. Falls back to the
+ * currency used by the most invoices in `fallbackAmounts` if AED isn't a
+ * currency configured in this Odoo instance.
+ */
+async function getPrimaryCurrencyId(
+    credentials: OdooCredentials,
+    uid: number,
+    fallbackAmounts: Array<{ currencyId: number }>
+): Promise<number | null> {
+    const currencies = await executeKw<Array<{ id: number }>>(
+        credentials,
+        uid,
+        "res.currency",
+        "search_read",
+        [[["name", "=", TARGET_CURRENCY_CODE]]],
+        { fields: ["id"], limit: 1, context: { active_test: false } }
+    );
+
+    const foundId = Number(currencies[0]?.id ?? 0);
+    if (foundId > 0) {
+        return foundId;
+    }
+
+    const countByCurrencyId = new Map<number, number>();
+    for (const amount of fallbackAmounts) {
+        countByCurrencyId.set(amount.currencyId, (countByCurrencyId.get(amount.currencyId) ?? 0) + 1);
+    }
+
+    let majorityCurrencyId: number | null = null;
+    let majorityCount = 0;
+    for (const [currencyId, count] of countByCurrencyId) {
+        if (count > majorityCount) {
+            majorityCurrencyId = currencyId;
+            majorityCount = count;
+        }
+    }
+
+    return majorityCurrencyId;
+}
+
+/**
+ * Groups per-invoice transaction-currency amounts (see
+ * `getInvoiceTransactionAmounts`) by currency, for presenting a per-currency
+ * breakdown instead of blending mismatched currencies into one number.
+ */
+function buildCurrencyTotals(
+    amounts: Array<{ currencyId: number; currencyCode: string; amount: number }>,
+    multiplierByCurrencyId: Map<number, number>
+): CurrencyTotal[] {
+    const totals = new Map<number, Omit<CurrencyTotal, "includedInTotal">>();
+
+    for (const entry of amounts) {
+        const existing = totals.get(entry.currencyId);
+        if (!existing) {
+            totals.set(entry.currencyId, {
+                currencyId: entry.currencyId,
+                currencyCode: entry.currencyCode,
+                total: entry.amount,
+                invoiceCount: 1,
+            });
+            continue;
+        }
+
+        existing.total += entry.amount;
+        existing.invoiceCount += 1;
+    }
+
+    return Array.from(totals.values())
+        .map((total) => ({
+            ...total,
+            total: Number(total.total.toFixed(2)),
+            includedInTotal: multiplierByCurrencyId.has(total.currencyId),
+        }))
+        .sort((a, b) => b.total - a.total);
+}
+
+/**
+ * Resolves each invoice's own transaction currency and raw amount
+ * (`currency_id` / `amount_total`) — exactly what's printed on the invoice,
+ * with no FX conversion applied. An invoice raised in USD stays USD here
+ * even if the issuing company's own base currency is AED, which is what a
+ * "breakdown by currency" should show: Odoo's accounting-converted
+ * `amount_total_signed` collapses every invoice on the same company into
+ * that company's single base currency, hiding exactly this kind of mix.
+ */
+function getInvoiceTransactionAmounts(
+    invoices: Array<Record<string, unknown>>
+): Map<number, { currencyId: number; currencyCode: string; amount: number }> {
+    const byInvoiceId = new Map<number, { currencyId: number; currencyCode: string; amount: number }>();
+
+    for (const invoice of invoices) {
+        const invoiceId = Number(invoice.id ?? 0);
+        if (invoiceId <= 0) {
+            continue;
+        }
+
+        const currencyId = getRelationalId(invoice.currency_id);
+        if (!currencyId) {
+            continue;
+        }
+
+        const currencyCode = getRelationalName(invoice.currency_id) || "?";
+        const amount = Number(invoice.amount_total ?? 0);
+
+        byInvoiceId.set(invoiceId, { currencyId, currencyCode, amount });
+    }
+
+    return byInvoiceId;
+}
+
+/**
+ * The company these Odoo credentials log into by default — used as the
+ * source of truth for currency exchange rates, matching whatever is
+ * configured under that company's Accounting > Currencies settings.
+ */
+async function getHomeCompanyId(credentials: OdooCredentials, uid: number): Promise<number | null> {
+    const users = await executeKw<Array<{ company_id?: unknown }>>(
+        credentials,
+        uid,
+        "res.users",
+        "read",
+        [[uid]],
+        { fields: ["company_id"] }
+    );
+
+    return getRelationalId(users[0]?.company_id);
+}
+
+/**
+ * Reads the exchange rate already configured for each currency under
+ * Accounting > Currencies (the `res.currency.rate` records), as of a given
+ * date. Returns each currency's most recent rate on or before that date.
+ * Odoo stores `rate` such that `amount_in_home_currency = amount / rate`
+ * (verified against Odoo's own `amount_total_signed` on a real invoice).
+ */
+async function getCurrencyRatesToHomeCurrency(
+    credentials: OdooCredentials,
+    uid: number,
+    homeCompanyId: number,
+    currencyIds: number[],
+    asOfDate: string
+): Promise<Map<number, number>> {
+    const rateByCurrencyId = new Map<number, number>();
+    if (currencyIds.length === 0) {
+        return rateByCurrencyId;
+    }
+
+    const records = await executeKw<Array<{ currency_id?: unknown; rate?: number }>>(
+        credentials,
+        uid,
+        "res.currency.rate",
+        "search_read",
+        [[
+            ["currency_id", "in", currencyIds],
+            ["company_id", "=", homeCompanyId],
+            ["name", "<=", asOfDate],
+        ]],
+        {
+            fields: ["currency_id", "rate"],
+            // Most recent rate per currency first; only the first hit per
+            // currency_id (below) is kept.
+            order: "currency_id asc, name desc",
+            limit: 5000,
+        }
+    );
+
+    for (const record of records) {
+        const currencyId = getRelationalId(record.currency_id);
+        if (!currencyId || rateByCurrencyId.has(currencyId)) {
+            continue;
+        }
+
+        const rate = Number(record.rate);
+        if (Number.isFinite(rate) && rate > 0) {
+            rateByCurrencyId.set(currencyId, rate);
+        }
+    }
+
+    return rateByCurrencyId;
+}
+
+/**
+ * Builds a currencyId -> multiplier map so a transaction-currency amount can
+ * be converted to the home/target currency with a single multiplication:
+ * `amount * multiplier`. The target currency itself maps to 1.
+ */
+function buildCurrencyMultipliers(
+    primaryCurrencyId: number | null,
+    rateByCurrencyId: Map<number, number>
+): Map<number, number> {
+    const multiplierByCurrencyId = new Map<number, number>();
+    if (primaryCurrencyId) {
+        multiplierByCurrencyId.set(primaryCurrencyId, 1);
+    }
+
+    for (const [currencyId, rate] of rateByCurrencyId) {
+        multiplierByCurrencyId.set(currencyId, 1 / rate);
+    }
+
+    return multiplierByCurrencyId;
 }
 
 async function getInvoiceSalespersonField(
@@ -1811,7 +2088,7 @@ export async function getSalespersonMonthlyInvoices(
             ["invoice_date", "<=", endDate],
         ]],
         {
-            fields: ["id", "amount_total"],
+            fields: ["id", "amount_total", "currency_id"],
             order: "invoice_date desc",
             limit: 20000,
         }
@@ -1821,8 +2098,69 @@ export async function getSalespersonMonthlyInvoices(
         .map((invoice) => Number(invoice.id ?? 0))
         .filter((id) => Number.isFinite(id) && id > 0);
 
+    // Invoices can be raised in different transaction currencies — even within
+    // the same company — so group by each invoice's own currency and raw
+    // amount instead of blending mismatched currencies (or silently
+    // converting them) into one number.
+    const invoiceTransactionAmounts = getInvoiceTransactionAmounts(invoices);
+    const primaryCurrencyId = await getPrimaryCurrencyId(
+        credentials,
+        uid,
+        Array.from(invoiceTransactionAmounts.values())
+    );
+    const primaryCurrencyCode =
+        (primaryCurrencyId &&
+            Array.from(invoiceTransactionAmounts.values()).find((amount) => amount.currencyId === primaryCurrencyId)
+                ?.currencyCode) ||
+        TARGET_CURRENCY_CODE;
+
+    // The "total cards" (Posted Invoice Total, Target Status, Progress Bar)
+    // show one blended figure in the primary currency: every non-primary
+    // invoice is converted using the exchange rate already configured under
+    // Accounting > Currencies for the home company (not a re-estimated rate).
+    // The per-currency breakdown (`currencyTotals`) stays untouched/raw — this
+    // only affects the blended totals.
+    const homeCompanyId = await getHomeCompanyId(credentials, uid);
+    const nonPrimaryCurrencyIds = Array.from(
+        new Set(
+            Array.from(invoiceTransactionAmounts.values())
+                .map((entry) => entry.currencyId)
+                .filter((currencyId) => currencyId !== primaryCurrencyId)
+        )
+    );
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const rateByCurrencyId = homeCompanyId
+        ? await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, nonPrimaryCurrencyIds, todayStr)
+        : new Map<number, number>();
+    const multiplierByCurrencyId = buildCurrencyMultipliers(primaryCurrencyId, rateByCurrencyId);
+
+    const currencyTotals = buildCurrencyTotals(Array.from(invoiceTransactionAmounts.values()), multiplierByCurrencyId);
+
+    // Invoices in a currency with no configured rate can't be converted —
+    // exclude them from the blended totals rather than guess.
+    const convertibleInvoiceIds = invoiceIds.filter((id) => {
+        const currencyId = invoiceTransactionAmounts.get(id)?.currencyId;
+        return typeof currencyId === "number" && multiplierByCurrencyId.has(currencyId);
+    });
+
+    const totalInvoiced = Number(
+        convertibleInvoiceIds
+            .reduce((sum, id) => {
+                const entry = invoiceTransactionAmounts.get(id);
+                if (!entry) {
+                    return sum;
+                }
+                const multiplier = multiplierByCurrencyId.get(entry.currencyId) ?? 0;
+                return sum + entry.amount * multiplier;
+            }, 0)
+            .toFixed(2)
+    );
+
     let creditNoteTotal = 0;
     let creditNoteIds: number[] = [];
+    let creditNoteCurrencyTotals: CurrencyTotal[] = [];
+    let creditNoteTransactionAmounts = new Map<number, { currencyId: number; currencyCode: string; amount: number }>();
+    let creditNoteMultiplierByCurrencyId = new Map<number, number>();
 
     if (input.includeCreditNotes) {
         const creditNotes = await executeKw<Array<Record<string, unknown>>>(
@@ -1838,39 +2176,76 @@ export async function getSalespersonMonthlyInvoices(
                 ["invoice_date", "<=", endDate],
             ]],
             {
-                fields: ["id", "amount_total"],
+                fields: ["id", "amount_total", "currency_id"],
                 limit: 20000,
             }
         );
 
+        creditNoteTransactionAmounts = getInvoiceTransactionAmounts(creditNotes);
+        // Credit note amounts are refunds against revenue: take the absolute
+        // value, matching how `creditNoteTotal` was computed before.
+        const absoluteCreditAmounts = Array.from(creditNoteTransactionAmounts.values()).map((entry) => ({
+            ...entry,
+            amount: Math.abs(entry.amount),
+        }));
+
+        const creditNoteNonPrimaryCurrencyIds = Array.from(
+            new Set(
+                absoluteCreditAmounts
+                    .map((entry) => entry.currencyId)
+                    .filter((currencyId) => !multiplierByCurrencyId.has(currencyId))
+            )
+        );
+        const creditNoteRateByCurrencyId = homeCompanyId && creditNoteNonPrimaryCurrencyIds.length > 0
+            ? await getCurrencyRatesToHomeCurrency(
+                credentials,
+                uid,
+                homeCompanyId,
+                creditNoteNonPrimaryCurrencyIds,
+                todayStr
+            )
+            : new Map<number, number>();
+        creditNoteMultiplierByCurrencyId = new Map([
+            ...multiplierByCurrencyId,
+            ...buildCurrencyMultipliers(null, creditNoteRateByCurrencyId),
+        ]);
+
+        creditNoteCurrencyTotals = buildCurrencyTotals(absoluteCreditAmounts, creditNoteMultiplierByCurrencyId);
+
         creditNoteTotal = Number(
-            creditNotes
-                .reduce((sum, note) => sum + Math.abs(Number(note.amount_total ?? 0)), 0)
+            absoluteCreditAmounts
+                .reduce((sum, entry) => {
+                    const multiplier = creditNoteMultiplierByCurrencyId.get(entry.currencyId);
+                    return multiplier ? sum + entry.amount * multiplier : sum;
+                }, 0)
                 .toFixed(2)
         );
 
         creditNoteIds = creditNotes
             .map((note) => Number(note.id ?? 0))
-            .filter((id) => Number.isFinite(id) && id > 0);
+            .filter((id) => Number.isFinite(id) && id > 0)
+            .filter((id) => {
+                const currencyId = creditNoteTransactionAmounts.get(id)?.currencyId;
+                return typeof currencyId === "number" && creditNoteMultiplierByCurrencyId.has(currencyId);
+            });
     }
 
-    let categoryTotals: Array<{ categoryId: number; totalInvoiced: number; ancestorCategoryIds: number[] }> = [];
-    let categoryBySaleLineId = new Map<number, number>();
-    let ancestorIdsByCategoryId = new Map<number, number[]>();
-    const qualifiedInvoiceIdSet = new Set<number>(invoiceIds);
+    let brandTotals: Array<{ brandId: number; totalInvoiced: number }> = [];
+    let brandBySaleLineId = new Map<number, number>();
+    const qualifiedInvoiceIdSet = new Set<number>(convertibleInvoiceIds);
     let invoiceLineCountFetched = 0;
     let invoiceLineCountQualified = 0;
     let productCountFetched = 0;
-    let productCountMappedToCategory = 0;
+    let productCountMappedToBrand = 0;
 
-    if (invoiceIds.length > 0) {
+    if (convertibleInvoiceIds.length > 0) {
         const invoiceLines = await executeKw<Array<Record<string, unknown>>>(
             credentials,
             uid,
             "account.move.line",
             "search_read",
             [[
-                ["move_id", "in", invoiceIds],
+                ["move_id", "in", convertibleInvoiceIds],
                 ["sale_line_ids", "!=", false],
             ]],
             {
@@ -1927,62 +2302,57 @@ export async function getSalespersonMonthlyInvoices(
                 "read",
                 [productIds],
                 {
-                    fields: ["id", "categ_id", "product_tmpl_id"],
+                    fields: ["id", "product_tmpl_id"],
                 }
             )
             : [];
         productCountFetched = products.length;
 
-        const templateIdsNeedingLookup = Array.from(
+        // Brand lives only on product.template (tire_brand, a many2one to the
+        // flat tire.brand model — no hierarchy, unlike product categories).
+        const templateIds = Array.from(
             new Set(
                 products
-                    .filter((product) => !getRelationalId(product.categ_id))
                     .map((product) => getRelationalId(product.product_tmpl_id))
                     .filter((id): id is number => typeof id === "number" && id > 0)
             )
         );
 
-        const templates = templateIdsNeedingLookup.length > 0
+        const templates = templateIds.length > 0
             ? await executeKw<Array<Record<string, unknown>>>(
                 credentials,
                 uid,
                 "product.template",
                 "read",
-                [templateIdsNeedingLookup],
+                [templateIds],
                 {
-                    fields: ["id", "categ_id"],
+                    fields: ["id", "tire_brand"],
                 }
             )
             : [];
 
-        const categoryByTemplateId = new Map<number, number>();
+        const brandByTemplateId = new Map<number, number>();
         for (const template of templates) {
             const templateId = Number(template.id ?? 0);
-            const categoryId = getRelationalId(template.categ_id);
-            if (templateId > 0 && typeof categoryId === "number" && categoryId > 0) {
-                categoryByTemplateId.set(templateId, categoryId);
+            const brandId = getRelationalId(template.tire_brand);
+            if (templateId > 0 && typeof brandId === "number" && brandId > 0) {
+                brandByTemplateId.set(templateId, brandId);
             }
         }
 
-        const categoryByProductId = new Map<number, number>();
+        const brandByProductId = new Map<number, number>();
         for (const product of products) {
             const productId = Number(product.id ?? 0);
-            const directCategoryId = getRelationalId(product.categ_id);
             const templateId = getRelationalId(product.product_tmpl_id);
-            const categoryId =
-                (typeof directCategoryId === "number" && directCategoryId > 0)
-                    ? directCategoryId
-                    : (typeof templateId === "number" && templateId > 0)
-                        ? categoryByTemplateId.get(templateId) ?? null
-                        : null;
+            const brandId = typeof templateId === "number" ? brandByTemplateId.get(templateId) : undefined;
 
-            if (productId > 0 && typeof categoryId === "number" && categoryId > 0) {
-                categoryByProductId.set(productId, categoryId);
+            if (productId > 0 && typeof brandId === "number" && brandId > 0) {
+                brandByProductId.set(productId, brandId);
             }
         }
-        productCountMappedToCategory = categoryByProductId.size;
+        productCountMappedToBrand = brandByProductId.size;
 
-        categoryBySaleLineId = new Map<number, number>();
+        brandBySaleLineId = new Map<number, number>();
         for (const saleLine of saleLines) {
             const saleLineId = Number(saleLine.id ?? 0);
             const productId = getRelationalId(saleLine.product_id);
@@ -1990,117 +2360,61 @@ export async function getSalespersonMonthlyInvoices(
                 continue;
             }
 
-            const categoryId = categoryByProductId.get(productId);
-            if (typeof categoryId === "number" && categoryId > 0) {
-                categoryBySaleLineId.set(saleLineId, categoryId);
+            const brandId = brandByProductId.get(productId);
+            if (typeof brandId === "number" && brandId > 0) {
+                brandBySaleLineId.set(saleLineId, brandId);
             }
         }
 
-        const categoryIds = Array.from(new Set(Array.from(categoryByProductId.values())));
-        const categoriesById = new Map<number, { id: number; parentId: number | null }>();
-
-        if (categoryIds.length > 0) {
-            const queue = [...categoryIds];
-            const seen = new Set<number>();
-
-            while (queue.length > 0) {
-                const batch = queue.splice(0, 200).filter((id) => !seen.has(id));
-                if (batch.length === 0) {
-                    continue;
-                }
-
-                for (const id of batch) {
-                    seen.add(id);
-                }
-
-                const categoryRecords = await executeKw<Array<Record<string, unknown>>>(
-                    credentials,
-                    uid,
-                    "product.category",
-                    "read",
-                    [batch],
-                    {
-                        fields: ["id", "parent_id"],
-                    }
-                );
-
-                for (const category of categoryRecords) {
-                    const id = Number(category.id ?? 0);
-                    const parentId = getRelationalId(category.parent_id);
-                    if (id <= 0) {
-                        continue;
-                    }
-
-                    categoriesById.set(id, {
-                        id,
-                        parentId: typeof parentId === "number" && parentId > 0 ? parentId : null,
-                    });
-
-                    if (typeof parentId === "number" && parentId > 0 && !seen.has(parentId)) {
-                        queue.push(parentId);
-                    }
-                }
-            }
-        }
-
-        ancestorIdsByCategoryId = new Map<number, number[]>();
-        for (const categoryId of categoryIds) {
-            const visited = new Set<number>();
-            const ancestors: number[] = [];
-            let currentId: number | null = categoryId;
-
-            while (typeof currentId === "number" && currentId > 0 && !visited.has(currentId)) {
-                visited.add(currentId);
-                ancestors.push(currentId);
-
-                const current = categoriesById.get(currentId);
-                currentId = current?.parentId ?? null;
-            }
-
-            ancestorIdsByCategoryId.set(categoryId, ancestors);
-        }
-
-        const totalsByCategory = new Map<number, number>();
+        const totalsByBrand = new Map<number, number>();
         for (const line of qualifiedInvoiceLines) {
             const linkedSaleLineIds = normalizeRelationalIdList(line.sale_line_ids);
 
-            const linkedCategoryIds = Array.from(
+            const linkedBrandIds = Array.from(
                 new Set(
                     linkedSaleLineIds
-                        .map((saleLineId) => categoryBySaleLineId.get(saleLineId))
-                        .filter((categoryId): categoryId is number => typeof categoryId === "number" && categoryId > 0)
+                        .map((saleLineId) => brandBySaleLineId.get(saleLineId))
+                        .filter((brandId): brandId is number => typeof brandId === "number" && brandId > 0)
                 )
             );
 
-            if (linkedCategoryIds.length === 0) {
+            if (linkedBrandIds.length === 0) {
                 continue;
             }
 
-            const lineAmount = Number(line.price_total ?? 0);
+            // `price_total` is in the invoice's own currency_id — convert it to
+            // the primary currency using that currency's configured rate.
+            const invoiceId = getRelationalId(line.move_id);
+            const invoiceCurrencyId = invoiceId ? invoiceTransactionAmounts.get(invoiceId)?.currencyId : undefined;
+            const multiplier = invoiceCurrencyId ? multiplierByCurrencyId.get(invoiceCurrencyId) : undefined;
+            if (multiplier === undefined) {
+                continue;
+            }
+
+            const lineAmount = Number(line.price_total ?? 0) * multiplier;
             if (!Number.isFinite(lineAmount)) {
                 continue;
             }
 
-            const splitAmount = lineAmount / linkedCategoryIds.length;
+            const splitAmount = lineAmount / linkedBrandIds.length;
 
-            for (const categoryId of linkedCategoryIds) {
-                const current = totalsByCategory.get(categoryId) ?? 0;
-                totalsByCategory.set(categoryId, current + splitAmount);
+            for (const brandId of linkedBrandIds) {
+                const current = totalsByBrand.get(brandId) ?? 0;
+                totalsByBrand.set(brandId, current + splitAmount);
             }
         }
 
-        categoryTotals = Array.from(totalsByCategory.entries())
-            .map(([categoryId, total]) => ({
-                categoryId,
+        brandTotals = Array.from(totalsByBrand.entries())
+            .map(([brandId, total]) => ({
+                brandId,
                 totalInvoiced: Number(total.toFixed(2)),
-                ancestorCategoryIds: ancestorIdsByCategoryId.get(categoryId) ?? [categoryId],
             }))
             .sort((a, b) => b.totalInvoiced - a.totalInvoiced);
     }
 
-    let creditNoteCategoryTotals: Array<{ categoryId: number; totalInvoiced: number; ancestorCategoryIds: number[] }> = [];
+    let creditNoteBrandTotals: Array<{ brandId: number; totalInvoiced: number }> = [];
 
-    if (input.includeCreditNotes && creditNoteIds.length > 0 && categoryBySaleLineId.size > 0) {
+    if (input.includeCreditNotes && creditNoteIds.length > 0 && brandBySaleLineId.size > 0) {
         const creditNoteLines = await executeKw<Array<Record<string, unknown>>>(
             credentials,
             uid,
@@ -2126,47 +2440,53 @@ export async function getSalespersonMonthlyInvoices(
             qualifiedCreditNoteLineIds.has(Number(line.id ?? 0))
         );
 
-        const creditNoteTotalsByCategory = new Map<number, number>();
+        const creditNoteTotalsByBrand = new Map<number, number>();
         for (const line of qualifiedCreditNoteLines) {
             const linkedSaleLineIds = normalizeRelationalIdList(line.sale_line_ids);
 
-            const linkedCategoryIds = Array.from(
+            const linkedBrandIds = Array.from(
                 new Set(
                     linkedSaleLineIds
-                        .map((saleLineId) => categoryBySaleLineId.get(saleLineId))
-                        .filter((categoryId): categoryId is number => typeof categoryId === "number" && categoryId > 0)
+                        .map((saleLineId) => brandBySaleLineId.get(saleLineId))
+                        .filter((brandId): brandId is number => typeof brandId === "number" && brandId > 0)
                 )
             );
 
-            if (linkedCategoryIds.length === 0) {
+            if (linkedBrandIds.length === 0) {
                 continue;
             }
 
-            const lineAmount = Math.abs(Number(line.price_total ?? 0));
+            const creditNoteId = getRelationalId(line.move_id);
+            const creditNoteCurrencyId = creditNoteId
+                ? creditNoteTransactionAmounts.get(creditNoteId)?.currencyId
+                : undefined;
+            const multiplier = creditNoteCurrencyId
+                ? creditNoteMultiplierByCurrencyId.get(creditNoteCurrencyId)
+                : undefined;
+            if (multiplier === undefined) {
+                continue;
+            }
+
+            const lineAmount = Math.abs(Number(line.price_total ?? 0) * multiplier);
             if (!Number.isFinite(lineAmount)) {
                 continue;
             }
 
-            const splitAmount = lineAmount / linkedCategoryIds.length;
+            const splitAmount = lineAmount / linkedBrandIds.length;
 
-            for (const categoryId of linkedCategoryIds) {
-                const current = creditNoteTotalsByCategory.get(categoryId) ?? 0;
-                creditNoteTotalsByCategory.set(categoryId, current + splitAmount);
+            for (const brandId of linkedBrandIds) {
+                const current = creditNoteTotalsByBrand.get(brandId) ?? 0;
+                creditNoteTotalsByBrand.set(brandId, current + splitAmount);
             }
         }
 
-        creditNoteCategoryTotals = Array.from(creditNoteTotalsByCategory.entries())
-            .map(([categoryId, total]) => ({
-                categoryId,
+        creditNoteBrandTotals = Array.from(creditNoteTotalsByBrand.entries())
+            .map(([brandId, total]) => ({
+                brandId,
                 totalInvoiced: Number(total.toFixed(2)),
-                ancestorCategoryIds: ancestorIdsByCategoryId.get(categoryId) ?? [categoryId],
             }))
             .sort((a, b) => b.totalInvoiced - a.totalInvoiced);
     }
-
-    const totalInvoiced = Number(
-        invoices.reduce((sum, invoice) => sum + Number(invoice.amount_total ?? 0), 0).toFixed(2)
-    );
 
     return {
         salesperson,
@@ -2175,16 +2495,19 @@ export async function getSalespersonMonthlyInvoices(
         totalInvoiced,
         creditNoteTotal,
         invoiceCount: qualifiedInvoiceIdSet.size,
-        categoryTotals,
-        creditNoteCategoryTotals,
+        primaryCurrencyCode,
+        currencyTotals,
+        creditNoteCurrencyTotals,
+        brandTotals,
+        creditNoteBrandTotals,
         debug: {
             invoiceCountFetched: invoices.length,
             invoiceCountQualified: qualifiedInvoiceIdSet.size,
             invoiceLineCountFetched,
             invoiceLineCountQualified,
             productCountFetched,
-            productCountMappedToCategory,
-            categoryTotalCount: categoryTotals.length,
+            productCountMappedToBrand,
+            brandTotalCount: brandTotals.length,
         },
     };
 }
@@ -2195,14 +2518,14 @@ export async function getSalesTargetDetails(
         salespersonId: number;
         year: number;
         month: number;
-        categoryId: number;
+        brandId: number;
     }
 ): Promise<SalesTargetDetailsReport> {
     const uid = await authenticate(credentials);
     const salespersonId = Number(input.salespersonId);
     const year = Number(input.year);
     const month = Number(input.month);
-    const categoryId = Number(input.categoryId);
+    const brandId = Number(input.brandId);
 
     if (!Number.isFinite(salespersonId) || salespersonId <= 0) {
         throw new Error("A valid salesperson is required.");
@@ -2216,18 +2539,18 @@ export async function getSalesTargetDetails(
         throw new Error("A valid month is required.");
     }
 
-    if (!Number.isFinite(categoryId) || categoryId <= 0) {
-        throw new Error("A valid product category is required.");
+    if (!Number.isFinite(brandId) || brandId <= 0) {
+        throw new Error("A valid product brand is required.");
     }
 
-    const [salespeople, categories] = await Promise.all([
+    const [salespeople, brands] = await Promise.all([
         getSalespeople(credentials),
         executeKw<Array<Record<string, unknown>>>(
             credentials,
             uid,
-            "product.category",
+            "tire.brand",
             "read",
-            [[categoryId]],
+            [[brandId]],
             {
                 fields: ["id", "name"],
             }
@@ -2239,10 +2562,19 @@ export async function getSalesTargetDetails(
         throw new Error("Selected salesperson was not found in Odoo.");
     }
 
-    const category = categories[0];
-    if (!category) {
-        throw new Error("Selected category was not found in Odoo.");
+    const brand = brands[0];
+    if (!brand) {
+        throw new Error("Selected brand was not found in Odoo.");
     }
+
+    // Sales targets are entered in a single currency (see getPrimaryCurrencyId).
+    // Orders in a different currency are converted using the exchange rate
+    // already configured under Accounting > Currencies for the home company —
+    // matching how the main sales-target report now blends its totals — and
+    // are only broken out separately (`otherCurrencyTotals`) if no rate is
+    // configured for that currency.
+    const primaryCurrencyId = await getPrimaryCurrencyId(credentials, uid, []);
+    const homeCompanyId = await getHomeCompanyId(credentials, uid);
 
     const { startDate, endDate } = getMonthDateRange(year, month);
     const from = toOdooDateBoundary(startDate, false);
@@ -2261,7 +2593,7 @@ export async function getSalesTargetDetails(
             ["display_type", "=", false],
             ["product_id", "!=", false],
             ["order_id.partner_id", "!=", false],
-            ["product_id.categ_id", "child_of", categoryId],
+            ["product_id.product_tmpl_id.tire_brand", "=", brandId],
         ]],
         {
             fields: ["id", "product_id", "product_uom_qty", "price_subtotal", "order_id"],
@@ -2285,7 +2617,7 @@ export async function getSalesTargetDetails(
             "read",
             [orderIds],
             {
-                fields: ["id", "name", "partner_id", "date_order"],
+                fields: ["id", "name", "partner_id", "date_order", "currency_id"],
             }
         )
         : [];
@@ -2298,6 +2630,19 @@ export async function getSalesTargetDetails(
         }
     }
 
+    const orderNonPrimaryCurrencyIds = Array.from(
+        new Set(
+            orders
+                .map((order) => getRelationalId(order.currency_id))
+                .filter((id): id is number => typeof id === "number" && id !== primaryCurrencyId)
+        )
+    );
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const orderRateByCurrencyId = homeCompanyId
+        ? await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, orderNonPrimaryCurrencyIds, todayStr)
+        : new Map<number, number>();
+    const orderMultiplierByCurrencyId = buildCurrencyMultipliers(primaryCurrencyId, orderRateByCurrencyId);
+
     const partnerIds = Array.from(
         new Set(
             orders
@@ -2308,11 +2653,13 @@ export async function getSalesTargetDetails(
 
     const canonicalCustomerMap = await getCanonicalCustomerMap(credentials, uid, partnerIds);
 
-    const productsById = new Map<number, SalesTargetCategoryProduct>();
+    const productsById = new Map<number, SalesTargetBrandProduct>();
     const orderIdsByProductId = new Map<number, Set<number>>();
-    const customersById = new Map<number, SalesTargetCategoryCustomer>();
+    const customersById = new Map<number, SalesTargetBrandCustomer>();
     const orderIdsByCustomerId = new Map<number, Set<number>>();
-    let totalCategorySales = 0;
+    const otherCurrencyTotalsByCode = new Map<string, { total: number; orderIds: Set<number> }>();
+    const primaryOrderIds = new Set<number>();
+    let totalBrandSales = 0;
 
     for (const line of lines) {
         const productId = getRelationalId(line.product_id);
@@ -2337,8 +2684,24 @@ export async function getSalesTargetDetails(
         }
 
         const quantity = Number(line.product_uom_qty ?? 0);
-        const lineSales = Number(line.price_subtotal ?? 0);
-        totalCategorySales += lineSales;
+        const rawLineSales = Number(line.price_subtotal ?? 0);
+
+        // Orders in a currency with no configured rate can't be converted —
+        // break those out separately instead of blending them in unconverted.
+        const orderCurrencyId = getRelationalId(order.currency_id);
+        const multiplier = orderCurrencyId ? orderMultiplierByCurrencyId.get(orderCurrencyId) : undefined;
+        if (multiplier === undefined) {
+            const currencyCode = getRelationalName(order.currency_id) || "?";
+            const existing = otherCurrencyTotalsByCode.get(currencyCode) ?? { total: 0, orderIds: new Set<number>() };
+            existing.total += rawLineSales;
+            existing.orderIds.add(orderId);
+            otherCurrencyTotalsByCode.set(currencyCode, existing);
+            continue;
+        }
+
+        const lineSales = rawLineSales * multiplier;
+        totalBrandSales += lineSales;
+        primaryOrderIds.add(orderId);
 
         const productName = getRelationalName(line.product_id) || `Product #${productId}`;
         const existingProduct = productsById.get(productId);
@@ -2400,11 +2763,20 @@ export async function getSalesTargetDetails(
         salesperson,
         year,
         month,
-        categoryId,
-        categoryName: toDisplayString(category.name) || `Category #${categoryId}`,
+        brandId,
+        brandName: toDisplayString(brand.name) || `Brand #${brandId}`,
         startDate,
         endDate,
-        totalCategorySales: Number(totalCategorySales.toFixed(2)),
+        totalBrandSales: Number(totalBrandSales.toFixed(2)),
+        primaryCurrencyCode: TARGET_CURRENCY_CODE,
+        primaryOrderCount: primaryOrderIds.size,
+        otherCurrencyTotals: Array.from(otherCurrencyTotalsByCode.entries())
+            .map(([currencyCode, value]) => ({
+                currencyCode,
+                total: Number(value.total.toFixed(2)),
+                orderCount: value.orderIds.size,
+            }))
+            .sort((a, b) => b.total - a.total),
         products,
         servedCustomers,
     };
@@ -2451,11 +2823,36 @@ export async function getProductCategories(credentials: OdooCredentials): Promis
     }));
 }
 
+export async function getBrands(credentials: OdooCredentials): Promise<BrandOption[]> {
+    const uid = await authenticate(credentials);
+
+    const brands = await executeKw<Array<{ id: number; name: string }>>(
+        credentials,
+        uid,
+        "tire.brand",
+        "search_read",
+        [[]],
+        {
+            fields: ["id", "name"],
+            order: "name asc",
+            limit: 2000,
+        }
+    );
+
+    return brands
+        .map((brand) => ({
+            id: Number(brand.id),
+            name: String(brand.name ?? ""),
+        }))
+        .filter((brand) => brand.id > 0 && brand.name);
+}
+
 export async function getPurchaseOrderReport(
     credentials: OdooCredentials,
     input: {
-        categoryId: number;
+        categoryId?: number | null;
         categoryModel?: "product.public.category" | "product.category";
+        brandId?: number | null;
         startDate: string;
         endDate: string;
         stockDurationMonths: number;
@@ -2463,11 +2860,14 @@ export async function getPurchaseOrderReport(
 ): Promise<{ monthsInRange: number; rows: PurchaseOrderReportRow[] }> {
     const uid = await authenticate(credentials);
     const categoryId = Number(input.categoryId);
+    const hasCategory = Number.isFinite(categoryId) && categoryId > 0;
     const categoryModel = input.categoryModel ?? "product.public.category";
+    const brandId = Number(input.brandId);
+    const hasBrand = Number.isFinite(brandId) && brandId > 0;
     const stockDurationMonths = Math.min(Math.max(Number(input.stockDurationMonths) || 1, 1), 12);
 
-    if (!Number.isFinite(categoryId) || categoryId <= 0) {
-        throw new Error("Invalid category selected.");
+    if (!hasCategory && !hasBrand) {
+        throw new Error("Select a category or a brand.");
     }
 
     const startDate = input.startDate;
@@ -2476,10 +2876,19 @@ export async function getPurchaseOrderReport(
         throw new Error("Start date and end date are required.");
     }
 
-    const templateDomain =
-        categoryModel === "product.category"
-            ? [["categ_id", "child_of", categoryId]]
-            : [["public_categ_ids", "child_of", categoryId]];
+    const templateDomain: unknown[] = [];
+
+    if (hasCategory) {
+        templateDomain.push(
+            categoryModel === "product.category"
+                ? ["categ_id", "child_of", categoryId]
+                : ["public_categ_ids", "child_of", categoryId]
+        );
+    }
+
+    if (hasBrand) {
+        templateDomain.push(["tire_brand", "=", brandId]);
+    }
 
     const templateIds = await executeKw<number[]>(
         credentials,
@@ -2569,6 +2978,548 @@ export async function getPurchaseOrderReport(
         .sort((a, b) => b.suggestedRestock - a.suggestedRestock || b.soldInPeriod - a.soldInPeriod);
 
     return { monthsInRange: Number(monthsInRange.toFixed(2)), rows };
+}
+
+export async function searchPurchaseOrders(
+    credentials: OdooCredentials,
+    query: string,
+    options?: { limit?: number; offset?: number }
+): Promise<{ purchaseOrders: PurchaseOrderOption[]; totalCount: number }> {
+    const uid = await authenticate(credentials);
+    const normalizedQuery = query.trim();
+    const limit = Number.isFinite(options?.limit) ? Math.max(1, Math.min(100, Number(options?.limit))) : 20;
+    const offset = Number.isFinite(options?.offset) ? Math.max(0, Number(options?.offset)) : 0;
+
+    const domain: unknown[] = [["state", "in", ["purchase", "done"]]];
+    if (normalizedQuery) {
+        domain.push(["name", "ilike", normalizedQuery]);
+    }
+
+    const totalCount = await executeKw<number>(credentials, uid, "purchase.order", "search_count", [domain]);
+
+    const orders = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "purchase.order",
+        "search_read",
+        [domain],
+        {
+            fields: ["id", "name", "partner_id", "date_order"],
+            order: "date_order desc",
+            limit,
+            offset,
+        }
+    );
+
+    return {
+        totalCount,
+        purchaseOrders: orders.map((order) => ({
+            id: Number(order.id),
+            name: toDisplayString(order.name) || `PO #${order.id}`,
+            vendorName: getRelationalName(order.partner_id),
+            dateOrder: toDisplayString(order.date_order),
+        })),
+    };
+}
+
+function emptyProductsPerformanceReport(startDate: string, endDate: string): ProductsPerformanceReport {
+    return {
+        startDate,
+        endDate,
+        currencyCode: TARGET_CURRENCY_CODE,
+        matchedProductCount: 0,
+        rows: [],
+        totals: { soldQty: 0, salesValue: 0, purchasedQty: 0, totalStock: 0 },
+        unconvertedCurrencyCodes: [],
+        purchaseOrderDetails: null,
+    };
+}
+
+function intersectIdSets(sets: Array<Set<number>>): number[] {
+    if (sets.length === 0) {
+        return [];
+    }
+
+    const [first, ...rest] = sets;
+    let result = first;
+
+    for (const set of rest) {
+        const next = new Set<number>();
+        for (const id of result) {
+            if (set.has(id)) {
+                next.add(id);
+            }
+        }
+        result = next;
+    }
+
+    return Array.from(result);
+}
+
+/**
+ * Resolves a brand or category filter to the set of product.product ids that
+ * belong to it, via product.template (brand and category both live there).
+ */
+async function getProductIdsForTemplateDomain(
+    credentials: OdooCredentials,
+    uid: number,
+    templateDomain: unknown[]
+): Promise<number[]> {
+    const templateIds = await executeKw<number[]>(
+        credentials,
+        uid,
+        "product.template",
+        "search",
+        [templateDomain],
+        { limit: 5000 }
+    );
+
+    if (templateIds.length === 0) {
+        return [];
+    }
+
+    return executeKw<number[]>(
+        credentials,
+        uid,
+        "product.product",
+        "search",
+        [[["product_tmpl_id", "in", templateIds]]],
+        { limit: 5000 }
+    );
+}
+
+const PRODUCTS_PERFORMANCE_MAX_PRODUCTS = 3000;
+
+export async function getProductsPerformanceReport(
+    credentials: OdooCredentials,
+    input: {
+        purchaseOrderId?: number | null;
+        productId?: number | null;
+        brandId?: number | null;
+        categoryId?: number | null;
+        startDate: string;
+        endDate: string;
+    }
+): Promise<ProductsPerformanceReport> {
+    const uid = await authenticate(credentials);
+
+    const purchaseOrderId = Number(input.purchaseOrderId);
+    const hasPurchaseOrder = Number.isFinite(purchaseOrderId) && purchaseOrderId > 0;
+    const productId = Number(input.productId);
+    const hasProduct = Number.isFinite(productId) && productId > 0;
+    const brandId = Number(input.brandId);
+    const hasBrand = Number.isFinite(brandId) && brandId > 0;
+    const categoryId = Number(input.categoryId);
+    const hasCategory = Number.isFinite(categoryId) && categoryId > 0;
+
+    if (!hasPurchaseOrder && !hasProduct && !hasBrand && !hasCategory) {
+        throw new Error("Select a purchase order, product, brand, or category.");
+    }
+
+    const startDate = input.startDate;
+    const endDate = input.endDate;
+    if (!startDate || !endDate) {
+        throw new Error("Start date and end date are required.");
+    }
+
+    // Each active filter narrows the product set independently; the final
+    // scope is their intersection (e.g. "brand X from purchase order Y").
+    const idSets: Array<Set<number>> = [];
+    let purchaseOrderDetails: ProductsPerformancePurchaseOrderDetails | null = null;
+
+    if (hasPurchaseOrder) {
+        const [lines, purchaseOrderRecords] = await Promise.all([
+            executeKw<Array<Record<string, unknown>>>(
+                credentials,
+                uid,
+                "purchase.order.line",
+                "search_read",
+                [[["order_id", "=", purchaseOrderId]]],
+                { fields: ["product_id"], limit: 5000 }
+            ),
+            executeKw<Array<Record<string, unknown>>>(
+                credentials,
+                uid,
+                "purchase.order",
+                "read",
+                [[purchaseOrderId]],
+                {
+                    fields: [
+                        "name",
+                        "partner_id",
+                        "partner_ref",
+                        "date_approve",
+                        "date_planned",
+                        "effective_date",
+                        "picking_type_id",
+                    ],
+                }
+            ),
+        ]);
+
+        const purchaseOrderRecord = purchaseOrderRecords[0];
+        if (purchaseOrderRecord) {
+            purchaseOrderDetails = {
+                name: toDisplayString(purchaseOrderRecord.name) || `PO #${purchaseOrderId}`,
+                vendorName: getRelationalName(purchaseOrderRecord.partner_id),
+                vendorReference: toDisplayString(purchaseOrderRecord.partner_ref),
+                confirmationDate: toDisplayString(purchaseOrderRecord.date_approve),
+                expectedArrival: toDisplayString(purchaseOrderRecord.date_planned),
+                arrival: toDisplayString(purchaseOrderRecord.effective_date),
+                deliverTo: getRelationalName(purchaseOrderRecord.picking_type_id),
+            };
+        }
+
+        const ids = new Set<number>();
+        for (const line of lines) {
+            const id = getRelationalId(line.product_id);
+            if (id) {
+                ids.add(id);
+            }
+        }
+
+        if (ids.size === 0) {
+            return emptyProductsPerformanceReport(startDate, endDate);
+        }
+
+        idSets.push(ids);
+    }
+
+    if (hasProduct) {
+        idSets.push(new Set([productId]));
+    }
+
+    if (hasBrand) {
+        const productIds = await getProductIdsForTemplateDomain(credentials, uid, [["tire_brand", "=", brandId]]);
+        if (productIds.length === 0) {
+            return emptyProductsPerformanceReport(startDate, endDate);
+        }
+        idSets.push(new Set(productIds));
+    }
+
+    if (hasCategory) {
+        const productIds = await getProductIdsForTemplateDomain(credentials, uid, [["categ_id", "child_of", categoryId]]);
+        if (productIds.length === 0) {
+            return emptyProductsPerformanceReport(startDate, endDate);
+        }
+        idSets.push(new Set(productIds));
+    }
+
+    const finalProductIds = intersectIdSets(idSets).slice(0, PRODUCTS_PERFORMANCE_MAX_PRODUCTS);
+    if (finalProductIds.length === 0) {
+        return emptyProductsPerformanceReport(startDate, endDate);
+    }
+
+    const products = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "product.product",
+        "read",
+        [finalProductIds],
+        { fields: ["id", "display_name", "product_tmpl_id"] }
+    );
+
+    const templateIds = Array.from(
+        new Set(
+            products
+                .map((product) => getRelationalId(product.product_tmpl_id))
+                .filter((id): id is number => typeof id === "number" && id > 0)
+        )
+    );
+
+    const templates = templateIds.length > 0
+        ? await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "product.template",
+            "read",
+            [templateIds],
+            { fields: ["id", "tire_brand", "categ_id"] }
+        )
+        : [];
+
+    const brandByTemplateId = new Map<number, string>();
+    const categoryByTemplateId = new Map<number, string>();
+    for (const template of templates) {
+        const templateId = Number(template.id ?? 0);
+        if (templateId <= 0) {
+            continue;
+        }
+
+        const brandName = getRelationalName(template.tire_brand);
+        if (brandName) {
+            brandByTemplateId.set(templateId, brandName);
+        }
+
+        const categoryName = getRelationalName(template.categ_id);
+        if (categoryName) {
+            categoryByTemplateId.set(templateId, categoryName);
+        }
+    }
+
+    const productInfoById = new Map<number, { name: string; brandName: string; categoryName: string }>();
+    for (const product of products) {
+        const id = Number(product.id ?? 0);
+        if (id <= 0) {
+            continue;
+        }
+
+        const templateId = getRelationalId(product.product_tmpl_id);
+        productInfoById.set(id, {
+            name: toDisplayString(product.display_name) || `Product #${id}`,
+            brandName: (typeof templateId === "number" ? brandByTemplateId.get(templateId) : undefined) ?? "No Brand",
+            categoryName: (typeof templateId === "number" ? categoryByTemplateId.get(templateId) : undefined) ?? "Uncategorized",
+        });
+    }
+
+    // Sales value is converted to the home currency using the same
+    // configured-exchange-rate approach as the sales target reports — a
+    // product sold in both AED and USD orders must not have those amounts
+    // blended together unconverted.
+    const from = toOdooDateBoundary(startDate, false);
+    const to = toOdooDateBoundary(endDate, true);
+
+    const saleLines = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "sale.order.line",
+        "search_read",
+        [[
+            ["product_id", "in", finalProductIds],
+            ["display_type", "=", false],
+            ["order_id.state", "in", ["sale", "done"]],
+            ["order_id.date_order", ">=", from],
+            ["order_id.date_order", "<=", to],
+        ]],
+        {
+            fields: ["product_id", "product_uom_qty", "price_subtotal", "currency_id"],
+            limit: 50000,
+        }
+    );
+
+    const primaryCurrencyId = await getPrimaryCurrencyId(
+        credentials,
+        uid,
+        saleLines
+            .map((line) => getRelationalId(line.currency_id))
+            .filter((id): id is number => typeof id === "number")
+            .map((currencyId) => ({ currencyId }))
+    );
+    const homeCompanyId = await getHomeCompanyId(credentials, uid);
+    const nonPrimaryCurrencyIds = Array.from(
+        new Set(
+            saleLines
+                .map((line) => getRelationalId(line.currency_id))
+                .filter((id): id is number => typeof id === "number" && id !== primaryCurrencyId)
+        )
+    );
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const rateByCurrencyId = homeCompanyId
+        ? await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, nonPrimaryCurrencyIds, todayStr)
+        : new Map<number, number>();
+    const multiplierByCurrencyId = buildCurrencyMultipliers(primaryCurrencyId, rateByCurrencyId);
+
+    const soldQtyByProductId = new Map<number, number>();
+    const salesValueByProductId = new Map<number, number>();
+    const unconvertedCurrencyCodes = new Set<string>();
+
+    for (const line of saleLines) {
+        const id = getRelationalId(line.product_id);
+        if (!id) {
+            continue;
+        }
+
+        const qty = Number(line.product_uom_qty ?? 0);
+        soldQtyByProductId.set(id, (soldQtyByProductId.get(id) ?? 0) + qty);
+
+        const currencyId = getRelationalId(line.currency_id);
+        const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
+        if (multiplier === undefined) {
+            if (currencyId) {
+                unconvertedCurrencyCodes.add(getRelationalName(line.currency_id) || "?");
+            }
+            continue;
+        }
+
+        const value = Number(line.price_subtotal ?? 0) * multiplier;
+        salesValueByProductId.set(id, (salesValueByProductId.get(id) ?? 0) + value);
+    }
+
+    // Purchased qty/value, same currency-safe conversion as sales — vendor POs
+    // are just as often raised in a foreign currency as customer invoices.
+    const purchaseLines = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "purchase.order.line",
+        "search_read",
+        [[
+            ["product_id", "in", finalProductIds],
+            ["order_id.state", "in", ["purchase", "done"]],
+            ["order_id.date_order", ">=", from],
+            ["order_id.date_order", "<=", to],
+        ]],
+        {
+            fields: ["product_id", "product_qty", "price_subtotal", "currency_id"],
+            limit: 50000,
+        }
+    );
+
+    const purchaseNonPrimaryCurrencyIds = Array.from(
+        new Set(
+            purchaseLines
+                .map((line) => getRelationalId(line.currency_id))
+                .filter((id): id is number => typeof id === "number" && !multiplierByCurrencyId.has(id))
+        )
+    );
+    const purchaseRateByCurrencyId = homeCompanyId && purchaseNonPrimaryCurrencyIds.length > 0
+        ? await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, purchaseNonPrimaryCurrencyIds, todayStr)
+        : new Map<number, number>();
+    const purchaseMultiplierByCurrencyId = new Map([
+        ...multiplierByCurrencyId,
+        ...buildCurrencyMultipliers(null, purchaseRateByCurrencyId),
+    ]);
+
+    const purchasedQtyByProductId = new Map<number, number>();
+    const purchaseValueByProductId = new Map<number, number>();
+
+    for (const line of purchaseLines) {
+        const id = getRelationalId(line.product_id);
+        if (!id) {
+            continue;
+        }
+
+        const qty = Number(line.product_qty ?? 0);
+        purchasedQtyByProductId.set(id, (purchasedQtyByProductId.get(id) ?? 0) + qty);
+
+        const currencyId = getRelationalId(line.currency_id);
+        const multiplier = currencyId ? purchaseMultiplierByCurrencyId.get(currencyId) : undefined;
+        if (multiplier === undefined) {
+            if (currencyId) {
+                unconvertedCurrencyCodes.add(getRelationalName(line.currency_id) || "?");
+            }
+            continue;
+        }
+
+        const value = Number(line.price_subtotal ?? 0) * multiplier;
+        purchaseValueByProductId.set(id, (purchaseValueByProductId.get(id) ?? 0) + value);
+    }
+
+    // Stock on hand is a current snapshot (not date-bound), broken down by
+    // warehouse across every company — matching an aging-stock-style report.
+    const quants = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "stock.quant",
+        "search_read",
+        [[
+            ["product_id", "in", finalProductIds],
+            ["location_id.usage", "=", "internal"],
+        ]],
+        {
+            fields: ["product_id", "quantity", "warehouse_id", "lot_id"],
+            limit: 50000,
+        }
+    );
+
+    const stockByProductId = new Map<number, Map<number, { warehouseName: string; quantity: number }>>();
+    const lotNamesByProductId = new Map<number, Set<string>>();
+    for (const quant of quants) {
+        const productIdForQuant = getRelationalId(quant.product_id);
+        const warehouseId = getRelationalId(quant.warehouse_id);
+        if (!productIdForQuant || !warehouseId) {
+            continue;
+        }
+
+        const warehouseName = getRelationalName(quant.warehouse_id) || `Warehouse #${warehouseId}`;
+        const quantity = Number(quant.quantity ?? 0);
+
+        const byWarehouse = stockByProductId.get(productIdForQuant) ?? new Map();
+        const existing = byWarehouse.get(warehouseId);
+        if (existing) {
+            existing.quantity += quantity;
+        } else {
+            byWarehouse.set(warehouseId, { warehouseName, quantity });
+        }
+        stockByProductId.set(productIdForQuant, byWarehouse);
+
+        // Only lots that currently hold on-hand stock — not every lot ever
+        // created for the product (which could include long-depleted ones).
+        const lotName = getRelationalName(quant.lot_id);
+        if (lotName && quantity > 0) {
+            const lots = lotNamesByProductId.get(productIdForQuant) ?? new Set<string>();
+            lots.add(lotName);
+            lotNamesByProductId.set(productIdForQuant, lots);
+        }
+    }
+
+    const rows: ProductPerformanceRow[] = finalProductIds
+        .map((id) => {
+            const info = productInfoById.get(id);
+            const soldQty = Number((soldQtyByProductId.get(id) ?? 0).toFixed(2));
+            const salesValue = Number((salesValueByProductId.get(id) ?? 0).toFixed(2));
+            const averageSellingPrice = soldQty > 0 ? Number((salesValue / soldQty).toFixed(2)) : 0;
+
+            const purchasedQty = Number((purchasedQtyByProductId.get(id) ?? 0).toFixed(2));
+            const purchaseValue = Number((purchaseValueByProductId.get(id) ?? 0).toFixed(2));
+            const averagePurchasePrice = purchasedQty > 0 ? Number((purchaseValue / purchasedQty).toFixed(2)) : 0;
+
+            const stockByWarehouse = Array.from(stockByProductId.get(id)?.entries() ?? [])
+                .map(([warehouseId, value]) => ({
+                    warehouseId,
+                    warehouseName: value.warehouseName,
+                    quantity: Number(value.quantity.toFixed(2)),
+                }))
+                .sort((a, b) => b.quantity - a.quantity);
+
+            const totalStock = Number(
+                stockByWarehouse.reduce((sum, warehouse) => sum + warehouse.quantity, 0).toFixed(2)
+            );
+
+            const lots = Array.from(lotNamesByProductId.get(id) ?? []).sort((a, b) => a.localeCompare(b));
+
+            return {
+                productId: id,
+                productName: info?.name ?? `Product #${id}`,
+                brandName: info?.brandName ?? "No Brand",
+                categoryName: info?.categoryName ?? "Uncategorized",
+                lots,
+                soldQty,
+                salesValue,
+                averageSellingPrice,
+                purchasedQty,
+                averagePurchasePrice,
+                totalStock,
+                stockByWarehouse,
+            };
+        })
+        .sort((a, b) => b.soldQty - a.soldQty || b.totalStock - a.totalStock);
+
+    const totals = rows.reduce(
+        (acc, row) => {
+            acc.soldQty += row.soldQty;
+            acc.salesValue += row.salesValue;
+            acc.purchasedQty += row.purchasedQty;
+            acc.totalStock += row.totalStock;
+            return acc;
+        },
+        { soldQty: 0, salesValue: 0, purchasedQty: 0, totalStock: 0 }
+    );
+
+    return {
+        startDate,
+        endDate,
+        currencyCode: TARGET_CURRENCY_CODE,
+        matchedProductCount: finalProductIds.length,
+        rows,
+        totals: {
+            soldQty: Number(totals.soldQty.toFixed(2)),
+            salesValue: Number(totals.salesValue.toFixed(2)),
+            purchasedQty: Number(totals.purchasedQty.toFixed(2)),
+            totalStock: Number(totals.totalStock.toFixed(2)),
+        },
+        unconvertedCurrencyCodes: Array.from(unconvertedCurrencyCodes),
+        purchaseOrderDetails,
+    };
 }
 
 export async function getPendingOrders(credentials: OdooCredentials) {
