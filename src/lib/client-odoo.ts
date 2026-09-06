@@ -235,6 +235,92 @@ export function getProductsPerformanceReport(input: {
     }>("/api/odoo/products-performance", input);
 }
 
+export function getProductOrigins() {
+    return post<{
+        origins: Array<{
+            id: number;
+            name: string;
+        }>;
+    }>("/api/odoo/product-origins", {});
+}
+
+export function getRimDiameters() {
+    return post<{
+        rimDiameters: Array<{
+            id: number;
+            name: string;
+        }>;
+    }>("/api/odoo/rim-diameters", {});
+}
+
+export function searchUnifiedLots(input: { query: string; limit?: number; offset?: number }) {
+    return post<{
+        unifiedLots: Array<{
+            id: number;
+            name: string;
+        }>;
+        totalCount: number;
+        limit: number;
+        offset: number;
+        hasMore: boolean;
+    }>("/api/odoo/unified-lots", input);
+}
+
+export function getMarginAnalyticsReport(input: {
+    categoryId?: number | null;
+    brandId?: number | null;
+    originId?: number | null;
+    rimDiameterId?: number | null;
+    unifiedLotId?: number | null;
+    startDate: string;
+    endDate: string;
+}) {
+    return post<{
+        startDate: string;
+        endDate: string;
+        currencyCode: string;
+        matchedProductCount: number;
+        rows: Array<{
+            productId: number;
+            productName: string;
+            brandName: string;
+            categoryName: string;
+            originName: string;
+            rimDiameterName: string;
+            purchasedQty: number;
+            avgPurchasePrice: number;
+            avgLandedCostPerUnit: number;
+            avgOperationCostPerUnit: number;
+            avgTotalCostPerUnit: number;
+            soldQty: number;
+            avgSalesPrice: number;
+            hasSalesData: boolean;
+            avgMarginPerUnit: number;
+            marginPercent: number;
+            estimatedProfitLoss: number;
+            currentStock: number;
+            flags: Array<"never-sold" | "sold-without-purchase" | "no-landed-cost" | "negative-margin" | "has-cost-correction">;
+        }>;
+        highlights: {
+            productsWithPurchases: number;
+            productsWithSales: number;
+            productsWithoutSales: number;
+            productsWithoutLandedCost: number;
+            totalPurchasedQty: number;
+            totalSoldQty: number;
+            totalCurrentStock: number;
+            avgPurchasePrice: number;
+            avgLandedCostPerUnit: number;
+            avgOperationCostPerUnit: number;
+            avgTotalCostPerUnit: number;
+            avgSalesPrice: number;
+            avgMarginPercent: number;
+            totalEstimatedProfitLoss: number;
+        };
+        unconvertedCurrencyCodes: string[];
+    }>("/api/odoo/margin-analytics", input);
+}
+
 export function getSalespeople() {
     return post<{ salespeople: OdooSalesperson[] }>("/api/odoo/salespeople", {});
 }

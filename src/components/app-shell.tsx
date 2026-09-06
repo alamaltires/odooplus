@@ -4,7 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useCallback, useState } from "react";
-import { ClipboardList, LayoutDashboard, LogOut, Menu, ScanSearch, Settings, ShoppingBasket, Target, TrendingUp, Users, X, type LucideIcon } from "lucide-react";
+import { ClipboardList, LayoutDashboard, LogOut, Menu, PiggyBank, ScanSearch, Settings, ShoppingBasket, Target, TrendingUp, Users, X, type LucideIcon } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 
 // Add new sidebar entries here — each one just needs a route, a label, and an icon.
@@ -14,6 +14,7 @@ const links: Array<{ href: string; label: string; icon: LucideIcon }> = [
     { href: "/product-scanner", label: "Product Scanner", icon: ScanSearch },
     { href: "/purchase-order", label: "Purchase Order", icon: ShoppingBasket },
     { href: "/products-performance", label: "Products Performance", icon: TrendingUp },
+    { href: "/margin-analytics", label: "Margin Analytics", icon: PiggyBank },
     { href: "/salesperson-activity", label: "Salesperson Activity", icon: Users },
     { href: "/sales-targets", label: "Sales Targets", icon: Target },
     { href: "/settings", label: "Settings", icon: Settings },
@@ -66,10 +67,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         }
     }, [loading, pathname, role, router, visibleLinks, isPathAllowed]);
 
-    useEffect(() => {
-        setMobileNavOpen(false);
-    }, [pathname]);
-
     const isAllowedPath = isPathAllowed(pathname);
 
     if (loading || !isAllowedPath) {
@@ -104,6 +101,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                         key={link.href}
                         href={link.href}
                         onClick={() => {
+                            setMobileNavOpen(false);
                             if (link.href === "/orders/pending") {
                                 window.dispatchEvent(new Event("pending-orders-reset-to-first-page"));
                             }

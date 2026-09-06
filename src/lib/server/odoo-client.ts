@@ -3522,6 +3522,772 @@ export async function getProductsPerformanceReport(
     };
 }
 
+type MarginAnalyticsProductRow = {
+    productId: number;
+    productName: string;
+    brandName: string;
+    categoryName: string;
+    originName: string;
+    rimDiameterName: string;
+    purchasedQty: number;
+    avgPurchasePrice: number;
+    avgLandedCostPerUnit: number;
+    avgOperationCostPerUnit: number;
+    avgTotalCostPerUnit: number;
+    soldQty: number;
+    avgSalesPrice: number;
+    hasSalesData: boolean;
+    avgMarginPerUnit: number;
+    marginPercent: number;
+    estimatedProfitLoss: number;
+    currentStock: number;
+    flags: MarginAnalyticsRowFlag[];
+};
+
+type MarginAnalyticsRowFlag =
+    | "never-sold"
+    | "sold-without-purchase"
+    | "no-landed-cost"
+    | "negative-margin"
+    | "has-cost-correction";
+
+type MarginAnalyticsHighlights = {
+    productsWithPurchases: number;
+    productsWithSales: number;
+    productsWithoutSales: number;
+    productsWithoutLandedCost: number;
+    totalPurchasedQty: number;
+    totalSoldQty: number;
+    totalCurrentStock: number;
+    avgPurchasePrice: number;
+    avgLandedCostPerUnit: number;
+    avgOperationCostPerUnit: number;
+    avgTotalCostPerUnit: number;
+    avgSalesPrice: number;
+    avgMarginPercent: number;
+    totalEstimatedProfitLoss: number;
+};
+
+type MarginAnalyticsReport = {
+    startDate: string;
+    endDate: string;
+    currencyCode: string;
+    matchedProductCount: number;
+    rows: MarginAnalyticsProductRow[];
+    highlights: MarginAnalyticsHighlights;
+    unconvertedCurrencyCodes: string[];
+};
+
+function emptyMarginAnalyticsReport(startDate: string, endDate: string): MarginAnalyticsReport {
+    return {
+        startDate,
+        endDate,
+        currencyCode: TARGET_CURRENCY_CODE,
+        matchedProductCount: 0,
+        rows: [],
+        highlights: {
+            productsWithPurchases: 0,
+            productsWithSales: 0,
+            productsWithoutSales: 0,
+            productsWithoutLandedCost: 0,
+            totalPurchasedQty: 0,
+            totalSoldQty: 0,
+            totalCurrentStock: 0,
+            avgPurchasePrice: 0,
+            avgLandedCostPerUnit: 0,
+            avgOperationCostPerUnit: 0,
+            avgTotalCostPerUnit: 0,
+            avgSalesPrice: 0,
+            avgMarginPercent: 0,
+            totalEstimatedProfitLoss: 0,
+        },
+        unconvertedCurrencyCodes: [],
+    };
+}
+
+const MARGIN_ANALYTICS_MAX_PRODUCTS = 3000;
+const MARGIN_ANALYTICS_OPERATION_COST_JOURNAL_NAME = "Miscellaneous Operations";
+
+/**
+ * Margin Analytics: for products matching the given filters, computes the
+ * average purchase price (from purchase.order.line), average landed cost per
+ * unit (from Odoo's own stock.landed.cost allocation in
+ * stock.valuation.adjustment.lines), average "operation cost" per unit (net
+ * debit/credit on the asset-side (stock) matched-product lines inside
+ * Miscellaneous Operations journal entries whose Bill Reference names one of
+ * the matched purchase orders — e.g. price corrections between goods receipt
+ * and vendor invoice; the offsetting Cost of Goods Sold leg of the same entry
+ * is excluded, since both legs share the same product and summing both would
+ * always net to zero),
+ * and average selling price (from sale.order.line) — all restricted to
+ * exactly the matched products, never a broader/general total. The Landed
+ * Cost journal and the goods vendor bill itself are deliberately excluded
+ * from "operation cost" because that money is already counted in the landed
+ * cost and purchase price figures respectively.
+ */
+export async function getMarginAnalyticsReport(
+    credentials: OdooCredentials,
+    input: {
+        categoryId?: number | null;
+        brandId?: number | null;
+        originId?: number | null;
+        rimDiameterId?: number | null;
+        unifiedLotId?: number | null;
+        startDate: string;
+        endDate: string;
+    }
+): Promise<MarginAnalyticsReport> {
+    const uid = await authenticate(credentials);
+
+    const categoryId = Number(input.categoryId);
+    const hasCategory = Number.isFinite(categoryId) && categoryId > 0;
+    const brandId = Number(input.brandId);
+    const hasBrand = Number.isFinite(brandId) && brandId > 0;
+    const originId = Number(input.originId);
+    const hasOrigin = Number.isFinite(originId) && originId > 0;
+    const rimDiameterId = Number(input.rimDiameterId);
+    const hasRimDiameter = Number.isFinite(rimDiameterId) && rimDiameterId > 0;
+    const unifiedLotId = Number(input.unifiedLotId);
+    const hasUnifiedLot = Number.isFinite(unifiedLotId) && unifiedLotId > 0;
+
+    if (!hasCategory && !hasBrand && !hasOrigin && !hasRimDiameter && !hasUnifiedLot) {
+        throw new Error("Select at least one filter: category, brand, origin, rim diameter, or unified lot.");
+    }
+
+    const startDate = input.startDate;
+    const endDate = input.endDate;
+    ensureDateRange(startDate, endDate);
+
+    const templateDomain: unknown[] = [];
+    if (hasCategory) {
+        templateDomain.push(["categ_id", "child_of", categoryId]);
+    }
+    if (hasBrand) {
+        templateDomain.push(["tire_brand", "=", brandId]);
+    }
+    if (hasOrigin) {
+        templateDomain.push(["origin", "=", originId]);
+    }
+    if (hasRimDiameter) {
+        templateDomain.push(["rim_diameter", "=", rimDiameterId]);
+    }
+
+    const idSets: Array<Set<number>> = [];
+
+    if (templateDomain.length > 0) {
+        const ids = await getProductIdsForTemplateDomain(credentials, uid, templateDomain);
+        if (ids.length === 0) {
+            return emptyMarginAnalyticsReport(startDate, endDate);
+        }
+        idSets.push(new Set(ids));
+    }
+
+    if (hasUnifiedLot) {
+        const lots = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "stock.lot",
+            "search_read",
+            [[["unified_lot_id", "=", unifiedLotId]]],
+            { fields: ["product_id"], limit: 20000 }
+        );
+
+        const ids = new Set<number>();
+        for (const lot of lots) {
+            const id = getRelationalId(lot.product_id);
+            if (id) {
+                ids.add(id);
+            }
+        }
+
+        if (ids.size === 0) {
+            return emptyMarginAnalyticsReport(startDate, endDate);
+        }
+        idSets.push(ids);
+    }
+
+    const finalProductIds = intersectIdSets(idSets).slice(0, MARGIN_ANALYTICS_MAX_PRODUCTS);
+    if (finalProductIds.length === 0) {
+        return emptyMarginAnalyticsReport(startDate, endDate);
+    }
+
+    const products = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "product.product",
+        "read",
+        [finalProductIds],
+        { fields: ["id", "display_name", "product_tmpl_id"] }
+    );
+
+    const templateIds = Array.from(
+        new Set(
+            products
+                .map((product) => getRelationalId(product.product_tmpl_id))
+                .filter((id): id is number => typeof id === "number" && id > 0)
+        )
+    );
+
+    const templates = templateIds.length > 0
+        ? await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "product.template",
+            "read",
+            [templateIds],
+            { fields: ["id", "tire_brand", "categ_id", "origin", "rim_diameter"] }
+        )
+        : [];
+
+    const templateInfoById = new Map<
+        number,
+        { brandName: string; categoryName: string; originName: string; rimDiameterName: string }
+    >();
+    for (const template of templates) {
+        const templateId = Number(template.id ?? 0);
+        if (templateId <= 0) {
+            continue;
+        }
+
+        templateInfoById.set(templateId, {
+            brandName: getRelationalName(template.tire_brand) || "No Brand",
+            categoryName: getRelationalName(template.categ_id) || "Uncategorized",
+            originName: getRelationalName(template.origin) || "Unknown Origin",
+            rimDiameterName: getRelationalName(template.rim_diameter) || "-",
+        });
+    }
+
+    const productInfoById = new Map<
+        number,
+        { name: string; brandName: string; categoryName: string; originName: string; rimDiameterName: string }
+    >();
+    for (const product of products) {
+        const id = Number(product.id ?? 0);
+        if (id <= 0) {
+            continue;
+        }
+
+        const templateId = getRelationalId(product.product_tmpl_id);
+        const templateInfo = typeof templateId === "number" ? templateInfoById.get(templateId) : undefined;
+
+        productInfoById.set(id, {
+            name: toDisplayString(product.display_name) || `Product #${id}`,
+            brandName: templateInfo?.brandName ?? "No Brand",
+            categoryName: templateInfo?.categoryName ?? "Uncategorized",
+            originName: templateInfo?.originName ?? "Unknown Origin",
+            rimDiameterName: templateInfo?.rimDiameterName ?? "-",
+        });
+    }
+
+    const from = toOdooDateBoundary(startDate, false);
+    const to = toOdooDateBoundary(endDate, true);
+
+    // Step 1: purchase order lines for matched products in range — the base
+    // purchase price. Currency-converted the same way as products
+    // performance, since a PO raised in USD must not be blended unconverted
+    // with one raised in AED.
+    const purchaseLines = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "purchase.order.line",
+        "search_read",
+        [[
+            ["product_id", "in", finalProductIds],
+            ["order_id.state", "in", ["purchase", "done"]],
+            ["order_id.date_order", ">=", from],
+            ["order_id.date_order", "<=", to],
+        ]],
+        {
+            fields: ["id", "product_id", "product_qty", "price_subtotal", "currency_id", "order_id"],
+            limit: 50000,
+        }
+    );
+
+    const primaryCurrencyId = await getPrimaryCurrencyId(
+        credentials,
+        uid,
+        purchaseLines
+            .map((line) => getRelationalId(line.currency_id))
+            .filter((id): id is number => typeof id === "number")
+            .map((currencyId) => ({ currencyId }))
+    );
+    const homeCompanyId = await getHomeCompanyId(credentials, uid);
+    const todayStr = new Date().toISOString().slice(0, 10);
+
+    const purchaseNonPrimaryCurrencyIds = Array.from(
+        new Set(
+            purchaseLines
+                .map((line) => getRelationalId(line.currency_id))
+                .filter((id): id is number => typeof id === "number" && id !== primaryCurrencyId)
+        )
+    );
+    const purchaseRateByCurrencyId = homeCompanyId && purchaseNonPrimaryCurrencyIds.length > 0
+        ? await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, purchaseNonPrimaryCurrencyIds, todayStr)
+        : new Map<number, number>();
+    const purchaseMultiplierByCurrencyId = buildCurrencyMultipliers(primaryCurrencyId, purchaseRateByCurrencyId);
+
+    const unconvertedCurrencyCodes = new Set<string>();
+    const purchasedQtyByProductId = new Map<number, number>();
+    const purchaseValueByProductId = new Map<number, number>();
+    const purchaseLineIds: number[] = [];
+    const orderIdSet = new Set<number>();
+
+    for (const line of purchaseLines) {
+        const id = getRelationalId(line.product_id);
+        if (!id) {
+            continue;
+        }
+
+        const lineId = Number(line.id ?? 0);
+        if (lineId > 0) {
+            purchaseLineIds.push(lineId);
+        }
+        const orderId = getRelationalId(line.order_id);
+        if (orderId) {
+            orderIdSet.add(orderId);
+        }
+
+        const qty = Number(line.product_qty ?? 0);
+        purchasedQtyByProductId.set(id, (purchasedQtyByProductId.get(id) ?? 0) + qty);
+
+        const currencyId = getRelationalId(line.currency_id);
+        const multiplier = currencyId ? purchaseMultiplierByCurrencyId.get(currencyId) : undefined;
+        if (multiplier === undefined) {
+            if (currencyId) {
+                unconvertedCurrencyCodes.add(getRelationalName(line.currency_id) || "?");
+            }
+            continue;
+        }
+
+        const value = Number(line.price_subtotal ?? 0) * multiplier;
+        purchaseValueByProductId.set(id, (purchaseValueByProductId.get(id) ?? 0) + value);
+    }
+
+    // Step 1a: landed cost already allocated per product by Odoo's own
+    // stock.landed.cost feature — additional_landed_cost is always posted in
+    // company currency, so no FX conversion is needed here.
+    const landedCostByProductId = new Map<number, number>();
+
+    if (purchaseLineIds.length > 0) {
+        const moves = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "stock.move",
+            "search_read",
+            [[
+                ["purchase_line_id", "in", purchaseLineIds],
+                ["state", "=", "done"],
+            ]],
+            { fields: ["id"], limit: 50000 }
+        );
+
+        const moveIds = moves.map((move) => Number(move.id ?? 0)).filter((id) => id > 0);
+
+        if (moveIds.length > 0) {
+            const valuationLines = await executeKw<Array<Record<string, unknown>>>(
+                credentials,
+                uid,
+                "stock.valuation.adjustment.lines",
+                "search_read",
+                [[["move_id", "in", moveIds]]],
+                { fields: ["product_id", "additional_landed_cost"], limit: 50000 }
+            );
+
+            for (const line of valuationLines) {
+                const id = getRelationalId(line.product_id);
+                if (!id) {
+                    continue;
+                }
+
+                const amount = Number(line.additional_landed_cost ?? 0);
+                landedCostByProductId.set(id, (landedCostByProductId.get(id) ?? 0) + amount);
+            }
+        }
+    }
+
+    // Step 1b: "operation cost" — price-correction / adjustment journal
+    // entries booked in the Miscellaneous Operations journal(s) whose Bill
+    // Reference names one of these purchase orders, restricted to lines
+    // whose product matches the filter.
+    //
+    // A broad report can easily span thousands of distinct purchase orders.
+    // Building one giant "ref ilike P00001 OR ref ilike P00002 OR ..." domain
+    // (and capping how many orders it covers, to keep the domain bounded)
+    // would silently drop whichever orders got sliced off — including
+    // whichever one actually had a correction. Instead: fetch the candidate
+    // journal lines directly (bounded by matched products, not by how many
+    // orders exist), then confirm each candidate move's Bill Reference
+    // against the full set of order names in JS.
+    const operationCostByProductId = new Map<number, number>();
+
+    if (orderIdSet.size > 0 && finalProductIds.length > 0) {
+        const orderIdsForNames = Array.from(orderIdSet);
+        const orderNames: string[] = [];
+        for (let index = 0; index < orderIdsForNames.length; index += 2000) {
+            const batch = orderIdsForNames.slice(index, index + 2000);
+            const orders = await executeKw<Array<Record<string, unknown>>>(
+                credentials,
+                uid,
+                "purchase.order",
+                "read",
+                [batch],
+                { fields: ["id", "name"] }
+            );
+            for (const order of orders) {
+                const name = toDisplayString(order.name);
+                if (name) {
+                    orderNames.push(name);
+                }
+            }
+        }
+
+        const journals = await executeKw<Array<{ id: number }>>(
+            credentials,
+            uid,
+            "account.journal",
+            "search_read",
+            [[["name", "=", MARGIN_ANALYTICS_OPERATION_COST_JOURNAL_NAME]]],
+            { fields: ["id"], limit: 100 }
+        );
+        const journalIds = journals.map((journal) => Number(journal.id)).filter((id) => id > 0);
+
+        if (journalIds.length > 0 && orderNames.length > 0) {
+            // These corrections post two lines per product: a debit/credit
+            // to a stock (asset) account and the offsetting credit/debit to
+            // a Cost of Goods Sold (expense) account — both tagged with the
+            // same product for traceability. Summing debit-credit across
+            // both would always net to zero since they're the two legs of
+            // the same balanced entry. Only the asset-side line reflects
+            // the actual change to this product's carried cost.
+            const candidateLines = await executeKw<Array<Record<string, unknown>>>(
+                credentials,
+                uid,
+                "account.move.line",
+                "search_read",
+                [[
+                    ["move_id.journal_id", "in", journalIds],
+                    ["move_id.state", "=", "posted"],
+                    ["product_id", "in", finalProductIds],
+                    ["account_id.account_type", "=like", "asset%"],
+                ]],
+                { fields: ["move_id", "product_id", "debit", "credit"], limit: 20000 }
+            );
+
+            const candidateMoveIds = Array.from(
+                new Set(
+                    candidateLines
+                        .map((line) => getRelationalId(line.move_id))
+                        .filter((id): id is number => typeof id === "number" && id > 0)
+                )
+            );
+
+            const refByMoveId = new Map<number, string>();
+            for (let index = 0; index < candidateMoveIds.length; index += 2000) {
+                const batch = candidateMoveIds.slice(index, index + 2000);
+                const moves = await executeKw<Array<Record<string, unknown>>>(
+                    credentials,
+                    uid,
+                    "account.move",
+                    "read",
+                    [batch],
+                    { fields: ["id", "ref"] }
+                );
+                for (const move of moves) {
+                    const moveId = Number(move.id ?? 0);
+                    if (moveId > 0) {
+                        refByMoveId.set(moveId, toDisplayString(move.ref));
+                    }
+                }
+            }
+
+            const qualifyingMoveIds = new Set(
+                Array.from(refByMoveId.entries())
+                    .filter(([, ref]) => ref.length > 0 && orderNames.some((name) => ref.includes(name)))
+                    .map(([moveId]) => moveId)
+            );
+
+            for (const line of candidateLines) {
+                const moveId = getRelationalId(line.move_id);
+                if (!moveId || !qualifyingMoveIds.has(moveId)) {
+                    continue;
+                }
+
+                const id = getRelationalId(line.product_id);
+                if (!id) {
+                    continue;
+                }
+
+                const net = Number(line.debit ?? 0) - Number(line.credit ?? 0);
+                operationCostByProductId.set(id, (operationCostByProductId.get(id) ?? 0) + net);
+            }
+        }
+    }
+
+    // Step 3: sales in the same period, same currency-safe conversion.
+    const saleLines = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "sale.order.line",
+        "search_read",
+        [[
+            ["product_id", "in", finalProductIds],
+            ["display_type", "=", false],
+            ["order_id.state", "in", ["sale", "done"]],
+            ["order_id.date_order", ">=", from],
+            ["order_id.date_order", "<=", to],
+        ]],
+        {
+            fields: ["product_id", "product_uom_qty", "price_subtotal", "currency_id"],
+            limit: 50000,
+        }
+    );
+
+    const saleNonPrimaryCurrencyIds = Array.from(
+        new Set(
+            saleLines
+                .map((line) => getRelationalId(line.currency_id))
+                .filter((id): id is number => typeof id === "number" && !purchaseMultiplierByCurrencyId.has(id))
+        )
+    );
+    const saleRateByCurrencyId = homeCompanyId && saleNonPrimaryCurrencyIds.length > 0
+        ? await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, saleNonPrimaryCurrencyIds, todayStr)
+        : new Map<number, number>();
+    const multiplierByCurrencyId = new Map([
+        ...purchaseMultiplierByCurrencyId,
+        ...buildCurrencyMultipliers(null, saleRateByCurrencyId),
+    ]);
+
+    const soldQtyByProductId = new Map<number, number>();
+    const salesValueByProductId = new Map<number, number>();
+
+    for (const line of saleLines) {
+        const id = getRelationalId(line.product_id);
+        if (!id) {
+            continue;
+        }
+
+        const qty = Number(line.product_uom_qty ?? 0);
+        soldQtyByProductId.set(id, (soldQtyByProductId.get(id) ?? 0) + qty);
+
+        const currencyId = getRelationalId(line.currency_id);
+        const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
+        if (multiplier === undefined) {
+            if (currencyId) {
+                unconvertedCurrencyCodes.add(getRelationalName(line.currency_id) || "?");
+            }
+            continue;
+        }
+
+        const value = Number(line.price_subtotal ?? 0) * multiplier;
+        salesValueByProductId.set(id, (salesValueByProductId.get(id) ?? 0) + value);
+    }
+
+    // Current stock on hand — a present-day snapshot, not bound to the
+    // selected date range.
+    const quants = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "stock.quant",
+        "search_read",
+        [[
+            ["product_id", "in", finalProductIds],
+            ["location_id.usage", "=", "internal"],
+        ]],
+        { fields: ["product_id", "quantity"], limit: 50000 }
+    );
+
+    const currentStockByProductId = new Map<number, number>();
+    for (const quant of quants) {
+        const id = getRelationalId(quant.product_id);
+        if (!id) {
+            continue;
+        }
+
+        const quantity = Number(quant.quantity ?? 0);
+        currentStockByProductId.set(id, (currentStockByProductId.get(id) ?? 0) + quantity);
+    }
+
+    // Step 2 & 4: per-product averages, then report-level highlights.
+    const rows: MarginAnalyticsProductRow[] = finalProductIds
+        .map((id) => {
+            const info = productInfoById.get(id);
+            const purchasedQty = Number((purchasedQtyByProductId.get(id) ?? 0).toFixed(2));
+            const purchaseValue = purchaseValueByProductId.get(id) ?? 0;
+            const landedCostValue = landedCostByProductId.get(id) ?? 0;
+            const operationCostValue = operationCostByProductId.get(id) ?? 0;
+
+            const avgPurchasePrice = purchasedQty > 0 ? purchaseValue / purchasedQty : 0;
+            const avgLandedCostPerUnit = purchasedQty > 0 ? landedCostValue / purchasedQty : 0;
+            const avgOperationCostPerUnit = purchasedQty > 0 ? operationCostValue / purchasedQty : 0;
+            const avgTotalCostPerUnit = avgPurchasePrice + avgLandedCostPerUnit + avgOperationCostPerUnit;
+
+            const soldQty = Number((soldQtyByProductId.get(id) ?? 0).toFixed(2));
+            const salesValue = salesValueByProductId.get(id) ?? 0;
+            const avgSalesPrice = soldQty > 0 ? salesValue / soldQty : 0;
+
+            const hasSalesData = soldQty > 0 && purchasedQty > 0;
+            const avgMarginPerUnit = hasSalesData ? avgSalesPrice - avgTotalCostPerUnit : 0;
+            const marginPercent = hasSalesData && avgSalesPrice > 0 ? (avgMarginPerUnit / avgSalesPrice) * 100 : 0;
+            const estimatedProfitLoss = hasSalesData ? avgMarginPerUnit * soldQty : 0;
+
+            const flags: MarginAnalyticsRowFlag[] = [];
+            if (purchasedQty > 0 && soldQty === 0) {
+                flags.push("never-sold");
+            }
+            if (soldQty > 0 && purchasedQty === 0) {
+                flags.push("sold-without-purchase");
+            }
+            if (purchasedQty > 0 && avgLandedCostPerUnit === 0) {
+                flags.push("no-landed-cost");
+            }
+            if (hasSalesData && marginPercent < 0) {
+                flags.push("negative-margin");
+            }
+            if (avgOperationCostPerUnit !== 0) {
+                flags.push("has-cost-correction");
+            }
+
+            return {
+                productId: id,
+                productName: info?.name ?? `Product #${id}`,
+                brandName: info?.brandName ?? "No Brand",
+                categoryName: info?.categoryName ?? "Uncategorized",
+                originName: info?.originName ?? "Unknown Origin",
+                rimDiameterName: info?.rimDiameterName ?? "-",
+                purchasedQty,
+                avgPurchasePrice: Number(avgPurchasePrice.toFixed(2)),
+                avgLandedCostPerUnit: Number(avgLandedCostPerUnit.toFixed(2)),
+                avgOperationCostPerUnit: Number(avgOperationCostPerUnit.toFixed(2)),
+                avgTotalCostPerUnit: Number(avgTotalCostPerUnit.toFixed(2)),
+                soldQty,
+                avgSalesPrice: Number(avgSalesPrice.toFixed(2)),
+                hasSalesData,
+                avgMarginPerUnit: Number(avgMarginPerUnit.toFixed(2)),
+                marginPercent: Number(marginPercent.toFixed(2)),
+                estimatedProfitLoss: Number(estimatedProfitLoss.toFixed(2)),
+                currentStock: Number((currentStockByProductId.get(id) ?? 0).toFixed(2)),
+                flags,
+            };
+        })
+        .sort((a, b) => b.estimatedProfitLoss - a.estimatedProfitLoss);
+
+    const productsWithPurchases = rows.filter((row) => row.purchasedQty > 0).length;
+    const rowsWithSalesData = rows.filter((row) => row.hasSalesData);
+    const productsWithoutSales = rows.filter((row) => row.purchasedQty > 0 && row.soldQty === 0).length;
+    const productsWithoutLandedCost = rows.filter(
+        (row) => row.purchasedQty > 0 && row.avgLandedCostPerUnit === 0
+    ).length;
+
+    const totalPurchasedQty = rows.reduce((sum, row) => sum + row.purchasedQty, 0);
+    const totalPurchaseValue = rows.reduce((sum, row) => sum + row.avgPurchasePrice * row.purchasedQty, 0);
+    const totalLandedCostValue = rows.reduce((sum, row) => sum + row.avgLandedCostPerUnit * row.purchasedQty, 0);
+    const totalOperationCostValue = rows.reduce((sum, row) => sum + row.avgOperationCostPerUnit * row.purchasedQty, 0);
+    const totalSoldQty = rows.reduce((sum, row) => sum + row.soldQty, 0);
+    const totalSalesValue = rowsWithSalesData.reduce((sum, row) => sum + row.avgSalesPrice * row.soldQty, 0);
+    const totalEstimatedProfitLoss = rows.reduce((sum, row) => sum + row.estimatedProfitLoss, 0);
+    const totalCurrentStock = rows.reduce((sum, row) => sum + row.currentStock, 0);
+
+    return {
+        startDate,
+        endDate,
+        currencyCode: TARGET_CURRENCY_CODE,
+        matchedProductCount: finalProductIds.length,
+        rows,
+        highlights: {
+            productsWithPurchases,
+            productsWithSales: rowsWithSalesData.length,
+            productsWithoutSales,
+            productsWithoutLandedCost,
+            totalPurchasedQty: Number(totalPurchasedQty.toFixed(2)),
+            totalSoldQty: Number(totalSoldQty.toFixed(2)),
+            totalCurrentStock: Number(totalCurrentStock.toFixed(2)),
+            avgPurchasePrice: totalPurchasedQty > 0 ? Number((totalPurchaseValue / totalPurchasedQty).toFixed(2)) : 0,
+            avgLandedCostPerUnit: totalPurchasedQty > 0
+                ? Number((totalLandedCostValue / totalPurchasedQty).toFixed(2))
+                : 0,
+            avgOperationCostPerUnit: totalPurchasedQty > 0
+                ? Number((totalOperationCostValue / totalPurchasedQty).toFixed(2))
+                : 0,
+            avgTotalCostPerUnit: totalPurchasedQty > 0
+                ? Number(
+                    ((totalPurchaseValue + totalLandedCostValue + totalOperationCostValue) / totalPurchasedQty).toFixed(2)
+                )
+                : 0,
+            avgSalesPrice: totalSoldQty > 0 ? Number((totalSalesValue / totalSoldQty).toFixed(2)) : 0,
+            avgMarginPercent: totalSalesValue > 0
+                ? Number(((totalEstimatedProfitLoss / totalSalesValue) * 100).toFixed(2))
+                : 0,
+            totalEstimatedProfitLoss: Number(totalEstimatedProfitLoss.toFixed(2)),
+        },
+        unconvertedCurrencyCodes: Array.from(unconvertedCurrencyCodes),
+    };
+}
+
+export async function getProductOrigins(credentials: OdooCredentials): Promise<Array<{ id: number; name: string }>> {
+    const uid = await authenticate(credentials);
+
+    const grouped = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "product.template",
+        "read_group",
+        [[["origin", "!=", false]], ["origin"], ["origin"]],
+        { lazy: false }
+    );
+
+    return grouped
+        .map((row) => ({ id: getRelationalId(row.origin) ?? 0, name: getRelationalName(row.origin) }))
+        .filter((origin) => origin.id > 0 && origin.name)
+        .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export async function getRimDiameters(credentials: OdooCredentials): Promise<Array<{ id: number; name: string }>> {
+    const uid = await authenticate(credentials);
+
+    const rimDiameters = await executeKw<Array<{ id: number; name: string }>>(
+        credentials,
+        uid,
+        "tire.rim.diameter",
+        "search_read",
+        [[]],
+        { fields: ["id", "name"], order: "id asc", limit: 500 }
+    );
+
+    return rimDiameters
+        .map((rimDiameter) => ({ id: Number(rimDiameter.id), name: String(rimDiameter.name ?? "") }))
+        .filter((rimDiameter) => rimDiameter.id > 0 && rimDiameter.name);
+}
+
+export async function getUnifiedLots(
+    credentials: OdooCredentials,
+    input?: { query?: string; limit?: number; offset?: number }
+): Promise<{ unifiedLots: Array<{ id: number; name: string }>; totalCount: number }> {
+    const uid = await authenticate(credentials);
+    const query = (input?.query ?? "").trim();
+    const limit = Number.isFinite(input?.limit) ? Math.max(1, Math.min(100, Number(input?.limit))) : 20;
+    const offset = Number.isFinite(input?.offset) ? Math.max(0, Number(input?.offset)) : 0;
+
+    const domain: unknown[] = query ? [["name", "ilike", query]] : [];
+
+    const totalCount = await executeKw<number>(credentials, uid, "stock.unified.lot", "search_count", [domain]);
+
+    const unifiedLots = await executeKw<Array<{ id: number; name: string }>>(
+        credentials,
+        uid,
+        "stock.unified.lot",
+        "search_read",
+        [domain],
+        { fields: ["id", "name"], order: "name desc", limit, offset }
+    );
+
+    return {
+        totalCount,
+        unifiedLots: unifiedLots
+            .map((lot) => ({ id: Number(lot.id), name: String(lot.name ?? "") }))
+            .filter((lot) => lot.id > 0 && lot.name),
+    };
+}
+
 export async function getPendingOrders(credentials: OdooCredentials) {
     const uid = await authenticate(credentials);
 
