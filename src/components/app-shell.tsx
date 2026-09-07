@@ -43,6 +43,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             return links.filter((link) => link.href === "/sales-targets" || link.href === "/settings");
         }
 
+        if (role === "sales_manager") {
+            return links.filter(
+                (link) =>
+                    link.href === "/sales-targets" ||
+                    link.href === "/salesperson-activity" ||
+                    link.href === "/settings"
+            );
+        }
+
         if (role === "store") {
             return links.filter((link) => link.href === "/orders/pending" || link.href === "/product-scanner" || link.href === "/settings");
         }

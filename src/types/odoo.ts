@@ -5,6 +5,22 @@ export type OdooCredentials = {
     password: string;
 };
 
+/**
+ * What each individual user stores under `users/{uid}/integrations/odoo`.
+ * The URL + Database are a system-wide setting an admin controls instead
+ * (see `system/odoo` / `/api/system-settings`) — the two are combined
+ * server-side into `OdooCredentials` at request time.
+ */
+export type OdooUserCredentials = {
+    username: string;
+    password: string;
+};
+
+export type OdooSystemSettings = {
+    url: string;
+    db: string;
+};
+
 export type OdooOrderLineInput = {
     productId: number;
     quantity: number;

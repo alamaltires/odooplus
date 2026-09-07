@@ -3,10 +3,16 @@ import { Timestamp } from "firebase-admin/firestore";
 import { getAdminAuth, getAdminDb } from "@/lib/server/firebase-admin";
 import { getUserIdFromRequest, getUserRoleFromRequest } from "@/lib/server/auth-helpers";
 
-type Role = "admin" | "purchase" | "salesperson" | "store";
+type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "store";
 
 function normalizeRole(value: string | undefined): Role {
-    if (value === "admin" || value === "purchase" || value === "salesperson" || value === "store") {
+    if (
+        value === "admin" ||
+        value === "purchase" ||
+        value === "salesperson" ||
+        value === "sales_manager" ||
+        value === "store"
+    ) {
         return value;
     }
 

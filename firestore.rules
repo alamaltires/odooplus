@@ -29,6 +29,13 @@ service cloud.firestore {
       }
     }
 
+    match /system/{docId} {
+      // Odoo URL + Database — a single admin-controlled setting shared by
+      // every user, only ever read/written server-side via the Admin SDK
+      // (src/app/api/system-settings/route.ts, admin-only).
+      allow read, write: if false;
+    }
+
     match /sales-targets/{docId} {
       // Shared across salespeople/admins in the UI; not owner-scoped
       // (src/lib/firestore-settings.ts).

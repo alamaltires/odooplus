@@ -241,6 +241,25 @@ export function getProductsPerformanceReport(input: {
     }>("/api/odoo/products-performance", input);
 }
 
+export async function getSystemOdooSettings() {
+    const token = await getAuthToken();
+    const response = await fetch("/api/system-settings", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+    });
+
+    const data = (await response.json()) as { settings: { url: string; db: string } | null; error?: string };
+    if (!response.ok || data.error) {
+        throw new Error(data.error ?? "Failed to load system settings");
+    }
+
+    return data;
+}
+
+export function saveSystemOdooSettings(input: { url: string; db: string }) {
+    return post<{ settings: { url: string; db: string } }>("/api/system-settings", input);
+}
+
 export function getCompanies() {
     return post<{
         companies: Array<{

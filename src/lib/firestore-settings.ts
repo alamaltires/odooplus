@@ -1,16 +1,21 @@
 import { collection, doc, getDoc, getDocs, setDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
-import { BackorderDetails, OdooCredentials, SalesTargetRecord, SavedBackorder } from "@/types/odoo";
+import { BackorderDetails, OdooUserCredentials, SalesTargetRecord, SavedBackorder } from "@/types/odoo";
 
 const SETTINGS_DOC = "odoo";
 const SALES_TARGETS_COLLECTION = "sales-targets";
 
 type OdooSettingsDocument = {
-    credentials: OdooCredentials;
+    credentials: OdooUserCredentials;
     updatedAt: string;
 };
 
-export async function saveOdooSettings(userId: string, credentials: OdooCredentials) {
+/**
+ * Saves this user's own Odoo username/password. The Odoo URL + Database are
+ * a system-wide setting an admin manages instead — see
+ * `src/lib/client-odoo.ts`'s `getSystemOdooSettings`/`saveSystemOdooSettings`.
+ */
+export async function saveOdooSettings(userId: string, credentials: OdooUserCredentials) {
     const ref = doc(db, "users", userId, "integrations", SETTINGS_DOC);
     const payload: OdooSettingsDocument = {
         credentials,
@@ -20,7 +25,7 @@ export async function saveOdooSettings(userId: string, credentials: OdooCredenti
     await setDoc(ref, payload, { merge: true });
 }
 
-export async function getOdooSettings(userId: string): Promise<OdooCredentials | null> {
+export async function getOdooSettings(userId: string): Promise<OdooUserCredentials | null> {
     const ref = doc(db, "users", userId, "integrations", SETTINGS_DOC);
     const snapshot = await getDoc(ref);
 

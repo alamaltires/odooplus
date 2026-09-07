@@ -4,29 +4,46 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import { getAuth } from "firebase/auth";
 import { useAuth } from "@/lib/auth-context";
 import { getOdooSettings, saveOdooSettings } from "@/lib/firestore-settings";
-import { OdooCredentials } from "@/types/odoo";
+import { getSystemOdooSettings, saveSystemOdooSettings } from "@/lib/client-odoo";
+import { OdooUserCredentials } from "@/types/odoo";
 
-const initialState: OdooCredentials = {
-    url: "",
-    db: "",
+type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "store";
+
+const ROLE_LABELS: Record<Role, string> = {
+    admin: "admin",
+    purchase: "purchase",
+    salesperson: "salesperson",
+    sales_manager: "sales manager",
+    store: "store",
+};
+
+const initialState: OdooUserCredentials = {
     username: "",
     password: "",
 };
 
+const initialSystemState = { url: "", db: "" };
+
 export default function SettingsPage() {
     const { user, role } = useAuth();
-    const [values, setValues] = useState<OdooCredentials>(initialState);
+    const [values, setValues] = useState<OdooUserCredentials>(initialState);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [message, setMessage] = useState<string | null>(null);
-    const [users, setUsers] = useState<Array<{ id: string; email: string; role: "admin" | "purchase" | "salesperson" | "store"; createdAt: string | null }>>([]);
+
+    const [systemValues, setSystemValues] = useState(initialSystemState);
+    const [systemLoading, setSystemLoading] = useState(false);
+    const [systemSaving, setSystemSaving] = useState(false);
+    const [systemMessage, setSystemMessage] = useState<string | null>(null);
+
+    const [users, setUsers] = useState<Array<{ id: string; email: string; role: Role; createdAt: string | null }>>([]);
     const [usersLoading, setUsersLoading] = useState(false);
     const [usersMessage, setUsersMessage] = useState<string | null>(null);
     const [creatingUser, setCreatingUser] = useState(false);
     const [newUser, setNewUser] = useState({
         email: "",
         password: "",
-        role: "purchase" as "admin" | "purchase" | "salesperson" | "store",
+        role: "purchase" as Role,
     });
 
     const getBearerToken = useCallback(async () => {
@@ -52,7 +69,7 @@ export default function SettingsPage() {
             });
 
             const result = (await response.json()) as {
-                users?: Array<{ id: string; email: string; role: "admin" | "purchase" | "salesperson" | "store"; createdAt: string | null }>;
+                users?: Array<{ id: string; email: string; role: Role; createdAt: string | null }>;
                 error?: string;
             };
 
@@ -100,6 +117,23 @@ export default function SettingsPage() {
         }
 
         void loadUsers();
+
+        async function loadSystemSettings() {
+            setSystemLoading(true);
+            setSystemMessage(null);
+            try {
+                const data = await getSystemOdooSettings();
+                if (data.settings) {
+                    setSystemValues(data.settings);
+                }
+            } catch (error) {
+                setSystemMessage(error instanceof Error ? error.message : "Failed to load system settings.");
+            } finally {
+                setSystemLoading(false);
+            }
+        }
+
+        void loadSystemSettings();
     }, [user, role, loadUsers]);
 
     async function handleSubmit(event: FormEvent) {
@@ -118,6 +152,22 @@ export default function SettingsPage() {
             setMessage(error instanceof Error ? error.message : "Failed to save settings.");
         } finally {
             setSaving(false);
+        }
+    }
+
+    async function handleSystemSubmit(event: FormEvent) {
+        event.preventDefault();
+
+        setSystemSaving(true);
+        setSystemMessage(null);
+
+        try {
+            await saveSystemOdooSettings(systemValues);
+            setSystemMessage("System Odoo connection saved successfully.");
+        } catch (error) {
+            setSystemMessage(error instanceof Error ? error.message : "Failed to save system settings.");
+        } finally {
+            setSystemSaving(false);
         }
     }
 
@@ -158,34 +208,59 @@ export default function SettingsPage() {
 
     return (
         <section className="max-w-5xl space-y-6">
+            {role === "admin" ? (
+                <article className="rounded-3xl border border-(--line) bg-(--card) p-6">
+                    <h1 className="font-display text-2xl">System Odoo Connection</h1>
+                    <p className="mt-1 text-sm text-(--ink-soft)">
+                        The Odoo URL and Database are shared by every user in this app — set them once here. Each
+                        user still logs in with their own username and password below.
+                    </p>
+
+                    <form onSubmit={handleSystemSubmit} className="mt-6 grid gap-4 sm:grid-cols-2">
+                        <label className="sm:col-span-2">
+                            <span className="mb-1 block text-sm text-(--ink-soft)">Odoo URL</span>
+                            <input
+                                value={systemValues.url}
+                                onChange={(event) => setSystemValues((prev) => ({ ...prev, url: event.target.value }))}
+                                placeholder="https://your-odoo-instance.com"
+                                required
+                                disabled={systemLoading}
+                                className="w-full rounded-xl border border-(--line) bg-white px-4 py-2.5 disabled:opacity-60"
+                            />
+                        </label>
+
+                        <label className="sm:col-span-2">
+                            <span className="mb-1 block text-sm text-(--ink-soft)">Database</span>
+                            <input
+                                value={systemValues.db}
+                                onChange={(event) => setSystemValues((prev) => ({ ...prev, db: event.target.value }))}
+                                required
+                                disabled={systemLoading}
+                                className="w-full rounded-xl border border-(--line) bg-white px-4 py-2.5 disabled:opacity-60"
+                            />
+                        </label>
+
+                        <button
+                            type="submit"
+                            disabled={systemSaving || systemLoading}
+                            className="sm:col-span-2 rounded-xl bg-(--brand) px-4 py-2.5 font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
+                        >
+                            {systemSaving ? "Saving..." : "Save System Settings"}
+                        </button>
+                    </form>
+
+                    {systemMessage ? <p className="mt-4 text-sm text-(--ink-soft)">{systemMessage}</p> : null}
+                </article>
+            ) : null}
+
             <article className="rounded-3xl border border-(--line) bg-(--card) p-6">
-                <h1 className="font-display text-2xl">Odoo API Settings</h1>
+                <h1 className="font-display text-2xl">Your Odoo Login</h1>
                 <p className="mt-1 text-sm text-(--ink-soft)">
-                    Save your Odoo instance credentials to use dashboard features.
+                    Save your own Odoo username and password to use dashboard features. The URL and Database are
+                    configured system-wide by an admin.
                 </p>
 
                 <form onSubmit={handleSubmit} className="mt-6 grid gap-4 sm:grid-cols-2">
-                    <label className="sm:col-span-2">
-                        <span className="mb-1 block text-sm text-(--ink-soft)">Odoo URL</span>
-                        <input
-                            value={values.url}
-                            onChange={(event) => setValues((prev) => ({ ...prev, url: event.target.value }))}
-                            placeholder="https://your-odoo-instance.com"
-                            required
-                            className="w-full rounded-xl border border-(--line) bg-white px-4 py-2.5"
-                        />
-                    </label>
-
-                    <label>
-                        <span className="mb-1 block text-sm text-(--ink-soft)">Database</span>
-                        <input
-                            value={values.db}
-                            onChange={(event) => setValues((prev) => ({ ...prev, db: event.target.value }))}
-                            required
-                            className="w-full rounded-xl border border-(--line) bg-white px-4 py-2.5"
-                        />
-                    </label>
-
                     <label>
                         <span className="mb-1 block text-sm text-(--ink-soft)">Username</span>
                         <input
@@ -198,7 +273,7 @@ export default function SettingsPage() {
                         />
                     </label>
 
-                    <label className="sm:col-span-2">
+                    <label>
                         <span className="mb-1 block text-sm text-(--ink-soft)">Password</span>
                         <input
                             type="password"
@@ -257,14 +332,15 @@ export default function SettingsPage() {
                             <select
                                 value={newUser.role}
                                 onChange={(event) =>
-                                    setNewUser((prev) => ({ ...prev, role: event.target.value as "admin" | "purchase" | "salesperson" | "store" }))
+                                    setNewUser((prev) => ({ ...prev, role: event.target.value as Role }))
                                 }
                                 className="w-full rounded-xl border border-(--line) bg-white px-4 py-2.5"
                             >
-                                <option value="purchase">purchase</option>
-                                <option value="salesperson">salesperson</option>
-                                <option value="store">store</option>
-                                <option value="admin">admin</option>
+                                <option value="purchase">Purchase</option>
+                                <option value="salesperson">Salesperson</option>
+                                <option value="sales_manager">Sales Manager</option>
+                                <option value="store">Store</option>
+                                <option value="admin">Admin</option>
                             </select>
                         </label>
 
@@ -292,7 +368,7 @@ export default function SettingsPage() {
                                 {users.map((item) => (
                                     <tr key={item.id} className="border-t border-(--line)">
                                         <td className="px-4 py-3">{item.email || "-"}</td>
-                                        <td className="px-4 py-3 uppercase">{item.role}</td>
+                                        <td className="px-4 py-3 uppercase">{ROLE_LABELS[item.role] ?? item.role}</td>
                                         <td className="px-4 py-3">{item.createdAt ? item.createdAt.slice(0, 10) : "-"}</td>
                                     </tr>
                                 ))}
