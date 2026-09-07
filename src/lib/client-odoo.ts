@@ -1,4 +1,5 @@
 import { getAuth } from "firebase/auth";
+import { getSelectedCompanyIds } from "@/lib/company-filter";
 import {
     BackorderDetails,
     BackorderStatus,
@@ -30,13 +31,18 @@ async function getAuthToken(): Promise<string> {
 async function post<T>(path: string, body: Record<string, unknown>) {
     const token = await getAuthToken();
 
+    const selectedCompanyIds = getSelectedCompanyIds();
+    const requestBody = selectedCompanyIds.length > 0
+        ? { ...body, companyIds: selectedCompanyIds }
+        : body;
+
     const response = await fetch(path, {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(requestBody),
     });
 
     const data = (await response.json()) as T & { error?: string };
@@ -235,6 +241,15 @@ export function getProductsPerformanceReport(input: {
     }>("/api/odoo/products-performance", input);
 }
 
+export function getCompanies() {
+    return post<{
+        companies: Array<{
+            id: number;
+            name: string;
+        }>;
+    }>("/api/odoo/companies", {});
+}
+
 export function getProductOrigins() {
     return post<{
         origins: Array<{
@@ -272,6 +287,7 @@ export function getMarginAnalyticsReport(input: {
     originId?: number | null;
     rimDiameterId?: number | null;
     unifiedLotId?: number | null;
+    productId?: number | null;
     startDate: string;
     endDate: string;
 }) {

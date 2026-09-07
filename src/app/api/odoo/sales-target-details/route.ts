@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
-import { getSalesTargetDetails } from "@/lib/server/odoo-client";
-import { getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
+import { getSalesTargetDetails, runWithCompanyIds } from "@/lib/server/odoo-client";
+import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
 
 export async function POST(request: Request) {
     try {
         const { credentials } = await getOdooCredentialsFromRequest(request);
+        const companyIds = await getCompanyIdsFromRequest(request);
         const body = (await request.json()) as {
             salespersonId?: number;
             year?: number;
@@ -12,12 +13,14 @@ export async function POST(request: Request) {
             brandId?: number;
         };
 
-        const data = await getSalesTargetDetails(credentials, {
-            salespersonId: Number(body.salespersonId),
-            year: Number(body.year),
-            month: Number(body.month),
-            brandId: Number(body.brandId),
-        });
+        const data = await runWithCompanyIds(companyIds, () =>
+            getSalesTargetDetails(credentials, {
+                salespersonId: Number(body.salespersonId),
+                year: Number(body.year),
+                month: Number(body.month),
+                brandId: Number(body.brandId),
+            })
+        );
 
         return NextResponse.json(data);
     } catch (error) {

@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useCallback, useState } from "react";
 import { ClipboardList, LayoutDashboard, LogOut, Menu, PiggyBank, ScanSearch, Settings, ShoppingBasket, Target, TrendingUp, Users, X, type LucideIcon } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
+import { CompanySelector } from "@/components/company-selector";
 
 // Add new sidebar entries here — each one just needs a route, a label, and an icon.
 const links: Array<{ href: string; label: string; icon: LucideIcon }> = [
@@ -142,6 +143,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             {/* Desktop sidebar */}
             <aside className="hidden lg:flex lg:w-64 lg:shrink-0 lg:flex-col lg:border-r lg:border-(--line) lg:bg-(--card)">
                 {brandBlock}
+                <CompanySelector />
                 {navList}
                 {userBlock}
             </aside>
@@ -184,6 +186,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                                 <X className="h-4 w-4" aria-hidden="true" />
                             </button>
                         </div>
+                        <CompanySelector />
                         {navList}
                         {userBlock}
                     </aside>

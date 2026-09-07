@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
-import { getBrands } from "@/lib/server/odoo-client";
-import { getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
+import { getBrands, runWithCompanyIds } from "@/lib/server/odoo-client";
+import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
 
 export async function POST(request: Request) {
     try {
         const { credentials } = await getOdooCredentialsFromRequest(request);
-        const brands = await getBrands(credentials);
+        const companyIds = await getCompanyIdsFromRequest(request);
+        const brands = await runWithCompanyIds(companyIds, () => getBrands(credentials));
         return NextResponse.json({ brands });
     } catch (error) {
         return NextResponse.json(

@@ -1,21 +1,23 @@
 import { NextResponse } from "next/server";
-import { getMarginAnalyticsReport } from "@/lib/server/odoo-client";
-import { getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
+import { getMarginAnalyticsReport, runWithCompanyIds } from "@/lib/server/odoo-client";
+import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
 
 export async function POST(request: Request) {
     try {
         const { credentials } = await getOdooCredentialsFromRequest(request);
+        const companyIds = await getCompanyIdsFromRequest(request);
         const body = (await request.json()) as {
             categoryId?: number | null;
             brandId?: number | null;
             originId?: number | null;
             rimDiameterId?: number | null;
             unifiedLotId?: number | null;
+            productId?: number | null;
             startDate: string;
             endDate: string;
         };
 
-        const report = await getMarginAnalyticsReport(credentials, body);
+        const report = await runWithCompanyIds(companyIds, () => getMarginAnalyticsReport(credentials, body));
         return NextResponse.json(report);
     } catch (error) {
         return NextResponse.json(

@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
-import { getProductsPerformanceReport } from "@/lib/server/odoo-client";
-import { getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
+import { getProductsPerformanceReport, runWithCompanyIds } from "@/lib/server/odoo-client";
+import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
 
 export async function POST(request: Request) {
     try {
         const { credentials } = await getOdooCredentialsFromRequest(request);
+        const companyIds = await getCompanyIdsFromRequest(request);
         const body = (await request.json()) as {
             purchaseOrderId?: number | null;
             productId?: number | null;
@@ -14,7 +15,9 @@ export async function POST(request: Request) {
             endDate: string;
         };
 
-        const report = await getProductsPerformanceReport(credentials, body);
+        const report = await runWithCompanyIds(companyIds, () =>
+            getProductsPerformanceReport(credentials, body)
+        );
         return NextResponse.json(report);
     } catch (error) {
         return NextResponse.json(

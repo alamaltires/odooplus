@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
-import { getDashboardStats } from "@/lib/server/odoo-client";
-import { getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
+import { getDashboardStats, runWithCompanyIds } from "@/lib/server/odoo-client";
+import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
 import { OdooDashboardActivityType } from "@/types/odoo";
 
 export async function POST(request: Request) {
     try {
         const { credentials } = await getOdooCredentialsFromRequest(request);
+        const companyIds = await getCompanyIdsFromRequest(request);
 
         let activityType: OdooDashboardActivityType = "crmVisits";
         let includeSummaryCounts = true;
@@ -30,7 +31,9 @@ export async function POST(request: Request) {
             includeSummaryCounts = true;
         }
 
-        const data = await getDashboardStats(credentials, activityType, includeSummaryCounts);
+        const data = await runWithCompanyIds(companyIds, () =>
+            getDashboardStats(credentials, activityType, includeSummaryCounts)
+        );
         return NextResponse.json(data);
     } catch (error) {
         return NextResponse.json(

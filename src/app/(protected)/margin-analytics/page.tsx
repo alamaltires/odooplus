@@ -8,6 +8,7 @@ import {
     getProductBrands,
     getProductCategories,
     getProductOrigins,
+    getProducts,
     getRimDiameters,
     searchUnifiedLots,
 } from "@/lib/client-odoo";
@@ -217,6 +218,16 @@ export default function MarginAnalyticsPage() {
     const [rimDiameterMenuOpen, setRimDiameterMenuOpen] = useState(false);
     const [selectedRimDiameter, setSelectedRimDiameter] = useState<Option | null>(null);
 
+    const [productQuery, setProductQuery] = useState("");
+    const [productActivated, setProductActivated] = useState(false);
+    const [productMenuOpen, setProductMenuOpen] = useState(false);
+    const [productResults, setProductResults] = useState<Option[]>([]);
+    const [productLoading, setProductLoading] = useState(false);
+    const [productLoadingMore, setProductLoadingMore] = useState(false);
+    const [productOffset, setProductOffset] = useState(0);
+    const [productHasMore, setProductHasMore] = useState(false);
+    const [selectedProduct, setSelectedProduct] = useState<Option | null>(null);
+
     const [unifiedLotQuery, setUnifiedLotQuery] = useState("");
     const [unifiedLotActivated, setUnifiedLotActivated] = useState(false);
     const [unifiedLotMenuOpen, setUnifiedLotMenuOpen] = useState(false);
@@ -341,6 +352,50 @@ export default function MarginAnalyticsPage() {
     }, [user]);
 
     useEffect(() => {
+        if (!productActivated) {
+            return;
+        }
+        const trimmedQuery = productQuery.trim();
+        if (trimmedQuery.length < MIN_SEARCH_QUERY_LENGTH) {
+            setProductResults([]);
+            setProductHasMore(false);
+            setProductOffset(0);
+            return;
+        }
+        const debounceId = window.setTimeout(() => {
+            setProductLoading(true);
+            getProducts({ query: trimmedQuery, limit: SEARCH_PAGE_SIZE, offset: 0 })
+                .then((data) => {
+                    setProductResults(data.products);
+                    setProductHasMore(data.hasMore);
+                    setProductOffset(data.products.length);
+                })
+                .catch(() => {
+                    setProductResults([]);
+                    setProductHasMore(false);
+                })
+                .finally(() => setProductLoading(false));
+        }, 250);
+        return () => window.clearTimeout(debounceId);
+    }, [productActivated, productQuery]);
+
+    function loadMoreProducts() {
+        const trimmedQuery = productQuery.trim();
+        if (productLoading || productLoadingMore || !productHasMore || trimmedQuery.length < MIN_SEARCH_QUERY_LENGTH) {
+            return;
+        }
+        setProductLoadingMore(true);
+        getProducts({ query: trimmedQuery, limit: SEARCH_PAGE_SIZE, offset: productOffset })
+            .then((data) => {
+                setProductResults((current) => [...current, ...data.products]);
+                setProductHasMore(data.hasMore);
+                setProductOffset((current) => current + data.products.length);
+            })
+            .catch(() => setProductHasMore(false))
+            .finally(() => setProductLoadingMore(false));
+    }
+
+    useEffect(() => {
         if (!unifiedLotActivated) {
             return;
         }
@@ -408,7 +463,9 @@ export default function MarginAnalyticsPage() {
         return rimDiameters.filter((rim) => rim.name.toLowerCase().includes(q));
     }, [rimDiameterQuery, rimDiameters]);
 
-    const hasAnyFilter = Boolean(selectedCategory || selectedBrand || selectedOrigin || selectedRimDiameter || selectedUnifiedLot);
+    const hasAnyFilter = Boolean(
+        selectedCategory || selectedBrand || selectedOrigin || selectedRimDiameter || selectedUnifiedLot || selectedProduct
+    );
 
     const filteredSortedRows = useMemo(() => {
         if (!report) return [];
@@ -439,12 +496,26 @@ export default function MarginAnalyticsPage() {
     }, [report]);
 
     const exportFileName = useMemo(() => {
-        const parts = [selectedCategory?.name, selectedBrand?.name, selectedOrigin?.name, selectedRimDiameter?.name, selectedUnifiedLot?.name].filter(
-            Boolean
-        );
+        const parts = [
+            selectedCategory?.name,
+            selectedBrand?.name,
+            selectedOrigin?.name,
+            selectedRimDiameter?.name,
+            selectedUnifiedLot?.name,
+            selectedProduct?.name,
+        ].filter(Boolean);
         const scope = parts.join("-") || "margin-analytics";
         return `margin-analytics-${sanitizeFileName(scope)}-${startDate}-to-${endDate}`;
-    }, [endDate, selectedBrand?.name, selectedCategory?.name, selectedOrigin?.name, selectedRimDiameter?.name, selectedUnifiedLot?.name, startDate]);
+    }, [
+        endDate,
+        selectedBrand?.name,
+        selectedCategory?.name,
+        selectedOrigin?.name,
+        selectedProduct?.name,
+        selectedRimDiameter?.name,
+        selectedUnifiedLot?.name,
+        startDate,
+    ]);
 
     async function handleGenerate(event: FormEvent) {
         event.preventDefault();
@@ -464,6 +535,7 @@ export default function MarginAnalyticsPage() {
                 originId: selectedOrigin?.id,
                 rimDiameterId: selectedRimDiameter?.id,
                 unifiedLotId: selectedUnifiedLot?.id,
+                productId: selectedProduct?.id,
                 startDate,
                 endDate,
             });
@@ -586,6 +658,75 @@ export default function MarginAnalyticsPage() {
 
             <form onSubmit={handleGenerate} className="mt-6 rounded-2xl border border-(--line) bg-(--card) p-5">
                 <div className="grid gap-4 lg:grid-cols-2">
+                    <label className="relative block">
+                        <span className="mb-2 block text-sm font-medium">Product</span>
+                        <div className="relative">
+                            <Search
+                                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-(--ink-soft)"
+                                aria-hidden="true"
+                            />
+                            <input
+                                value={productQuery}
+                                onChange={(event) => {
+                                    setProductQuery(event.target.value);
+                                    setProductMenuOpen(true);
+                                    setProductActivated(true);
+                                    setSelectedProduct(null);
+                                }}
+                                onFocus={() => {
+                                    setProductMenuOpen(true);
+                                    setProductActivated(true);
+                                }}
+                                onBlur={() => window.setTimeout(() => setProductMenuOpen(false), 120)}
+                                placeholder="Search for a single product to scan"
+                                className="w-full rounded-xl border border-(--line) bg-white py-2 pl-10 pr-3"
+                            />
+                        </div>
+
+                        {productMenuOpen ? (
+                            <ul
+                                onScroll={(event) => {
+                                    const target = event.currentTarget;
+                                    if (target.scrollHeight - target.scrollTop - target.clientHeight < SCROLL_LOAD_MORE_THRESHOLD_PX) {
+                                        loadMoreProducts();
+                                    }
+                                }}
+                                className="absolute z-20 mt-2 max-h-64 w-full overflow-auto rounded-xl border border-(--line) bg-white p-1 shadow-lg"
+                            >
+                                {productQuery.trim().length < MIN_SEARCH_QUERY_LENGTH ? (
+                                    <li className="px-3 py-2 text-sm text-(--ink-soft)">
+                                        Type at least {MIN_SEARCH_QUERY_LENGTH} characters to search.
+                                    </li>
+                                ) : productLoading ? (
+                                    <li className="px-3 py-2 text-sm text-(--ink-soft)">Searching...</li>
+                                ) : productResults.length === 0 ? (
+                                    <li className="px-3 py-2 text-sm text-(--ink-soft)">No products found.</li>
+                                ) : (
+                                    <>
+                                        {productResults.map((product) => (
+                                            <li key={product.id}>
+                                                <button
+                                                    type="button"
+                                                    onMouseDown={() => {
+                                                        setSelectedProduct(product);
+                                                        setProductQuery(product.name);
+                                                        setProductMenuOpen(false);
+                                                    }}
+                                                    className="w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-(--chip)"
+                                                >
+                                                    {product.name}
+                                                </button>
+                                            </li>
+                                        ))}
+                                        {productLoadingMore ? (
+                                            <li className="px-3 py-2 text-center text-xs text-(--ink-soft)">Loading more...</li>
+                                        ) : null}
+                                    </>
+                                )}
+                            </ul>
+                        ) : null}
+                    </label>
+
                     <SearchableSelect
                         label="Product Category"
                         placeholder="Search categories"
@@ -781,7 +922,7 @@ export default function MarginAnalyticsPage() {
 
                 {!hasAnyFilter ? (
                     <p className="mt-4 text-xs text-(--ink-soft)">
-                        Select a category, brand, origin, rim diameter, or unified lot (or mix them) to generate a report.
+                        Select a product, category, brand, origin, rim diameter, or unified lot (or mix them) to generate a report.
                     </p>
                 ) : null}
 

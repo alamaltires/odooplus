@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
-import { getPurchaseOrderReport } from "@/lib/server/odoo-client";
-import { getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
+import { getPurchaseOrderReport, runWithCompanyIds } from "@/lib/server/odoo-client";
+import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
 import { getPendingBackorderQuantitiesByVariantIds } from "@/lib/server/backorders-store";
 
 export async function POST(request: Request) {
     try {
         const { credentials } = await getOdooCredentialsFromRequest(request);
+        const companyIds = await getCompanyIdsFromRequest(request);
         const {
             categoryId,
             categoryModel,
@@ -22,14 +23,16 @@ export async function POST(request: Request) {
             stockDurationMonths: number;
         };
 
-        const report = await getPurchaseOrderReport(credentials, {
-            categoryId,
-            categoryModel,
-            brandId,
-            startDate,
-            endDate,
-            stockDurationMonths,
-        });
+        const report = await runWithCompanyIds(companyIds, () =>
+            getPurchaseOrderReport(credentials, {
+                categoryId,
+                categoryModel,
+                brandId,
+                startDate,
+                endDate,
+                stockDurationMonths,
+            })
+        );
 
         const variantIds = report.rows.map((row) => row.productId);
         const pendingByVariantId = await getPendingBackorderQuantitiesByVariantIds(variantIds);

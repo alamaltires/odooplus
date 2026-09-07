@@ -78,3 +78,26 @@ export async function getOdooCredentialsFromRequest(
 
     return { userId, credentials };
 }
+
+/**
+ * Reads the `companyIds` the client-side sidebar company selector attached
+ * to the request body (see `src/lib/company-filter.ts` and `post()` in
+ * `client-odoo.ts`), without consuming the request body stream — route
+ * handlers still call `request.json()` themselves afterwards. Returns an
+ * empty array when absent (e.g. non-JSON or GET requests), which callers
+ * should treat as "no company restriction".
+ */
+export async function getCompanyIdsFromRequest(request: Request): Promise<number[]> {
+    try {
+        const body = await request.clone().json();
+        if (!body || typeof body !== "object" || !Array.isArray((body as { companyIds?: unknown }).companyIds)) {
+            return [];
+        }
+
+        return (body as { companyIds: unknown[] }).companyIds.filter(
+            (id): id is number => typeof id === "number" && id > 0
+        );
+    } catch {
+        return [];
+    }
+}

@@ -1,8 +1,37 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
     OdooCredentials,
     OdooDashboardActivityType,
     OdooOrderLineInput,
 } from "@/types/odoo";
+
+/**
+ * Carries the caller's selected company IDs (from the sidebar company
+ * selector) across the async call chain of a single request, so every
+ * `executeKw` call made while handling that request — no matter how deep in
+ * the report-building pipeline — automatically scopes to those companies via
+ * Odoo's own `allowed_company_ids` context key (the same mechanism the Odoo
+ * web client uses when you switch companies). This avoids threading a
+ * `companyIds` parameter through every report function's signature.
+ */
+const companyContextStorage = new AsyncLocalStorage<number[]>();
+
+/**
+ * Runs `fn` with the given company IDs applied to every Odoo RPC call made
+ * within it (directly or via nested async calls). Pass an empty/undefined
+ * list to run without any company restriction (falls back to Odoo's own
+ * default — the API user's assigned company).
+ */
+export async function runWithCompanyIds<T>(
+    companyIds: number[] | null | undefined,
+    fn: () => Promise<T>
+): Promise<T> {
+    if (!companyIds || companyIds.length === 0) {
+        return fn();
+    }
+
+    return companyContextStorage.run(companyIds, fn);
+}
 
 type ProductCategory = {
     id: number;
@@ -328,6 +357,17 @@ async function executeKw<T>(
     args: unknown[] = [],
     kwargs: Record<string, unknown> = {}
 ) {
+    const companyIds = companyContextStorage.getStore();
+    const finalKwargs = companyIds && companyIds.length > 0
+        ? {
+            ...kwargs,
+            context: {
+                ...(kwargs.context as Record<string, unknown> | undefined),
+                allowed_company_ids: companyIds,
+            },
+        }
+        : kwargs;
+
     return jsonRpc<T>(credentials.url, {
         service: "object",
         method: "execute_kw",
@@ -338,7 +378,7 @@ async function executeKw<T>(
             model,
             method,
             args,
-            kwargs,
+            finalKwargs,
         ],
     });
 }
@@ -3623,7 +3663,20 @@ const MARGIN_ANALYTICS_OPERATION_COST_JOURNAL_NAME = "Miscellaneous Operations";
  * exactly the matched products, never a broader/general total. The Landed
  * Cost journal and the goods vendor bill itself are deliberately excluded
  * from "operation cost" because that money is already counted in the landed
- * cost and purchase price figures respectively.
+ * cost and purchase price figures respectively (verified live: a Landed
+ * Cost journal entry duplicates the exact amount already on its
+ * stock.valuation.adjustment.lines record, so also scanning that journal
+ * for "operation cost" would double-count it).
+ *
+ * This system spans multiple companies with different base currencies (see
+ * Accounting > Currencies), and every one of these four amount sources can
+ * be denominated in a currency other than the home company's AED —
+ * including per-line on stock.valuation.adjustment.lines (confirmed live:
+ * landed cost posted under a USD-currency company stores the amount in
+ * USD) and via each journal entry's own company on the operation-cost
+ * side. All four are converted to AED through one shared, incrementally
+ * built currency multiplier map (`ensureCurrencyMultipliers`) rather than
+ * assuming AED anywhere.
  */
 export async function getMarginAnalyticsReport(
     credentials: OdooCredentials,
@@ -3633,6 +3686,7 @@ export async function getMarginAnalyticsReport(
         originId?: number | null;
         rimDiameterId?: number | null;
         unifiedLotId?: number | null;
+        productId?: number | null;
         startDate: string;
         endDate: string;
     }
@@ -3649,9 +3703,11 @@ export async function getMarginAnalyticsReport(
     const hasRimDiameter = Number.isFinite(rimDiameterId) && rimDiameterId > 0;
     const unifiedLotId = Number(input.unifiedLotId);
     const hasUnifiedLot = Number.isFinite(unifiedLotId) && unifiedLotId > 0;
+    const productId = Number(input.productId);
+    const hasProduct = Number.isFinite(productId) && productId > 0;
 
-    if (!hasCategory && !hasBrand && !hasOrigin && !hasRimDiameter && !hasUnifiedLot) {
-        throw new Error("Select at least one filter: category, brand, origin, rim diameter, or unified lot.");
+    if (!hasCategory && !hasBrand && !hasOrigin && !hasRimDiameter && !hasUnifiedLot && !hasProduct) {
+        throw new Error("Select at least one filter: category, brand, origin, rim diameter, unified lot, or product.");
     }
 
     const startDate = input.startDate;
@@ -3704,6 +3760,10 @@ export async function getMarginAnalyticsReport(
             return emptyMarginAnalyticsReport(startDate, endDate);
         }
         idSets.push(ids);
+    }
+
+    if (hasProduct) {
+        idSets.push(new Set([productId]));
     }
 
     const finalProductIds = intersectIdSets(idSets).slice(0, MARGIN_ANALYTICS_MAX_PRODUCTS);
@@ -3814,17 +3874,33 @@ export async function getMarginAnalyticsReport(
     const homeCompanyId = await getHomeCompanyId(credentials, uid);
     const todayStr = new Date().toISOString().slice(0, 10);
 
-    const purchaseNonPrimaryCurrencyIds = Array.from(
-        new Set(
-            purchaseLines
-                .map((line) => getRelationalId(line.currency_id))
-                .filter((id): id is number => typeof id === "number" && id !== primaryCurrencyId)
-        )
-    );
-    const purchaseRateByCurrencyId = homeCompanyId && purchaseNonPrimaryCurrencyIds.length > 0
-        ? await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, purchaseNonPrimaryCurrencyIds, todayStr)
-        : new Map<number, number>();
-    const purchaseMultiplierByCurrencyId = buildCurrencyMultipliers(primaryCurrencyId, purchaseRateByCurrencyId);
+    // A single running currency -> AED multiplier map shared across every
+    // amount source in this report (purchase price, landed cost, operation
+    // cost, sales). This system spans multiple companies with different
+    // base currencies (see Accounting > Currencies — e.g. AED vs USD
+    // companies), and each of those amount sources can independently
+    // introduce a currency we haven't seen yet, so the map is extended
+    // on demand via `ensureCurrencyMultipliers` rather than computed once
+    // up front from only the purchase lines.
+    const multiplierByCurrencyId = buildCurrencyMultipliers(primaryCurrencyId, new Map());
+    async function ensureCurrencyMultipliers(currencyIds: Array<number | null | undefined>) {
+        const missing = Array.from(
+            new Set(
+                currencyIds.filter(
+                    (id): id is number => typeof id === "number" && id > 0 && !multiplierByCurrencyId.has(id)
+                )
+            )
+        );
+        if (missing.length === 0 || !homeCompanyId) {
+            return;
+        }
+        const rates = await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, missing, todayStr);
+        for (const [currencyId, rate] of rates) {
+            multiplierByCurrencyId.set(currencyId, 1 / rate);
+        }
+    }
+
+    await ensureCurrencyMultipliers(purchaseLines.map((line) => getRelationalId(line.currency_id)));
 
     const unconvertedCurrencyCodes = new Set<string>();
     const purchasedQtyByProductId = new Map<number, number>();
@@ -3851,7 +3927,7 @@ export async function getMarginAnalyticsReport(
         purchasedQtyByProductId.set(id, (purchasedQtyByProductId.get(id) ?? 0) + qty);
 
         const currencyId = getRelationalId(line.currency_id);
-        const multiplier = currencyId ? purchaseMultiplierByCurrencyId.get(currencyId) : undefined;
+        const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
         if (multiplier === undefined) {
             if (currencyId) {
                 unconvertedCurrencyCodes.add(getRelationalName(line.currency_id) || "?");
@@ -3864,8 +3940,11 @@ export async function getMarginAnalyticsReport(
     }
 
     // Step 1a: landed cost already allocated per product by Odoo's own
-    // stock.landed.cost feature — additional_landed_cost is always posted in
-    // company currency, so no FX conversion is needed here.
+    // stock.landed.cost feature. `additional_landed_cost` is a monetary
+    // field with its own `currency_id` — it is NOT guaranteed to be in AED
+    // (verified live: a landed cost record posted under a USD-currency
+    // company stores it in USD) — so it needs the same per-line currency
+    // conversion as purchase and sale amounts, not a raw sum.
     const landedCostByProductId = new Map<number, number>();
 
     if (purchaseLineIds.length > 0) {
@@ -3890,8 +3969,10 @@ export async function getMarginAnalyticsReport(
                 "stock.valuation.adjustment.lines",
                 "search_read",
                 [[["move_id", "in", moveIds]]],
-                { fields: ["product_id", "additional_landed_cost"], limit: 50000 }
+                { fields: ["product_id", "additional_landed_cost", "currency_id"], limit: 50000 }
             );
+
+            await ensureCurrencyMultipliers(valuationLines.map((line) => getRelationalId(line.currency_id)));
 
             for (const line of valuationLines) {
                 const id = getRelationalId(line.product_id);
@@ -3899,7 +3980,16 @@ export async function getMarginAnalyticsReport(
                     continue;
                 }
 
-                const amount = Number(line.additional_landed_cost ?? 0);
+                const currencyId = getRelationalId(line.currency_id);
+                const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
+                if (multiplier === undefined) {
+                    if (currencyId) {
+                        unconvertedCurrencyCodes.add(getRelationalName(line.currency_id) || "?");
+                    }
+                    continue;
+                }
+
+                const amount = Number(line.additional_landed_cost ?? 0) * multiplier;
                 landedCostByProductId.set(id, (landedCostByProductId.get(id) ?? 0) + amount);
             }
         }
@@ -3982,6 +4072,7 @@ export async function getMarginAnalyticsReport(
             );
 
             const refByMoveId = new Map<number, string>();
+            const companyIdByMoveId = new Map<number, number>();
             for (let index = 0; index < candidateMoveIds.length; index += 2000) {
                 const batch = candidateMoveIds.slice(index, index + 2000);
                 const moves = await executeKw<Array<Record<string, unknown>>>(
@@ -3990,12 +4081,16 @@ export async function getMarginAnalyticsReport(
                     "account.move",
                     "read",
                     [batch],
-                    { fields: ["id", "ref"] }
+                    { fields: ["id", "ref", "company_id"] }
                 );
                 for (const move of moves) {
                     const moveId = Number(move.id ?? 0);
                     if (moveId > 0) {
                         refByMoveId.set(moveId, toDisplayString(move.ref));
+                        const companyId = getRelationalId(move.company_id);
+                        if (companyId) {
+                            companyIdByMoveId.set(moveId, companyId);
+                        }
                     }
                 }
             }
@@ -4005,6 +4100,40 @@ export async function getMarginAnalyticsReport(
                     .filter(([, ref]) => ref.length > 0 && orderNames.some((name) => ref.includes(name)))
                     .map(([moveId]) => moveId)
             );
+
+            // `debit`/`credit` on a journal item are always expressed in
+            // that move's own company currency (not the transaction
+            // currency) — across multiple companies with different base
+            // currencies, that's not necessarily AED, so each qualifying
+            // move's company currency needs resolving and converting too.
+            const qualifyingCompanyIds = Array.from(
+                new Set(
+                    Array.from(qualifyingMoveIds)
+                        .map((moveId) => companyIdByMoveId.get(moveId))
+                        .filter((id): id is number => typeof id === "number" && id > 0)
+                )
+            );
+            const currencyIdByCompanyId = new Map<number, number>();
+            const currencyCodeById = new Map<number, string>();
+            if (qualifyingCompanyIds.length > 0) {
+                const companies = await executeKw<Array<Record<string, unknown>>>(
+                    credentials,
+                    uid,
+                    "res.company",
+                    "read",
+                    [qualifyingCompanyIds],
+                    { fields: ["id", "currency_id"] }
+                );
+                for (const company of companies) {
+                    const companyId = Number(company.id ?? 0);
+                    const currencyId = getRelationalId(company.currency_id);
+                    if (companyId > 0 && currencyId) {
+                        currencyIdByCompanyId.set(companyId, currencyId);
+                        currencyCodeById.set(currencyId, getRelationalName(company.currency_id) || "?");
+                    }
+                }
+                await ensureCurrencyMultipliers(Array.from(currencyIdByCompanyId.values()));
+            }
 
             for (const line of candidateLines) {
                 const moveId = getRelationalId(line.move_id);
@@ -4017,7 +4146,17 @@ export async function getMarginAnalyticsReport(
                     continue;
                 }
 
-                const net = Number(line.debit ?? 0) - Number(line.credit ?? 0);
+                const companyId = companyIdByMoveId.get(moveId);
+                const currencyId = companyId ? currencyIdByCompanyId.get(companyId) : undefined;
+                const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
+                if (multiplier === undefined) {
+                    if (currencyId) {
+                        unconvertedCurrencyCodes.add(currencyCodeById.get(currencyId) || "?");
+                    }
+                    continue;
+                }
+
+                const net = (Number(line.debit ?? 0) - Number(line.credit ?? 0)) * multiplier;
                 operationCostByProductId.set(id, (operationCostByProductId.get(id) ?? 0) + net);
             }
         }
@@ -4042,20 +4181,7 @@ export async function getMarginAnalyticsReport(
         }
     );
 
-    const saleNonPrimaryCurrencyIds = Array.from(
-        new Set(
-            saleLines
-                .map((line) => getRelationalId(line.currency_id))
-                .filter((id): id is number => typeof id === "number" && !purchaseMultiplierByCurrencyId.has(id))
-        )
-    );
-    const saleRateByCurrencyId = homeCompanyId && saleNonPrimaryCurrencyIds.length > 0
-        ? await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, saleNonPrimaryCurrencyIds, todayStr)
-        : new Map<number, number>();
-    const multiplierByCurrencyId = new Map([
-        ...purchaseMultiplierByCurrencyId,
-        ...buildCurrencyMultipliers(null, saleRateByCurrencyId),
-    ]);
+    await ensureCurrencyMultipliers(saleLines.map((line) => getRelationalId(line.currency_id)));
 
     const soldQtyByProductId = new Map<number, number>();
     const salesValueByProductId = new Map<number, number>();
@@ -4221,6 +4347,27 @@ export async function getMarginAnalyticsReport(
         },
         unconvertedCurrencyCodes: Array.from(unconvertedCurrencyCodes),
     };
+}
+
+/**
+ * Companies the API user has access to (for the sidebar company selector).
+ * `res.company` carries its own multi-company record rule, so a plain
+ * search_read as this uid already returns only the companies granted to
+ * them — no need to cross-check against `res.users.company_ids` separately.
+ */
+export async function getCompanies(credentials: OdooCredentials): Promise<Array<{ id: number; name: string }>> {
+    const uid = await authenticate(credentials);
+
+    const companies = await executeKw<Array<{ id: number; name: string }>>(
+        credentials,
+        uid,
+        "res.company",
+        "search_read",
+        [[]],
+        { fields: ["id", "name"], order: "id asc", limit: 200 }
+    );
+
+    return companies.map((company) => ({ id: company.id, name: company.name }));
 }
 
 export async function getProductOrigins(credentials: OdooCredentials): Promise<Array<{ id: number; name: string }>> {

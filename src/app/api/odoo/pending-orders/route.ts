@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
-import { getPendingOrders } from "@/lib/server/odoo-client";
-import { getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
+import { getPendingOrders, runWithCompanyIds } from "@/lib/server/odoo-client";
+import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
 
 export async function POST(request: Request) {
     try {
         const { credentials } = await getOdooCredentialsFromRequest(request);
-        const orders = await getPendingOrders(credentials);
+        const companyIds = await getCompanyIdsFromRequest(request);
+        const orders = await runWithCompanyIds(companyIds, () => getPendingOrders(credentials));
         return NextResponse.json({ orders });
     } catch (error) {
         return NextResponse.json(
