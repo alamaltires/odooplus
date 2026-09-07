@@ -1,4 +1,4 @@
-# OdooPlus Dashboard
+# OdooPlus Dashboard Al Amal
 
 Next.js dashboard that extends Odoo ERP using the Odoo External API, with Firebase Authentication and Firestore-based settings storage.
 
