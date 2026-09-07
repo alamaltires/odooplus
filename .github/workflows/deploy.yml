@@ -21,7 +21,8 @@ jobs:
           ssh -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SERVER_IP }} << 'EOF'
             cd ~/odoo++
             git pull origin main
-            npm install --production
-            pm2 restart "odoo++" || pm2 start server.js --name "odoo++"
+            npm install
+            npm run build
+            pm2 restart "odoo++" || PORT=3020 pm2 start npm --name "odoo++" -- start -- -p 3020
             pm2 save
           EOF
