@@ -4,7 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useCallback, useState } from "react";
-import { ClipboardList, LayoutDashboard, LogOut, Menu, PiggyBank, ScanSearch, Settings, ShoppingBasket, Target, TrendingUp, Users, X, type LucideIcon } from "lucide-react";
+import { ClipboardList, LayoutDashboard, LogOut, Menu, PackageSearch, PiggyBank, ScanSearch, Settings, ShoppingBasket, Target, TrendingUp, Users, X, type LucideIcon } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { CompanySelector } from "@/components/company-selector";
 
@@ -13,6 +13,7 @@ const links: Array<{ href: string; label: string; icon: LucideIcon }> = [
     { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
     { href: "/orders/pending", label: "Pending Orders", icon: ClipboardList },
     { href: "/product-scanner", label: "Product Scanner", icon: ScanSearch },
+    { href: "/product-requests", label: "Product Requests", icon: PackageSearch },
     { href: "/purchase-order", label: "Purchase Order", icon: ShoppingBasket },
     { href: "/products-performance", label: "Products Performance", icon: TrendingUp },
     { href: "/margin-analytics", label: "Margin Analytics", icon: PiggyBank },
@@ -35,12 +36,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     link.href === "/purchase-order" ||
                     link.href === "/products-performance" ||
                     link.href === "/settings" ||
-                    link.href === "/product-scanner"
+                    link.href === "/product-scanner" ||
+                    link.href === "/product-requests"
             );
         }
 
         if (role === "salesperson") {
-            return links.filter((link) => link.href === "/sales-targets" || link.href === "/settings");
+            return links.filter(
+                (link) =>
+                    link.href === "/sales-targets" ||
+                    link.href === "/settings" ||
+                    link.href === "/product-requests"
+            );
         }
 
         if (role === "sales_manager") {
@@ -48,12 +55,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 (link) =>
                     link.href === "/sales-targets" ||
                     link.href === "/salesperson-activity" ||
-                    link.href === "/settings"
+                    link.href === "/settings" ||
+                    link.href === "/product-requests"
             );
         }
 
         if (role === "store") {
-            return links.filter((link) => link.href === "/orders/pending" || link.href === "/product-scanner" || link.href === "/settings");
+            return links.filter(
+                (link) =>
+                    link.href === "/orders/pending" ||
+                    link.href === "/product-scanner" ||
+                    link.href === "/settings" ||
+                    link.href === "/product-requests"
+            );
+        }
+
+        if (role === "user") {
+            return links.filter((link) => link.href === "/product-requests" || link.href === "/settings");
         }
 
         return links;

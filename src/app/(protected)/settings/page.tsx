@@ -7,7 +7,7 @@ import { getOdooSettings, saveOdooSettings } from "@/lib/firestore-settings";
 import { getSystemOdooSettings, saveSystemOdooSettings } from "@/lib/client-odoo";
 import { OdooUserCredentials } from "@/types/odoo";
 
-type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "store";
+type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "store" | "user";
 
 const ROLE_LABELS: Record<Role, string> = {
     admin: "admin",
@@ -15,6 +15,7 @@ const ROLE_LABELS: Record<Role, string> = {
     salesperson: "salesperson",
     sales_manager: "sales manager",
     store: "store",
+    user: "user (product requests only)",
 };
 
 const initialState: OdooUserCredentials = {
@@ -340,6 +341,7 @@ export default function SettingsPage() {
                                 <option value="salesperson">Salesperson</option>
                                 <option value="sales_manager">Sales Manager</option>
                                 <option value="store">Store</option>
+                                <option value="user">User (Product Requests only)</option>
                                 <option value="admin">Admin</option>
                             </select>
                         </label>

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getUnifiedLots, runWithCompanyIds } from "@/lib/server/odoo-client";
+import { searchProductCatalog, runWithCompanyIds } from "@/lib/server/odoo-client";
 import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
 
 export async function POST(request: Request) {
@@ -11,24 +11,24 @@ export async function POST(request: Request) {
             limit?: number;
             offset?: number;
         };
-        const limit = Number.isFinite(body.limit) ? Number(body.limit) : 20;
+        const limit = Number.isFinite(body.limit) ? Number(body.limit) : 24;
         const offset = Number.isFinite(body.offset) ? Number(body.offset) : 0;
         const query = typeof body.query === "string" ? body.query : "";
+
         const result = await runWithCompanyIds(companyIds, () =>
-            getUnifiedLots(credentials, { query, limit, offset })
+            searchProductCatalog(credentials, { query, limit, offset })
         );
+
         return NextResponse.json({
-            unifiedLots: result.unifiedLots,
+            products: result.products,
             totalCount: result.totalCount,
             limit,
             offset,
-            hasMore: offset + result.unifiedLots.length < result.totalCount,
+            hasMore: offset + result.products.length < result.totalCount,
         });
     } catch (error) {
         return NextResponse.json(
-            {
-                error: error instanceof Error ? error.message : "Failed to load unified lots",
-            },
+            { error: error instanceof Error ? error.message : "Failed to search products" },
             { status: 400 }
         );
     }

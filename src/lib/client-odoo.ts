@@ -198,6 +198,7 @@ export function getProductsPerformanceReport(input: {
     categoryId?: number | null;
     startDate: string;
     endDate: string;
+    dateBasis?: "order" | "transaction" | null;
 }) {
     return post<{
         startDate: string;
@@ -309,6 +310,7 @@ export function getMarginAnalyticsReport(input: {
     productId?: number | null;
     startDate: string;
     endDate: string;
+    dateBasis?: "order" | "transaction" | null;
 }) {
     return post<{
         startDate: string;
@@ -335,6 +337,7 @@ export function getMarginAnalyticsReport(input: {
             estimatedProfitLoss: number;
             currentStock: number;
             flags: Array<"never-sold" | "sold-without-purchase" | "no-landed-cost" | "negative-margin" | "has-cost-correction">;
+            originalCurrencies: string[];
         }>;
         highlights: {
             productsWithPurchases: number;
@@ -372,6 +375,107 @@ export function getProducts(input?: { query?: string; limit?: number; offset?: n
         offset: number;
         hasMore: boolean;
     }>("/api/odoo/products", input ?? {});
+}
+
+export function searchProductCatalog(input?: { query?: string; limit?: number; offset?: number }) {
+    return post<{
+        products: Array<{
+            id: number;
+            name: string;
+            sku: string;
+            brandName: string;
+            categoryName: string;
+            originName: string;
+            rimDiameterName: string;
+            currentStock: number;
+            stockByLot: Array<{ lotName: string; companyName: string; quantity: number }>;
+            pricelists: Array<{ pricelistName: string; currencyCode: string; price: number }>;
+        }>;
+        totalCount: number;
+        limit: number;
+        offset: number;
+        hasMore: boolean;
+    }>("/api/odoo/product-catalog-search", input ?? {});
+}
+
+export type ProductRequestType = "new_product" | "missing_size" | "missing_pattern";
+
+export type ProductRequest = {
+    id: string;
+    requestType: ProductRequestType;
+    brand: string;
+    size: string;
+    pattern: string;
+    notes: string;
+    searchQuery: string;
+    referenceProductId: number | null;
+    referenceProductName: string;
+    seen: boolean;
+    seenAt: string | null;
+    seenByEmail: string;
+    requestedByUserId: string;
+    requestedByEmail: string;
+    requestedByName: string;
+    createdAt: string;
+};
+
+export function createProductRequest(input: {
+    requestType: ProductRequestType;
+    brand: string;
+    size: string;
+    pattern: string;
+    notes: string;
+    searchQuery: string;
+    referenceProductId?: number | null;
+    referenceProductName?: string;
+}) {
+    return post<{ request: ProductRequest }>("/api/product-requests", input);
+}
+
+export async function listProductRequests() {
+    const token = await getAuthToken();
+    const response = await fetch("/api/product-requests", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+    });
+
+    const data = (await response.json()) as { requests: ProductRequest[]; error?: string };
+    if (!response.ok || data.error) {
+        throw new Error(data.error ?? "Failed to load product requests");
+    }
+
+    return data;
+}
+
+async function authorizedFetch(path: string, init: RequestInit) {
+    const token = await getAuthToken();
+    const response = await fetch(path, {
+        ...init,
+        headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+            ...(init.headers ?? {}),
+        },
+    });
+
+    const data = (await response.json()) as { error?: string } & Record<string, unknown>;
+    if (!response.ok || data.error) {
+        throw new Error(data.error ?? "Request failed");
+    }
+
+    return data;
+}
+
+export async function setProductRequestSeen(id: string, seen: boolean) {
+    const data = await authorizedFetch(`/api/product-requests/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ seen }),
+    });
+    return data as { request: ProductRequest };
+}
+
+export async function deleteProductRequest(id: string) {
+    await authorizedFetch(`/api/product-requests/${id}`, { method: "DELETE" });
 }
 
 export function getNearExpiryProducts(input: { thresholdDays: number }) {

@@ -13,6 +13,7 @@ export async function POST(request: Request) {
             categoryId?: number | null;
             startDate: string;
             endDate: string;
+            dateBasis?: "order" | "transaction" | null;
         };
 
         const report = await runWithCompanyIds(companyIds, () =>

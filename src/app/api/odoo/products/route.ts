@@ -4,13 +4,13 @@ import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest } from "@/lib/s
 
 export async function POST(request: Request) {
     try {
+        const { credentials } = await getOdooCredentialsFromRequest(request);
+        const companyIds = await getCompanyIdsFromRequest(request);
         const body = (await request.json().catch(() => ({}))) as {
             query?: string;
             limit?: number;
             offset?: number;
         };
-        const { credentials } = await getOdooCredentialsFromRequest(request);
-        const companyIds = await getCompanyIdsFromRequest(request);
         const limit = Number.isFinite(body.limit) ? Number(body.limit) : 10;
         const offset = Number.isFinite(body.offset) ? Number(body.offset) : 0;
         const query = typeof body.query === "string" ? body.query : "";

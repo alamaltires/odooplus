@@ -3,7 +3,7 @@ import { Timestamp } from "firebase-admin/firestore";
 import { getAdminAuth, getAdminDb } from "@/lib/server/firebase-admin";
 import { getUserIdFromRequest, getUserRoleFromRequest } from "@/lib/server/auth-helpers";
 
-type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "store";
+type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "store" | "user";
 
 function normalizeRole(value: string | undefined): Role {
     if (
@@ -11,7 +11,8 @@ function normalizeRole(value: string | undefined): Role {
         value === "purchase" ||
         value === "salesperson" ||
         value === "sales_manager" ||
-        value === "store"
+        value === "store" ||
+        value === "user"
     ) {
         return value;
     }

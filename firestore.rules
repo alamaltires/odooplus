@@ -36,6 +36,14 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /product-requests/{docId} {
+      // Each user can only ever see their own requests; admins see every
+      // request, from every user. That split is enforced server-side
+      // (src/app/api/product-requests/route.ts, via the Admin SDK), not by
+      // these rules — no direct client access is needed or allowed.
+      allow read, write: if false;
+    }
+
     match /sales-targets/{docId} {
       // Shared across salespeople/admins in the UI; not owner-scoped
       // (src/lib/firestore-settings.ts).

@@ -15,6 +15,7 @@ export async function POST(request: Request) {
             productId?: number | null;
             startDate: string;
             endDate: string;
+            dateBasis?: "order" | "transaction" | null;
         };
 
         const report = await runWithCompanyIds(companyIds, () => getMarginAnalyticsReport(credentials, body));

@@ -160,6 +160,7 @@ export default function ProductsPerformancePage() {
         return now.toISOString().slice(0, 10);
     });
     const [endDate, setEndDate] = useState(todayISO);
+    const [dateBasis, setDateBasis] = useState<"order" | "transaction">("order");
 
     const [report, setReport] = useState<Report | null>(null);
     const [reportLoading, setReportLoading] = useState(false);
@@ -415,6 +416,7 @@ export default function ProductsPerformancePage() {
                 categoryId: selectedCategory?.id,
                 startDate,
                 endDate,
+                dateBasis,
             });
 
             setReport(data);
@@ -790,6 +792,23 @@ export default function ProductsPerformancePage() {
                             />
                         </label>
                     </div>
+
+                    <label className="block">
+                        <span className="mb-2 block text-sm font-medium">Date Basis</span>
+                        <select
+                            value={dateBasis}
+                            onChange={(event) => setDateBasis(event.target.value as "order" | "transaction")}
+                            className="w-full rounded-xl border border-(--line) bg-white px-3 py-2.5"
+                        >
+                            <option value="order">Default (Purchase Order + Sales Order date)</option>
+                            <option value="transaction">Receiving (validation) + Invoice date</option>
+                        </select>
+                        <p className="mt-1 text-xs text-(--ink-soft)">
+                            {dateBasis === "order"
+                                ? "Scopes by the order's own date — when the PO or SO was placed, regardless of when goods moved or invoices were raised."
+                                : "Scopes by when goods were actually received (purchases) and when the customer invoice was raised (sales) — a PO placed in one month but received the next counts toward the month it was received."}
+                        </p>
+                    </label>
                 </div>
 
                 <div className="mt-5 flex flex-wrap items-center gap-3">

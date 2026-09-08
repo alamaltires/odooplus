@@ -33,6 +33,26 @@ export async function runWithCompanyIds<T>(
     return companyContextStorage.run(companyIds, fn);
 }
 
+/**
+ * Escapes the current company restriction for the duration of `fn`. Needed
+ * for lookups that are pinned to the home company specifically (e.g. FX
+ * rates in `getCurrencyRatesToHomeCurrency`, always read from the home
+ * company's Accounting > Currencies table regardless of which companies are
+ * selected for the report): Odoo's multi-company record rules AND the
+ * `allowed_company_ids` context onto every domain a query supplies, so an
+ * explicit `["company_id", "=", homeCompanyId]` filter still comes back
+ * empty when the selected companies (e.g. a USD-only company like Alamal
+ * SYR) don't include the home company — that's the exact "No exchange rate
+ * is configured for USD at your home company" failure this fixes.
+ */
+async function runWithoutCompanyRestriction<T>(fn: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        companyContextStorage.exit(() => {
+            fn().then(resolve, reject);
+        });
+    });
+}
+
 type ProductCategory = {
     id: number;
     name: string;
@@ -423,6 +443,14 @@ function ensureDateRange(startDate: string, endDate: string) {
 }
 
 function toDisplayString(value: unknown) {
+    // Odoo's JSON-RPC serializes an empty/unset Char, Text, or Many2one
+    // field as the boolean `false`, not an empty string — without this
+    // check, String(false) silently produces the literal text "false"
+    // wherever a field is genuinely blank (verified live: product.product's
+    // default_code shows "SKU: false" on every product with no SKU set).
+    if (value === false) {
+        return "";
+    }
     return String(value ?? "").trim();
 }
 
@@ -714,13 +742,15 @@ function getInvoiceTransactionAmounts(
  * configured under that company's Accounting > Currencies settings.
  */
 async function getHomeCompanyId(credentials: OdooCredentials, uid: number): Promise<number | null> {
-    const users = await executeKw<Array<{ company_id?: unknown }>>(
-        credentials,
-        uid,
-        "res.users",
-        "read",
-        [[uid]],
-        { fields: ["company_id"] }
+    const users = await runWithoutCompanyRestriction(() =>
+        executeKw<Array<{ company_id?: unknown }>>(
+            credentials,
+            uid,
+            "res.users",
+            "read",
+            [[uid]],
+            { fields: ["company_id"] }
+        )
     );
 
     return getRelationalId(users[0]?.company_id);
@@ -745,23 +775,25 @@ async function getCurrencyRatesToHomeCurrency(
         return rateByCurrencyId;
     }
 
-    const records = await executeKw<Array<{ currency_id?: unknown; rate?: number }>>(
-        credentials,
-        uid,
-        "res.currency.rate",
-        "search_read",
-        [[
-            ["currency_id", "in", currencyIds],
-            ["company_id", "=", homeCompanyId],
-            ["name", "<=", asOfDate],
-        ]],
-        {
-            fields: ["currency_id", "rate"],
-            // Most recent rate per currency first; only the first hit per
-            // currency_id (below) is kept.
-            order: "currency_id asc, name desc",
-            limit: 5000,
-        }
+    const records = await runWithoutCompanyRestriction(() =>
+        executeKw<Array<{ currency_id?: unknown; rate?: number }>>(
+            credentials,
+            uid,
+            "res.currency.rate",
+            "search_read",
+            [[
+                ["currency_id", "in", currencyIds],
+                ["company_id", "=", homeCompanyId],
+                ["name", "<=", asOfDate],
+            ]],
+            {
+                fields: ["currency_id", "rate"],
+                // Most recent rate per currency first; only the first hit per
+                // currency_id (below) is kept.
+                order: "currency_id asc, name desc",
+                limit: 5000,
+            }
+        )
     );
 
     for (const record of records) {
@@ -1117,6 +1149,343 @@ export async function getProducts(
             .filter((product) => product.id > 0 && product.name)
             .sort((left, right) => left.name.localeCompare(right.name)),
     };
+}
+
+export type ProductCatalogCard = {
+    id: number;
+    name: string;
+    sku: string;
+    brandName: string;
+    categoryName: string;
+    originName: string;
+    rimDiameterName: string;
+    currentStock: number;
+    stockByLot: Array<{ lotName: string; companyName: string; quantity: number }>;
+    pricelists: Array<{ pricelistName: string; currencyCode: string; price: number }>;
+};
+
+/**
+ * Richer product search for the Product Requests module's card view — same
+ * name/SKU search as `getProducts`, but also brings back the tire data
+ * (brand, category, origin, rim diameter) and current stock a card needs, so
+ * the searcher can tell at a glance whether a near-match is actually the
+ * product they want before deciding to request something new.
+ */
+// A search-as-you-type card list, capped well below what a broad query
+// could match — ranking the full match set by stock (see below) already
+// requires reading every match's quants up front, so this bounds that cost
+// rather than the (much larger) true `search_count` total.
+const PRODUCT_CATALOG_SEARCH_MAX_MATCHES = 500;
+
+export async function searchProductCatalog(
+    credentials: OdooCredentials,
+    input?: {
+        query?: string;
+        limit?: number;
+        offset?: number;
+    }
+): Promise<{ products: ProductCatalogCard[]; totalCount: number }> {
+    const uid = await authenticate(credentials);
+    const query = (input?.query ?? "").trim();
+    const limit = Number.isFinite(input?.limit) ? Math.max(1, Math.min(60, Number(input?.limit))) : 24;
+    const offset = Number.isFinite(input?.offset) ? Math.max(0, Number(input?.offset)) : 0;
+
+    const domain: unknown[] = [];
+    if (query) {
+        // `product_tmpl_id.second_name` ("Search Name") is a normalized key
+        // Odoo maintains per template — size and brand concatenated with no
+        // spaces/slashes/case sensitivity (e.g. "215/55R17 Austone" ->
+        // "2155517Austone") — so it matches typed-together fragments like
+        // "2155517austone" that would never hit `name`'s slash/space
+        // formatting. Kept alongside `name`/`default_code` rather than
+        // replacing them, so normally-formatted or SKU searches still work.
+        domain.push(
+            "|",
+            "|",
+            ["name", "ilike", query],
+            ["default_code", "ilike", query],
+            ["product_tmpl_id.second_name", "ilike", query]
+        );
+    }
+
+    // Every id the query matches (capped) — fetched up front, unpaginated,
+    // so the *whole* match set can be ranked by on-hand quantity before
+    // slicing out the requested page. Sorting only the one page Odoo's own
+    // `order: "name asc"` happened to return would rank alphabetically
+    // within that page, not "highest stock across all matches first".
+    const matchingIds = await executeKw<number[]>(
+        credentials,
+        uid,
+        "product.product",
+        "search",
+        [domain],
+        { order: "name asc", limit: PRODUCT_CATALOG_SEARCH_MAX_MATCHES, context: { active_test: false } }
+    );
+
+    if (matchingIds.length === 0) {
+        return { products: [], totalCount: 0 };
+    }
+
+    // `allowed_company_ids` alone doesn't restrict stock.quant reads on this
+    // instance (no multi-company record rule enforces it here), so the
+    // selected companies need an explicit domain filter — otherwise every
+    // company's stock shows up regardless of the sidebar selector.
+    const activeCompanyIds = companyContextStorage.getStore();
+    const quantDomain: unknown[] = [["product_id", "in", matchingIds], ["location_id.usage", "=", "internal"]];
+    if (activeCompanyIds && activeCompanyIds.length > 0) {
+        quantDomain.push(["company_id", "in", activeCompanyIds]);
+    }
+
+    const allQuants = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "stock.quant",
+        "search_read",
+        [quantDomain],
+        { fields: ["product_id", "quantity", "lot_id", "company_id"], limit: 20000 }
+    );
+
+    // Broken down per lot AND the company that lot belongs to (not just one
+    // total) — "company aware" here means the company owning each unit of
+    // stock is visible on the card itself, scoped by whichever companies
+    // are selected in the sidebar (via `runWithCompanyIds` at the route
+    // level) rather than asked for separately on the request form. Computed
+    // for every match up front so it can both rank the results (highest
+    // total stock first) and be reused for the page's cards below without a
+    // second query.
+    const stockByProductId = new Map<number, Map<string, { lotName: string; companyName: string; quantity: number }>>();
+    for (const quant of allQuants) {
+        const id = getRelationalId(quant.product_id);
+        if (!id) {
+            continue;
+        }
+        const lotName = getRelationalName(quant.lot_id) || "Unlotted";
+        const companyName = getRelationalName(quant.company_id) || "Unknown Company";
+        const quantity = Number(quant.quantity ?? 0);
+        const key = `${lotName} ${companyName}`;
+        const byLot = stockByProductId.get(id) ?? new Map<string, { lotName: string; companyName: string; quantity: number }>();
+        const existing = byLot.get(key);
+        if (existing) {
+            existing.quantity += quantity;
+        } else {
+            byLot.set(key, { lotName, companyName, quantity });
+        }
+        stockByProductId.set(id, byLot);
+    }
+
+    const totalStockByProductId = new Map<number, number>();
+    for (const [id, byLot] of stockByProductId) {
+        let sum = 0;
+        for (const entry of byLot.values()) {
+            sum += entry.quantity;
+        }
+        totalStockByProductId.set(id, sum);
+    }
+
+    const sortedIds = [...matchingIds].sort(
+        (a, b) => (totalStockByProductId.get(b) ?? 0) - (totalStockByProductId.get(a) ?? 0)
+    );
+    const pageIds = sortedIds.slice(offset, offset + limit);
+
+    if (pageIds.length === 0) {
+        return { products: [], totalCount: matchingIds.length };
+    }
+
+    const productRecords = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "product.product",
+        "read",
+        [pageIds],
+        { fields: ["id", "display_name", "default_code", "product_tmpl_id"], context: { active_test: false } }
+    );
+
+    // `read` doesn't preserve the id order it was called with — re-sort to
+    // match `pageIds` (already stock-desc ordered) rather than whatever
+    // order Odoo happened to return.
+    const productById = new Map(productRecords.map((product) => [Number(product.id ?? 0), product]));
+    const products = pageIds
+        .map((id) => productById.get(id))
+        .filter((product): product is Record<string, unknown> => Boolean(product));
+
+    if (products.length === 0) {
+        return { products: [], totalCount: matchingIds.length };
+    }
+
+    const totalCount = matchingIds.length;
+
+    const templateIds = Array.from(
+        new Set(
+            products
+                .map((product) => getRelationalId(product.product_tmpl_id))
+                .filter((id): id is number => typeof id === "number" && id > 0)
+        )
+    );
+
+    const templates = templateIds.length > 0
+        ? await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "product.template",
+            "read",
+            [templateIds],
+            { fields: ["id", "tire_brand", "categ_id", "origin", "rim_diameter"] }
+        )
+        : [];
+
+    const templateInfoById = new Map<
+        number,
+        { brandName: string; categoryName: string; originName: string; rimDiameterName: string }
+    >();
+    for (const template of templates) {
+        const templateId = Number(template.id ?? 0);
+        if (templateId <= 0) {
+            continue;
+        }
+
+        templateInfoById.set(templateId, {
+            brandName: getRelationalName(template.tire_brand) || "No Brand",
+            categoryName: getRelationalName(template.categ_id) || "Uncategorized",
+            originName: getRelationalName(template.origin) || "Unknown Origin",
+            rimDiameterName: getRelationalName(template.rim_diameter) || "-",
+        });
+    }
+
+    // Stock for this page's products was already computed above (from the
+    // full match set, before ranking/pagination) — reused here rather than
+    // queried again.
+    const productIds = pageIds;
+
+    // Pricelists — like stock.quant above, `allowed_company_ids` context
+    // alone doesn't restrict `product.pricelist` reads here, so different
+    // companies' identically-named lists (e.g. each company having its own
+    // "Retail (USD)") were all coming back at once, showing as duplicate
+    // rows on the card. Explicitly scoped to the selected companies (plus
+    // company-agnostic/shared pricelists, company_id = false) to match what
+    // the sidebar selector actually shows. Only "fixed price" items are read
+    // — the common case for this catalogue (verified live: pricelist items
+    // here are all `compute_price: "fixed"`, e.g. a Wholesale (USD) line at
+    // a flat fixed_price per product) — percentage/formula-based rules
+    // would need Odoo's full pricing engine to evaluate and aren't worth the
+    // complexity for a request-form reference price.
+    const pricelistDomain: unknown[] = activeCompanyIds && activeCompanyIds.length > 0
+        ? ["|", ["company_id", "=", false], ["company_id", "in", activeCompanyIds]]
+        : [];
+    const pricelists = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "product.pricelist",
+        "search_read",
+        [pricelistDomain],
+        { fields: ["id", "name", "currency_id"], limit: 200 }
+    );
+
+    // Prices are always shown in AED (the home currency) regardless of
+    // which currency each pricelist is itself denominated in — the same
+    // currency-safe conversion approach used throughout (see
+    // `getMarginAnalyticsReport`), so a USD-priced Wholesale list and an
+    // AED-priced Retail list are directly comparable on the card.
+    const primaryCurrencyId = await getPrimaryCurrencyId(credentials, uid, []);
+    const homeCompanyId = await getHomeCompanyId(credentials, uid);
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const priceMultiplierByCurrencyId = buildCurrencyMultipliers(primaryCurrencyId, new Map());
+    const pricelistCurrencyIds = Array.from(
+        new Set(
+            pricelists
+                .map((list) => getRelationalId(list.currency_id))
+                .filter((id): id is number => typeof id === "number" && id > 0 && id !== primaryCurrencyId)
+        )
+    );
+    if (pricelistCurrencyIds.length > 0 && homeCompanyId) {
+        const rates = await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, pricelistCurrencyIds, todayStr);
+        for (const [currencyId, rate] of rates) {
+            priceMultiplierByCurrencyId.set(currencyId, 1 / rate);
+        }
+    }
+
+    const pricelistIds = pricelists.map((list) => Number(list.id ?? 0)).filter((id) => id > 0);
+    const pricelistInfoById = new Map<number, { name: string; multiplier: number | undefined }>();
+    for (const list of pricelists) {
+        const id = Number(list.id ?? 0);
+        if (id <= 0) continue;
+        const currencyId = getRelationalId(list.currency_id);
+        pricelistInfoById.set(id, {
+            name: toDisplayString(list.name) || `Pricelist #${id}`,
+            multiplier: currencyId ? priceMultiplierByCurrencyId.get(currencyId) : undefined,
+        });
+    }
+
+    const pricelistItems = pricelistIds.length > 0 && productIds.length > 0
+        ? await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "product.pricelist.item",
+            "search_read",
+            [[
+                ["pricelist_id", "in", pricelistIds],
+                ["product_id", "in", productIds],
+                ["compute_price", "=", "fixed"],
+            ]],
+            { fields: ["pricelist_id", "product_id", "fixed_price"], limit: 5000 }
+        )
+        : [];
+
+    const pricelistsByProductId = new Map<
+        number,
+        Array<{ pricelistName: string; currencyCode: string; price: number }>
+    >();
+    for (const item of pricelistItems) {
+        const productId = getRelationalId(item.product_id);
+        const pricelistId = getRelationalId(item.pricelist_id);
+        if (!productId || !pricelistId) {
+            continue;
+        }
+        const info = pricelistInfoById.get(pricelistId);
+        // Skip entries in a currency we have no rate to convert from —
+        // showing an unconverted, wrongly-labeled AED figure would be worse
+        // than omitting the line entirely.
+        if (!info || info.multiplier === undefined) {
+            continue;
+        }
+        const entries = pricelistsByProductId.get(productId) ?? [];
+        entries.push({
+            pricelistName: info.name,
+            currencyCode: TARGET_CURRENCY_CODE,
+            price: Number((Number(item.fixed_price ?? 0) * info.multiplier).toFixed(2)),
+        });
+        pricelistsByProductId.set(productId, entries);
+    }
+
+    const cards = products
+        .map((product) => {
+            const id = Number(product.id ?? 0);
+            const templateId = getRelationalId(product.product_tmpl_id);
+            const info = typeof templateId === "number" ? templateInfoById.get(templateId) : undefined;
+
+            const stockByLot = Array.from(stockByProductId.get(id)?.values() ?? [])
+                .map((entry) => ({ ...entry, quantity: Number(entry.quantity.toFixed(2)) }))
+                .filter((entry) => entry.quantity !== 0)
+                .sort((a, b) => b.quantity - a.quantity);
+            const currentStock = Number(stockByLot.reduce((sum, entry) => sum + entry.quantity, 0).toFixed(2));
+
+            return {
+                id,
+                name: toDisplayString(product.display_name) || `Product #${id}`,
+                sku: toDisplayString(product.default_code),
+                brandName: info?.brandName ?? "No Brand",
+                categoryName: info?.categoryName ?? "Uncategorized",
+                originName: info?.originName ?? "Unknown Origin",
+                rimDiameterName: info?.rimDiameterName ?? "-",
+                currentStock,
+                stockByLot,
+                pricelists: (pricelistsByProductId.get(id) ?? []).sort((a, b) =>
+                    a.pricelistName.localeCompare(b.pricelistName)
+                ),
+            };
+        })
+        .filter((card) => card.id > 0);
+
+    return { products: cards, totalCount };
 }
 
 export async function getProductCategoriesByProductIds(
@@ -3139,9 +3508,18 @@ export async function getProductsPerformanceReport(
         categoryId?: number | null;
         startDate: string;
         endDate: string;
+        /**
+         * "order" (default): scope by the purchase/sales order's own Order
+         * Date. "transaction": scope purchases by the date each receipt was
+         * actually validated (stock.move's own date) and sales by the
+         * customer invoice's own Invoice Date — see the identical mode in
+         * `getMarginAnalyticsReport`.
+         */
+        dateBasis?: "order" | "transaction" | null;
     }
 ): Promise<ProductsPerformanceReport> {
     const uid = await authenticate(credentials);
+    const dateBasis = input.dateBasis === "transaction" ? "transaction" : "order";
 
     const purchaseOrderId = Number(input.purchaseOrderId);
     const hasPurchaseOrder = Number.isFinite(purchaseOrderId) && purchaseOrderId > 0;
@@ -3319,129 +3697,244 @@ export async function getProductsPerformanceReport(
     const from = toOdooDateBoundary(startDate, false);
     const to = toOdooDateBoundary(endDate, true);
 
-    const saleLines = await executeKw<Array<Record<string, unknown>>>(
-        credentials,
-        uid,
-        "sale.order.line",
-        "search_read",
-        [[
-            ["product_id", "in", finalProductIds],
-            ["display_type", "=", false],
-            ["order_id.state", "in", ["sale", "done"]],
-            ["order_id.date_order", ">=", from],
-            ["order_id.date_order", "<=", to],
-        ]],
-        {
-            fields: ["product_id", "product_uom_qty", "price_subtotal", "currency_id"],
-            limit: 50000,
-        }
-    );
-
-    const primaryCurrencyId = await getPrimaryCurrencyId(
-        credentials,
-        uid,
-        saleLines
-            .map((line) => getRelationalId(line.currency_id))
-            .filter((id): id is number => typeof id === "number")
-            .map((currencyId) => ({ currencyId }))
-    );
+    const primaryCurrencyId = await getPrimaryCurrencyId(credentials, uid, []);
     const homeCompanyId = await getHomeCompanyId(credentials, uid);
-    const nonPrimaryCurrencyIds = Array.from(
-        new Set(
-            saleLines
-                .map((line) => getRelationalId(line.currency_id))
-                .filter((id): id is number => typeof id === "number" && id !== primaryCurrencyId)
-        )
-    );
     const todayStr = new Date().toISOString().slice(0, 10);
-    const rateByCurrencyId = homeCompanyId
-        ? await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, nonPrimaryCurrencyIds, todayStr)
-        : new Map<number, number>();
-    const multiplierByCurrencyId = buildCurrencyMultipliers(primaryCurrencyId, rateByCurrencyId);
 
+    // A single running currency -> AED multiplier map shared by sales and
+    // purchases, extended on demand as each side introduces a currency we
+    // haven't seen yet (see the identical pattern in
+    // `getMarginAnalyticsReport`).
+    const multiplierByCurrencyId = buildCurrencyMultipliers(primaryCurrencyId, new Map());
+    async function ensureCurrencyMultipliers(currencyIds: Array<number | null | undefined>) {
+        const missing = Array.from(
+            new Set(
+                currencyIds.filter(
+                    (id): id is number => typeof id === "number" && id > 0 && !multiplierByCurrencyId.has(id)
+                )
+            )
+        );
+        if (missing.length === 0 || !homeCompanyId) {
+            return;
+        }
+        const rates = await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, missing, todayStr);
+        for (const [currencyId, rate] of rates) {
+            multiplierByCurrencyId.set(currencyId, 1 / rate);
+        }
+    }
+
+    const unconvertedCurrencyCodes = new Set<string>();
     const soldQtyByProductId = new Map<number, number>();
     const salesValueByProductId = new Map<number, number>();
-    const unconvertedCurrencyCodes = new Set<string>();
 
-    for (const line of saleLines) {
-        const id = getRelationalId(line.product_id);
-        if (!id) {
-            continue;
-        }
-
-        const qty = Number(line.product_uom_qty ?? 0);
-        soldQtyByProductId.set(id, (soldQtyByProductId.get(id) ?? 0) + qty);
-
-        const currencyId = getRelationalId(line.currency_id);
-        const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
-        if (multiplier === undefined) {
-            if (currencyId) {
-                unconvertedCurrencyCodes.add(getRelationalName(line.currency_id) || "?");
+    if (dateBasis === "transaction") {
+        // Same "product"-only display_type filter as margin analytics:
+        // Anglo-Saxon COGS contra-lines get posted on the invoice's own
+        // move, tagged with the same product — excluding them is required,
+        // not optional.
+        const invoiceLines = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "account.move.line",
+            "search_read",
+            [[
+                ["product_id", "in", finalProductIds],
+                ["display_type", "=", "product"],
+                ["move_id.move_type", "=", "out_invoice"],
+                ["move_id.state", "=", "posted"],
+                ["move_id.invoice_date", ">=", startDate],
+                ["move_id.invoice_date", "<=", endDate],
+            ]],
+            {
+                fields: ["product_id", "quantity", "price_subtotal", "currency_id"],
+                limit: 50000,
             }
-            continue;
-        }
+        );
 
-        const value = Number(line.price_subtotal ?? 0) * multiplier;
-        salesValueByProductId.set(id, (salesValueByProductId.get(id) ?? 0) + value);
+        await ensureCurrencyMultipliers(invoiceLines.map((line) => getRelationalId(line.currency_id)));
+
+        for (const line of invoiceLines) {
+            const id = getRelationalId(line.product_id);
+            if (!id) {
+                continue;
+            }
+
+            const qty = Number(line.quantity ?? 0);
+            soldQtyByProductId.set(id, (soldQtyByProductId.get(id) ?? 0) + qty);
+
+            const currencyId = getRelationalId(line.currency_id);
+            const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
+            if (multiplier === undefined) {
+                if (currencyId) {
+                    unconvertedCurrencyCodes.add(getRelationalName(line.currency_id) || "?");
+                }
+                continue;
+            }
+
+            const value = Number(line.price_subtotal ?? 0) * multiplier;
+            salesValueByProductId.set(id, (salesValueByProductId.get(id) ?? 0) + value);
+        }
+    } else {
+        const saleLines = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "sale.order.line",
+            "search_read",
+            [[
+                ["product_id", "in", finalProductIds],
+                ["display_type", "=", false],
+                ["order_id.state", "in", ["sale", "done"]],
+                ["order_id.date_order", ">=", from],
+                ["order_id.date_order", "<=", to],
+            ]],
+            {
+                fields: ["product_id", "product_uom_qty", "price_subtotal", "currency_id"],
+                limit: 50000,
+            }
+        );
+
+        await ensureCurrencyMultipliers(saleLines.map((line) => getRelationalId(line.currency_id)));
+
+        for (const line of saleLines) {
+            const id = getRelationalId(line.product_id);
+            if (!id) {
+                continue;
+            }
+
+            const qty = Number(line.product_uom_qty ?? 0);
+            soldQtyByProductId.set(id, (soldQtyByProductId.get(id) ?? 0) + qty);
+
+            const currencyId = getRelationalId(line.currency_id);
+            const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
+            if (multiplier === undefined) {
+                if (currencyId) {
+                    unconvertedCurrencyCodes.add(getRelationalName(line.currency_id) || "?");
+                }
+                continue;
+            }
+
+            const value = Number(line.price_subtotal ?? 0) * multiplier;
+            salesValueByProductId.set(id, (salesValueByProductId.get(id) ?? 0) + value);
+        }
     }
 
     // Purchased qty/value, same currency-safe conversion as sales — vendor POs
     // are just as often raised in a foreign currency as customer invoices.
-    const purchaseLines = await executeKw<Array<Record<string, unknown>>>(
-        credentials,
-        uid,
-        "purchase.order.line",
-        "search_read",
-        [[
-            ["product_id", "in", finalProductIds],
-            ["order_id.state", "in", ["purchase", "done"]],
-            ["order_id.date_order", ">=", from],
-            ["order_id.date_order", "<=", to],
-        ]],
-        {
-            fields: ["product_id", "product_qty", "price_subtotal", "currency_id"],
-            limit: 50000,
-        }
-    );
-
-    const purchaseNonPrimaryCurrencyIds = Array.from(
-        new Set(
-            purchaseLines
-                .map((line) => getRelationalId(line.currency_id))
-                .filter((id): id is number => typeof id === "number" && !multiplierByCurrencyId.has(id))
-        )
-    );
-    const purchaseRateByCurrencyId = homeCompanyId && purchaseNonPrimaryCurrencyIds.length > 0
-        ? await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, purchaseNonPrimaryCurrencyIds, todayStr)
-        : new Map<number, number>();
-    const purchaseMultiplierByCurrencyId = new Map([
-        ...multiplierByCurrencyId,
-        ...buildCurrencyMultipliers(null, purchaseRateByCurrencyId),
-    ]);
-
     const purchasedQtyByProductId = new Map<number, number>();
     const purchaseValueByProductId = new Map<number, number>();
 
-    for (const line of purchaseLines) {
-        const id = getRelationalId(line.product_id);
-        if (!id) {
-            continue;
-        }
+    if (dateBasis === "transaction") {
+        // Scoped by the actual goods-receipt date (stock.move.date) instead
+        // of the PO's order date — see the identical mode in
+        // `getMarginAnalyticsReport` for the full rationale.
+        const receiptMoves = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "stock.move",
+            "search_read",
+            [[
+                ["product_id", "in", finalProductIds],
+                ["state", "=", "done"],
+                ["purchase_line_id", "!=", false],
+                ["date", ">=", from],
+                ["date", "<=", to],
+            ]],
+            { fields: ["id", "product_id", "product_qty", "purchase_line_id"], limit: 50000 }
+        );
 
-        const qty = Number(line.product_qty ?? 0);
-        purchasedQtyByProductId.set(id, (purchasedQtyByProductId.get(id) ?? 0) + qty);
+        const purchaseLineIds = Array.from(
+            new Set(
+                receiptMoves
+                    .map((move) => getRelationalId(move.purchase_line_id))
+                    .filter((id): id is number => typeof id === "number" && id > 0)
+            )
+        );
 
-        const currencyId = getRelationalId(line.currency_id);
-        const multiplier = currencyId ? purchaseMultiplierByCurrencyId.get(currencyId) : undefined;
-        if (multiplier === undefined) {
-            if (currencyId) {
-                unconvertedCurrencyCodes.add(getRelationalName(line.currency_id) || "?");
+        const purchaseLinesRaw = purchaseLineIds.length > 0
+            ? await executeKw<Array<Record<string, unknown>>>(
+                credentials,
+                uid,
+                "purchase.order.line",
+                "read",
+                [purchaseLineIds],
+                { fields: ["id", "product_qty", "price_subtotal", "currency_id"] }
+            )
+            : [];
+        const lineInfoById = new Map(purchaseLinesRaw.map((line) => [Number(line.id ?? 0), line]));
+
+        await ensureCurrencyMultipliers(purchaseLinesRaw.map((line) => getRelationalId(line.currency_id)));
+
+        for (const move of receiptMoves) {
+            const id = getRelationalId(move.product_id);
+            if (!id) {
+                continue;
             }
-            continue;
-        }
 
-        const value = Number(line.price_subtotal ?? 0) * multiplier;
-        purchaseValueByProductId.set(id, (purchaseValueByProductId.get(id) ?? 0) + value);
+            const lineId = getRelationalId(move.purchase_line_id);
+            const lineInfo = lineId ? lineInfoById.get(lineId) : undefined;
+            if (!lineInfo) {
+                continue;
+            }
+
+            const lineQty = Number(lineInfo.product_qty ?? 0);
+            const lineSubtotal = Number(lineInfo.price_subtotal ?? 0);
+            const unitPrice = lineQty > 0 ? lineSubtotal / lineQty : 0;
+            const moveQty = Number(move.product_qty ?? 0);
+            purchasedQtyByProductId.set(id, (purchasedQtyByProductId.get(id) ?? 0) + moveQty);
+
+            const currencyId = getRelationalId(lineInfo.currency_id);
+            const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
+            if (multiplier === undefined) {
+                if (currencyId) {
+                    unconvertedCurrencyCodes.add(getRelationalName(lineInfo.currency_id) || "?");
+                }
+                continue;
+            }
+
+            const value = unitPrice * moveQty * multiplier;
+            purchaseValueByProductId.set(id, (purchaseValueByProductId.get(id) ?? 0) + value);
+        }
+    } else {
+        const purchaseLines = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "purchase.order.line",
+            "search_read",
+            [[
+                ["product_id", "in", finalProductIds],
+                ["order_id.state", "in", ["purchase", "done"]],
+                ["order_id.date_order", ">=", from],
+                ["order_id.date_order", "<=", to],
+            ]],
+            {
+                fields: ["product_id", "product_qty", "price_subtotal", "currency_id"],
+                limit: 50000,
+            }
+        );
+
+        await ensureCurrencyMultipliers(purchaseLines.map((line) => getRelationalId(line.currency_id)));
+
+        for (const line of purchaseLines) {
+            const id = getRelationalId(line.product_id);
+            if (!id) {
+                continue;
+            }
+
+            const qty = Number(line.product_qty ?? 0);
+            purchasedQtyByProductId.set(id, (purchasedQtyByProductId.get(id) ?? 0) + qty);
+
+            const currencyId = getRelationalId(line.currency_id);
+            const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
+            if (multiplier === undefined) {
+                if (currencyId) {
+                    unconvertedCurrencyCodes.add(getRelationalName(line.currency_id) || "?");
+                }
+                continue;
+            }
+
+            const value = Number(line.price_subtotal ?? 0) * multiplier;
+            purchaseValueByProductId.set(id, (purchaseValueByProductId.get(id) ?? 0) + value);
+        }
     }
 
     // Stock on hand is a current snapshot (not date-bound), broken down by
@@ -3582,6 +4075,13 @@ type MarginAnalyticsProductRow = {
     estimatedProfitLoss: number;
     currentStock: number;
     flags: MarginAnalyticsRowFlag[];
+    /**
+     * Non-AED currencies that actually contributed to this row's purchase
+     * price, landed cost, operation cost, or sales price before conversion
+     * — e.g. ["USD"] for a product priced through a USD company. Empty when
+     * everything behind this row was already in AED.
+     */
+    originalCurrencies: string[];
 };
 
 type MarginAnalyticsRowFlag =
@@ -3689,9 +4189,24 @@ export async function getMarginAnalyticsReport(
         productId?: number | null;
         startDate: string;
         endDate: string;
+        /**
+         * "order" (default): scope everything by the purchase/sales order's
+         * own Order Date — a PO or SO counts toward whichever period it was
+         * placed in, regardless of when goods actually moved or got
+         * invoiced.
+         * "transaction": scope purchases by the date each receipt was
+         * actually validated (stock.move's own date — "Scheduled date until
+         * move is done, then date of actual move processing") and sales by
+         * the customer invoice's own Invoice Date, instead of the order
+         * date — a PO raised in January but received in March counts
+         * toward March; an SO confirmed in January but invoiced in March
+         * counts toward March.
+         */
+        dateBasis?: "order" | "transaction" | null;
     }
 ): Promise<MarginAnalyticsReport> {
     const uid = await authenticate(credentials);
+    const dateBasis = input.dateBasis === "transaction" ? "transaction" : "order";
 
     const categoryId = Number(input.categoryId);
     const hasCategory = Number.isFinite(categoryId) && categoryId > 0;
@@ -3842,35 +4357,7 @@ export async function getMarginAnalyticsReport(
     const from = toOdooDateBoundary(startDate, false);
     const to = toOdooDateBoundary(endDate, true);
 
-    // Step 1: purchase order lines for matched products in range — the base
-    // purchase price. Currency-converted the same way as products
-    // performance, since a PO raised in USD must not be blended unconverted
-    // with one raised in AED.
-    const purchaseLines = await executeKw<Array<Record<string, unknown>>>(
-        credentials,
-        uid,
-        "purchase.order.line",
-        "search_read",
-        [[
-            ["product_id", "in", finalProductIds],
-            ["order_id.state", "in", ["purchase", "done"]],
-            ["order_id.date_order", ">=", from],
-            ["order_id.date_order", "<=", to],
-        ]],
-        {
-            fields: ["id", "product_id", "product_qty", "price_subtotal", "currency_id", "order_id"],
-            limit: 50000,
-        }
-    );
-
-    const primaryCurrencyId = await getPrimaryCurrencyId(
-        credentials,
-        uid,
-        purchaseLines
-            .map((line) => getRelationalId(line.currency_id))
-            .filter((id): id is number => typeof id === "number")
-            .map((currencyId) => ({ currencyId }))
-    );
+    const primaryCurrencyId = await getPrimaryCurrencyId(credentials, uid, []);
     const homeCompanyId = await getHomeCompanyId(credentials, uid);
     const todayStr = new Date().toISOString().slice(0, 10);
 
@@ -3900,43 +4387,196 @@ export async function getMarginAnalyticsReport(
         }
     }
 
-    await ensureCurrencyMultipliers(purchaseLines.map((line) => getRelationalId(line.currency_id)));
-
     const unconvertedCurrencyCodes = new Set<string>();
+
+    // Per-product heads-up: which non-AED currencies actually fed into this
+    // row's numbers (from any of the four sources below), so the UI can flag
+    // "this was originally in USD" etc. instead of the conversion being
+    // invisible once everything lands in AED.
+    const sourceCurrencyCodesByProductId = new Map<number, Set<string>>();
+    function recordSourceCurrency(productId: number, currencyId: number | null, currencyCode: string) {
+        if (!currencyId || currencyId === primaryCurrencyId || !currencyCode) {
+            return;
+        }
+        const existing = sourceCurrencyCodesByProductId.get(productId);
+        if (existing) {
+            existing.add(currencyCode);
+        } else {
+            sourceCurrencyCodesByProductId.set(productId, new Set([currencyCode]));
+        }
+    }
+
     const purchasedQtyByProductId = new Map<number, number>();
     const purchaseValueByProductId = new Map<number, number>();
-    const purchaseLineIds: number[] = [];
     const orderIdSet = new Set<number>();
+    // The stock moves landed cost gets pulled from in Step 1a — sourced
+    // differently per `dateBasis` below (either every done move tied to an
+    // in-range PO, or specifically the moves whose own validation date fell
+    // in range).
+    let landedCostMoveIds: number[] = [];
 
-    for (const line of purchaseLines) {
-        const id = getRelationalId(line.product_id);
-        if (!id) {
-            continue;
-        }
+    if (dateBasis === "transaction") {
+        // Step 1 (transaction basis): purchase price scoped by the actual
+        // goods-receipt date — `stock.move.date`, which Odoo docs as
+        // "Scheduled date until move is done, then date of actual move
+        // processing" (verified live: reflects the real receiving
+        // timestamp, not the PO's order date). A PO raised in January but
+        // only received in March counts toward March here.
+        const receiptMoves = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "stock.move",
+            "search_read",
+            [[
+                ["product_id", "in", finalProductIds],
+                ["state", "=", "done"],
+                ["purchase_line_id", "!=", false],
+                ["date", ">=", from],
+                ["date", "<=", to],
+            ]],
+            { fields: ["id", "product_id", "product_qty", "purchase_line_id"], limit: 50000 }
+        );
 
-        const lineId = Number(line.id ?? 0);
-        if (lineId > 0) {
-            purchaseLineIds.push(lineId);
-        }
-        const orderId = getRelationalId(line.order_id);
-        if (orderId) {
-            orderIdSet.add(orderId);
-        }
+        landedCostMoveIds = receiptMoves.map((move) => Number(move.id ?? 0)).filter((id) => id > 0);
 
-        const qty = Number(line.product_qty ?? 0);
-        purchasedQtyByProductId.set(id, (purchasedQtyByProductId.get(id) ?? 0) + qty);
+        const purchaseLineIds = Array.from(
+            new Set(
+                receiptMoves
+                    .map((move) => getRelationalId(move.purchase_line_id))
+                    .filter((id): id is number => typeof id === "number" && id > 0)
+            )
+        );
 
-        const currencyId = getRelationalId(line.currency_id);
-        const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
-        if (multiplier === undefined) {
-            if (currencyId) {
-                unconvertedCurrencyCodes.add(getRelationalName(line.currency_id) || "?");
+        const purchaseLinesRaw = purchaseLineIds.length > 0
+            ? await executeKw<Array<Record<string, unknown>>>(
+                credentials,
+                uid,
+                "purchase.order.line",
+                "read",
+                [purchaseLineIds],
+                { fields: ["id", "product_qty", "price_subtotal", "currency_id", "order_id"] }
+            )
+            : [];
+        const lineInfoById = new Map(purchaseLinesRaw.map((line) => [Number(line.id ?? 0), line]));
+
+        await ensureCurrencyMultipliers(purchaseLinesRaw.map((line) => getRelationalId(line.currency_id)));
+
+        for (const move of receiptMoves) {
+            const id = getRelationalId(move.product_id);
+            if (!id) {
+                continue;
             }
-            continue;
+
+            const lineId = getRelationalId(move.purchase_line_id);
+            const lineInfo = lineId ? lineInfoById.get(lineId) : undefined;
+            if (!lineInfo) {
+                continue;
+            }
+
+            const orderId = getRelationalId(lineInfo.order_id);
+            if (orderId) {
+                orderIdSet.add(orderId);
+            }
+
+            // The move only tells us the quantity actually received on this
+            // date; the per-unit price comes from the PO line's own average
+            // (price_subtotal / product_qty, so line-level discounts are
+            // respected the same way the order-basis mode already handles
+            // them).
+            const lineQty = Number(lineInfo.product_qty ?? 0);
+            const lineSubtotal = Number(lineInfo.price_subtotal ?? 0);
+            const unitPrice = lineQty > 0 ? lineSubtotal / lineQty : 0;
+            const moveQty = Number(move.product_qty ?? 0);
+            purchasedQtyByProductId.set(id, (purchasedQtyByProductId.get(id) ?? 0) + moveQty);
+
+            const currencyId = getRelationalId(lineInfo.currency_id);
+            const currencyCode = getRelationalName(lineInfo.currency_id) || "?";
+            recordSourceCurrency(id, currencyId, currencyCode);
+            const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
+            if (multiplier === undefined) {
+                if (currencyId) {
+                    unconvertedCurrencyCodes.add(currencyCode);
+                }
+                continue;
+            }
+
+            const value = unitPrice * moveQty * multiplier;
+            purchaseValueByProductId.set(id, (purchaseValueByProductId.get(id) ?? 0) + value);
+        }
+    } else {
+        // Step 1 (order basis, default): purchase order lines for matched
+        // products in range — the base purchase price. Currency-converted
+        // the same way as products performance, since a PO raised in USD
+        // must not be blended unconverted with one raised in AED.
+        const purchaseLines = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "purchase.order.line",
+            "search_read",
+            [[
+                ["product_id", "in", finalProductIds],
+                ["order_id.state", "in", ["purchase", "done"]],
+                ["order_id.date_order", ">=", from],
+                ["order_id.date_order", "<=", to],
+            ]],
+            {
+                fields: ["id", "product_id", "product_qty", "price_subtotal", "currency_id", "order_id"],
+                limit: 50000,
+            }
+        );
+
+        await ensureCurrencyMultipliers(purchaseLines.map((line) => getRelationalId(line.currency_id)));
+
+        const purchaseLineIds: number[] = [];
+
+        for (const line of purchaseLines) {
+            const id = getRelationalId(line.product_id);
+            if (!id) {
+                continue;
+            }
+
+            const lineId = Number(line.id ?? 0);
+            if (lineId > 0) {
+                purchaseLineIds.push(lineId);
+            }
+            const orderId = getRelationalId(line.order_id);
+            if (orderId) {
+                orderIdSet.add(orderId);
+            }
+
+            const qty = Number(line.product_qty ?? 0);
+            purchasedQtyByProductId.set(id, (purchasedQtyByProductId.get(id) ?? 0) + qty);
+
+            const currencyId = getRelationalId(line.currency_id);
+            const currencyCode = getRelationalName(line.currency_id) || "?";
+            recordSourceCurrency(id, currencyId, currencyCode);
+            const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
+            if (multiplier === undefined) {
+                if (currencyId) {
+                    unconvertedCurrencyCodes.add(currencyCode);
+                }
+                continue;
+            }
+
+            const value = Number(line.price_subtotal ?? 0) * multiplier;
+            purchaseValueByProductId.set(id, (purchaseValueByProductId.get(id) ?? 0) + value);
         }
 
-        const value = Number(line.price_subtotal ?? 0) * multiplier;
-        purchaseValueByProductId.set(id, (purchaseValueByProductId.get(id) ?? 0) + value);
+        if (purchaseLineIds.length > 0) {
+            const moves = await executeKw<Array<Record<string, unknown>>>(
+                credentials,
+                uid,
+                "stock.move",
+                "search_read",
+                [[
+                    ["purchase_line_id", "in", purchaseLineIds],
+                    ["state", "=", "done"],
+                ]],
+                { fields: ["id"], limit: 50000 }
+            );
+
+            landedCostMoveIds = moves.map((move) => Number(move.id ?? 0)).filter((id) => id > 0);
+        }
     }
 
     // Step 1a: landed cost already allocated per product by Odoo's own
@@ -3947,51 +4587,37 @@ export async function getMarginAnalyticsReport(
     // conversion as purchase and sale amounts, not a raw sum.
     const landedCostByProductId = new Map<number, number>();
 
-    if (purchaseLineIds.length > 0) {
-        const moves = await executeKw<Array<Record<string, unknown>>>(
+    if (landedCostMoveIds.length > 0) {
+        const valuationLines = await executeKw<Array<Record<string, unknown>>>(
             credentials,
             uid,
-            "stock.move",
+            "stock.valuation.adjustment.lines",
             "search_read",
-            [[
-                ["purchase_line_id", "in", purchaseLineIds],
-                ["state", "=", "done"],
-            ]],
-            { fields: ["id"], limit: 50000 }
+            [[["move_id", "in", landedCostMoveIds]]],
+            { fields: ["product_id", "additional_landed_cost", "currency_id"], limit: 50000 }
         );
 
-        const moveIds = moves.map((move) => Number(move.id ?? 0)).filter((id) => id > 0);
+        await ensureCurrencyMultipliers(valuationLines.map((line) => getRelationalId(line.currency_id)));
 
-        if (moveIds.length > 0) {
-            const valuationLines = await executeKw<Array<Record<string, unknown>>>(
-                credentials,
-                uid,
-                "stock.valuation.adjustment.lines",
-                "search_read",
-                [[["move_id", "in", moveIds]]],
-                { fields: ["product_id", "additional_landed_cost", "currency_id"], limit: 50000 }
-            );
-
-            await ensureCurrencyMultipliers(valuationLines.map((line) => getRelationalId(line.currency_id)));
-
-            for (const line of valuationLines) {
-                const id = getRelationalId(line.product_id);
-                if (!id) {
-                    continue;
-                }
-
-                const currencyId = getRelationalId(line.currency_id);
-                const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
-                if (multiplier === undefined) {
-                    if (currencyId) {
-                        unconvertedCurrencyCodes.add(getRelationalName(line.currency_id) || "?");
-                    }
-                    continue;
-                }
-
-                const amount = Number(line.additional_landed_cost ?? 0) * multiplier;
-                landedCostByProductId.set(id, (landedCostByProductId.get(id) ?? 0) + amount);
+        for (const line of valuationLines) {
+            const id = getRelationalId(line.product_id);
+            if (!id) {
+                continue;
             }
+
+            const currencyId = getRelationalId(line.currency_id);
+            const currencyCode = getRelationalName(line.currency_id) || "?";
+            recordSourceCurrency(id, currencyId, currencyCode);
+            const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
+            if (multiplier === undefined) {
+                if (currencyId) {
+                    unconvertedCurrencyCodes.add(currencyCode);
+                }
+                continue;
+            }
+
+            const amount = Number(line.additional_landed_cost ?? 0) * multiplier;
+            landedCostByProductId.set(id, (landedCostByProductId.get(id) ?? 0) + amount);
         }
     }
 
@@ -4148,6 +4774,9 @@ export async function getMarginAnalyticsReport(
 
                 const companyId = companyIdByMoveId.get(moveId);
                 const currencyId = companyId ? currencyIdByCompanyId.get(companyId) : undefined;
+                if (currencyId) {
+                    recordSourceCurrency(id, currencyId, currencyCodeById.get(currencyId) || "?");
+                }
                 const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
                 if (multiplier === undefined) {
                     if (currencyId) {
@@ -4163,49 +4792,114 @@ export async function getMarginAnalyticsReport(
     }
 
     // Step 3: sales in the same period, same currency-safe conversion.
-    const saleLines = await executeKw<Array<Record<string, unknown>>>(
-        credentials,
-        uid,
-        "sale.order.line",
-        "search_read",
-        [[
-            ["product_id", "in", finalProductIds],
-            ["display_type", "=", false],
-            ["order_id.state", "in", ["sale", "done"]],
-            ["order_id.date_order", ">=", from],
-            ["order_id.date_order", "<=", to],
-        ]],
-        {
-            fields: ["product_id", "product_uom_qty", "price_subtotal", "currency_id"],
-            limit: 50000,
-        }
-    );
-
-    await ensureCurrencyMultipliers(saleLines.map((line) => getRelationalId(line.currency_id)));
-
     const soldQtyByProductId = new Map<number, number>();
     const salesValueByProductId = new Map<number, number>();
 
-    for (const line of saleLines) {
-        const id = getRelationalId(line.product_id);
-        if (!id) {
-            continue;
-        }
-
-        const qty = Number(line.product_uom_qty ?? 0);
-        soldQtyByProductId.set(id, (soldQtyByProductId.get(id) ?? 0) + qty);
-
-        const currencyId = getRelationalId(line.currency_id);
-        const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
-        if (multiplier === undefined) {
-            if (currencyId) {
-                unconvertedCurrencyCodes.add(getRelationalName(line.currency_id) || "?");
+    if (dateBasis === "transaction") {
+        // Transaction basis: scope by the customer invoice's own Invoice
+        // Date (a plain Date field, not Datetime — compared against
+        // startDate/endDate directly, unlike date_order above) instead of
+        // the sale order's date. Reads straight from the invoice's own
+        // lines (account.move.line) rather than sale.order.line, which is
+        // itself more accurate for "what was actually sold in this period"
+        // since a confirmed SO can sit uninvoiced for a while.
+        //
+        // `display_type` must be filtered to exactly "product" — verified
+        // live that with automated (Anglo-Saxon) inventory valuation, Odoo
+        // posts the COGS/Stock-Output contra-entries as extra lines on the
+        // very same invoice move, tagged with the same product_id and
+        // `display_type: "cogs"`; without this filter those exactly-
+        // offsetting lines would double the line count for no net value
+        // (or corrupt it, since their sign/account differs from the real
+        // revenue line).
+        const invoiceLines = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "account.move.line",
+            "search_read",
+            [[
+                ["product_id", "in", finalProductIds],
+                ["display_type", "=", "product"],
+                ["move_id.move_type", "=", "out_invoice"],
+                ["move_id.state", "=", "posted"],
+                ["move_id.invoice_date", ">=", startDate],
+                ["move_id.invoice_date", "<=", endDate],
+            ]],
+            {
+                fields: ["product_id", "quantity", "price_subtotal", "currency_id"],
+                limit: 50000,
             }
-            continue;
-        }
+        );
 
-        const value = Number(line.price_subtotal ?? 0) * multiplier;
-        salesValueByProductId.set(id, (salesValueByProductId.get(id) ?? 0) + value);
+        await ensureCurrencyMultipliers(invoiceLines.map((line) => getRelationalId(line.currency_id)));
+
+        for (const line of invoiceLines) {
+            const id = getRelationalId(line.product_id);
+            if (!id) {
+                continue;
+            }
+
+            const qty = Number(line.quantity ?? 0);
+            soldQtyByProductId.set(id, (soldQtyByProductId.get(id) ?? 0) + qty);
+
+            const currencyId = getRelationalId(line.currency_id);
+            const currencyCode = getRelationalName(line.currency_id) || "?";
+            recordSourceCurrency(id, currencyId, currencyCode);
+            const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
+            if (multiplier === undefined) {
+                if (currencyId) {
+                    unconvertedCurrencyCodes.add(currencyCode);
+                }
+                continue;
+            }
+
+            const value = Number(line.price_subtotal ?? 0) * multiplier;
+            salesValueByProductId.set(id, (salesValueByProductId.get(id) ?? 0) + value);
+        }
+    } else {
+        const saleLines = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "sale.order.line",
+            "search_read",
+            [[
+                ["product_id", "in", finalProductIds],
+                ["display_type", "=", false],
+                ["order_id.state", "in", ["sale", "done"]],
+                ["order_id.date_order", ">=", from],
+                ["order_id.date_order", "<=", to],
+            ]],
+            {
+                fields: ["product_id", "product_uom_qty", "price_subtotal", "currency_id"],
+                limit: 50000,
+            }
+        );
+
+        await ensureCurrencyMultipliers(saleLines.map((line) => getRelationalId(line.currency_id)));
+
+        for (const line of saleLines) {
+            const id = getRelationalId(line.product_id);
+            if (!id) {
+                continue;
+            }
+
+            const qty = Number(line.product_uom_qty ?? 0);
+            soldQtyByProductId.set(id, (soldQtyByProductId.get(id) ?? 0) + qty);
+
+            const currencyId = getRelationalId(line.currency_id);
+            const currencyCode = getRelationalName(line.currency_id) || "?";
+            recordSourceCurrency(id, currencyId, currencyCode);
+            const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
+            if (multiplier === undefined) {
+                if (currencyId) {
+                    unconvertedCurrencyCodes.add(currencyCode);
+                }
+                continue;
+            }
+
+            const value = Number(line.price_subtotal ?? 0) * multiplier;
+            salesValueByProductId.set(id, (salesValueByProductId.get(id) ?? 0) + value);
+        }
     }
 
     // Current stock on hand — a present-day snapshot, not bound to the
@@ -4293,6 +4987,7 @@ export async function getMarginAnalyticsReport(
                 estimatedProfitLoss: Number(estimatedProfitLoss.toFixed(2)),
                 currentStock: Number((currentStockByProductId.get(id) ?? 0).toFixed(2)),
                 flags,
+                originalCurrencies: Array.from(sourceCurrencyCodesByProductId.get(id) ?? []).sort(),
             };
         })
         .sort((a, b) => b.estimatedProfitLoss - a.estimatedProfitLoss);

@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Download, PiggyBank, Search } from "lucide-react";
+import { ChevronDown, ChevronRight, Coins, Download, PiggyBank, Search } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import {
     getMarginAnalyticsReport,
@@ -38,6 +38,7 @@ type ReportRow = {
     estimatedProfitLoss: number;
     currentStock: number;
     flags: RowFlag[];
+    originalCurrencies: string[];
 };
 
 const FLAG_LABELS: Record<RowFlag, string> = {
@@ -244,6 +245,7 @@ export default function MarginAnalyticsPage() {
         return now.toISOString().slice(0, 10);
     });
     const [endDate, setEndDate] = useState(todayISO);
+    const [dateBasis, setDateBasis] = useState<"order" | "transaction">("order");
 
     const [report, setReport] = useState<Report | null>(null);
     const [reportLoading, setReportLoading] = useState(false);
@@ -538,6 +540,7 @@ export default function MarginAnalyticsPage() {
                 productId: selectedProduct?.id,
                 startDate,
                 endDate,
+                dateBasis,
             });
             setReport(data);
         } catch (generateError) {
@@ -597,6 +600,7 @@ export default function MarginAnalyticsPage() {
                 [`Avg Sales Price (${report.currencyCode})`]: row.avgSalesPrice,
                 "Margin %": row.hasSalesData ? row.marginPercent : "",
                 [`Est. Profit/Loss (${report.currencyCode})`]: row.hasSalesData ? row.estimatedProfitLoss : "",
+                "Originally Priced In": row.originalCurrencies.join(", ") || "-",
                 Flags: row.flags.map((flag) => FLAG_LABELS[flag]).join("; "),
             }));
 
@@ -616,6 +620,7 @@ export default function MarginAnalyticsPage() {
                 { wch: 10 },
                 { wch: 16 },
                 { wch: 10 },
+                { wch: 18 },
                 { wch: 18 },
                 { wch: 48 },
             ];
@@ -907,6 +912,23 @@ export default function MarginAnalyticsPage() {
                             />
                         </label>
                     </div>
+
+                    <label className="block">
+                        <span className="mb-2 block text-sm font-medium">Date Basis</span>
+                        <select
+                            value={dateBasis}
+                            onChange={(event) => setDateBasis(event.target.value as "order" | "transaction")}
+                            className="w-full rounded-xl border border-(--line) bg-white px-3 py-2.5"
+                        >
+                            <option value="order">Default (Purchase Order + Sales Order date)</option>
+                            <option value="transaction">Receiving (validation) + Invoice date</option>
+                        </select>
+                        <p className="mt-1 text-xs text-(--ink-soft)">
+                            {dateBasis === "order"
+                                ? "Scopes by the order's own date — when the PO or SO was placed, regardless of when goods moved or invoices were raised."
+                                : "Scopes by when goods were actually received (purchases) and when the customer invoice was raised (sales) — a PO placed in one month but received the next counts toward the month it was received."}
+                        </p>
+                    </label>
                 </div>
 
                 <div className="mt-5 flex flex-wrap items-center gap-3">
@@ -1152,7 +1174,20 @@ export default function MarginAnalyticsPage() {
                                                             </button>
                                                         </td>
                                                         <td className="border border-(--line) px-4 py-3">
-                                                            <div>{row.productName}</div>
+                                                            <div className="flex items-center gap-1.5">
+                                                                <span>{row.productName}</span>
+                                                                {row.originalCurrencies.length > 0 ? (
+                                                                    <span
+                                                                        title={`Originally priced in ${row.originalCurrencies.join(
+                                                                            ", "
+                                                                        )}, converted to ${report.currencyCode} using the home company's exchange rate.`}
+                                                                        className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[rgba(109,40,217,0.1)] px-1.5 py-0.5 text-[10px] font-medium text-purple-700"
+                                                                    >
+                                                                        <Coins className="h-3 w-3" aria-hidden="true" />
+                                                                        {row.originalCurrencies.join("/")}
+                                                                    </span>
+                                                                ) : null}
+                                                            </div>
                                                             <div className="text-xs text-(--ink-soft)">{row.categoryName}</div>
                                                             {row.flags.length > 0 ? (
                                                                 <div className="mt-1 flex flex-wrap gap-1">
@@ -1223,6 +1258,14 @@ export default function MarginAnalyticsPage() {
                                                                         </span>
                                                                     </div>
                                                                 </div>
+                                                                {row.originalCurrencies.length > 0 ? (
+                                                                    <p className="mt-2 flex items-center gap-1 text-xs text-(--ink-soft)">
+                                                                        <Coins className="h-3.5 w-3.5 text-purple-700" aria-hidden="true" />
+                                                                        Originally priced in {row.originalCurrencies.join(", ")}, converted
+                                                                        to {report.currencyCode} above using the home company&rsquo;s
+                                                                        exchange rate.
+                                                                    </p>
+                                                                ) : null}
                                                             </td>
                                                         </tr>
                                                     ) : null}
