@@ -1,9 +1,10 @@
 "use client";
 
 import { Fragment, FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Coins, Download, PiggyBank, Search } from "lucide-react";
+import { ChevronDown, ChevronRight, Coins, Download, ListTree, PiggyBank, Search, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import {
+    getMarginAnalyticsBreakdown,
     getMarginAnalyticsReport,
     getProductBrands,
     getProductCategories,
@@ -11,6 +12,8 @@ import {
     getProducts,
     getRimDiameters,
     searchUnifiedLots,
+    type MarginBreakdown,
+    type MarginBreakdownRow,
 } from "@/lib/client-odoo";
 
 type Option = { id: number; name: string };
@@ -29,6 +32,7 @@ type ReportRow = {
     avgPurchasePrice: number;
     avgLandedCostPerUnit: number;
     avgOperationCostPerUnit: number;
+    avgFinalLandedCostPerUnit: number;
     avgTotalCostPerUnit: number;
     soldQty: number;
     avgSalesPrice: number;
@@ -68,6 +72,7 @@ type Highlights = {
     avgPurchasePrice: number;
     avgLandedCostPerUnit: number;
     avgOperationCostPerUnit: number;
+    avgFinalLandedCostPerUnit: number;
     avgTotalCostPerUnit: number;
     avgSalesPrice: number;
     avgMarginPercent: number;
@@ -256,6 +261,16 @@ export default function MarginAnalyticsPage() {
     const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
     const [expandedProductIds, setExpandedProductIds] = useState<Set<number>>(new Set());
     const [exportLoading, setExportLoading] = useState<"csv" | "xlsx" | null>(null);
+    const [appliedParams, setAppliedParams] = useState<{
+        unifiedLotId: number | null;
+        startDate: string;
+        endDate: string;
+        dateBasis: "order" | "transaction";
+    } | null>(null);
+    const [breakdownProduct, setBreakdownProduct] = useState<{ id: number; name: string } | null>(null);
+    const [breakdown, setBreakdown] = useState<MarginBreakdown | null>(null);
+    const [breakdownLoading, setBreakdownLoading] = useState(false);
+    const [breakdownError, setBreakdownError] = useState<string | null>(null);
 
     useEffect(() => {
         async function loadCategories() {
@@ -543,10 +558,45 @@ export default function MarginAnalyticsPage() {
                 dateBasis,
             });
             setReport(data);
+            // Pin the filters this report was actually built from, so a
+            // breakdown opened later reflects the numbers on screen even if
+            // the form has since been edited without regenerating.
+            setAppliedParams({
+                unifiedLotId: selectedUnifiedLot?.id ?? null,
+                startDate,
+                endDate,
+                dateBasis,
+            });
         } catch (generateError) {
             setReportError(generateError instanceof Error ? generateError.message : "Failed to generate margin analytics report.");
         } finally {
             setReportLoading(false);
+        }
+    }
+
+    async function openBreakdown(productId: number, productName: string) {
+        if (!appliedParams) {
+            return;
+        }
+
+        setBreakdownProduct({ id: productId, name: productName });
+        setBreakdown(null);
+        setBreakdownError(null);
+        setBreakdownLoading(true);
+
+        try {
+            const data = await getMarginAnalyticsBreakdown({
+                productId,
+                unifiedLotId: appliedParams.unifiedLotId,
+                startDate: appliedParams.startDate,
+                endDate: appliedParams.endDate,
+                dateBasis: appliedParams.dateBasis,
+            });
+            setBreakdown(data);
+        } catch (error) {
+            setBreakdownError(error instanceof Error ? error.message : "Failed to load the breakdown.");
+        } finally {
+            setBreakdownLoading(false);
         }
     }
 
@@ -595,6 +645,7 @@ export default function MarginAnalyticsPage() {
                 [`Avg Purchase Price (${report.currencyCode})`]: row.avgPurchasePrice,
                 [`Avg Landed Cost (${report.currencyCode})`]: row.avgLandedCostPerUnit,
                 [`Avg Operation Cost (${report.currencyCode})`]: row.avgOperationCostPerUnit,
+                [`Final Landed Cost (${report.currencyCode})`]: row.avgFinalLandedCostPerUnit,
                 [`Avg Total Cost (${report.currencyCode})`]: row.avgTotalCostPerUnit,
                 "Sold Qty": row.soldQty,
                 [`Avg Sales Price (${report.currencyCode})`]: row.avgSalesPrice,
@@ -652,11 +703,6 @@ export default function MarginAnalyticsPage() {
             <div className="flex items-start justify-between gap-4">
                 <div>
                     <h1 className="font-display text-3xl">Margin Analytics</h1>
-                    <p className="mt-1 text-sm text-(--ink-soft)">
-                        Pick at least one filter to scope exactly which products to analyze. Only purchase orders,
-                        landed costs, operation-cost journal entries, and sales for those matched products (in the
-                        selected date range) are counted — nothing broader is blended in.
-                    </p>
                 </div>
                 <PiggyBank className="h-8 w-8 text-(--brand)" aria-hidden="true" />
             </div>
@@ -923,11 +969,6 @@ export default function MarginAnalyticsPage() {
                             <option value="order">Default (Purchase Order + Sales Order date)</option>
                             <option value="transaction">Receiving (validation) + Invoice date</option>
                         </select>
-                        <p className="mt-1 text-xs text-(--ink-soft)">
-                            {dateBasis === "order"
-                                ? "Scopes by the order's own date — when the PO or SO was placed, regardless of when goods moved or invoices were raised."
-                                : "Scopes by when goods were actually received (purchases) and when the customer invoice was raised (sales) — a PO placed in one month but received the next counts toward the month it was received."}
-                        </p>
                     </label>
                 </div>
 
@@ -942,32 +983,51 @@ export default function MarginAnalyticsPage() {
                     {report ? <p className="text-sm text-(--ink-soft)">{report.matchedProductCount} product(s) matched.</p> : null}
                 </div>
 
-                {!hasAnyFilter ? (
-                    <p className="mt-4 text-xs text-(--ink-soft)">
-                        Select a product, category, brand, origin, rim diameter, or unified lot (or mix them) to generate a report.
-                    </p>
-                ) : null}
-
                 {reportError ? <p className="mt-4 text-sm text-red-600">{reportError}</p> : null}
             </form>
 
             {report ? (
                 <div className="mt-6 space-y-6">
                     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                        <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
+                        <article className="flex flex-col items-center rounded-2xl border border-(--line) bg-(--card) p-5 text-center shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
                             <p className="text-sm text-(--ink-soft)">
                                 Avg Total Cost / Unit ({report.startDate} → {report.endDate})
                             </p>
                             <p className="mt-2 font-display text-3xl">
                                 {formatCurrency(report.highlights.avgTotalCostPerUnit, report.currencyCode)}
                             </p>
-                            <p className="mt-1 text-xs text-(--ink-soft)">
-                                Purchase {formatCurrency(report.highlights.avgPurchasePrice, report.currencyCode)} · Landed{" "}
-                                {formatCurrency(report.highlights.avgLandedCostPerUnit, report.currencyCode)} · Operation{" "}
-                                {formatCurrency(report.highlights.avgOperationCostPerUnit, report.currencyCode)}
-                            </p>
+                            <div className="mt-3 grid w-full grid-cols-2 gap-1.5">
+                                <div className="rounded-lg bg-(--chip) px-2.5 py-1.5">
+                                    <p className="text-[10px] text-(--ink-soft)">Purchase</p>
+                                    <p className="text-xs font-semibold">
+                                        {formatCurrency(report.highlights.avgPurchasePrice, report.currencyCode)}
+                                    </p>
+                                </div>
+                                <div className="rounded-lg bg-(--chip) px-2.5 py-1.5">
+                                    <p className="text-[10px] text-(--ink-soft)">Landed</p>
+                                    <p className="text-xs font-semibold">
+                                        {formatCurrency(report.highlights.avgLandedCostPerUnit, report.currencyCode)}
+                                    </p>
+                                </div>
+                                <div className="rounded-lg bg-(--chip) px-2.5 py-1.5">
+                                    <p className="text-[10px] text-(--ink-soft)">Operation</p>
+                                    <p
+                                        className={`text-xs font-semibold ${
+                                            report.highlights.avgOperationCostPerUnit < 0 ? "text-red-600" : ""
+                                        }`}
+                                    >
+                                        {formatCurrency(report.highlights.avgOperationCostPerUnit, report.currencyCode)}
+                                    </p>
+                                </div>
+                                <div className="rounded-lg bg-[rgba(32,98,176,0.08)] px-2.5 py-1.5">
+                                    <p className="text-[10px] text-(--ink-soft)">Final Landed</p>
+                                    <p className="text-xs font-semibold text-(--brand)">
+                                        {formatCurrency(report.highlights.avgFinalLandedCostPerUnit, report.currencyCode)}
+                                    </p>
+                                </div>
+                            </div>
                         </article>
-                        <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
+                        <article className="flex flex-col items-center justify-center rounded-2xl border border-(--line) bg-(--card) p-5 text-center shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
                             <p className="text-sm text-(--ink-soft)">Avg Sales Price</p>
                             <p className="mt-2 font-display text-3xl">
                                 {formatCurrency(report.highlights.avgSalesPrice, report.currencyCode)}
@@ -976,7 +1036,7 @@ export default function MarginAnalyticsPage() {
                                 {report.highlights.productsWithSales} of {report.matchedProductCount} products sold in period
                             </p>
                         </article>
-                        <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
+                        <article className="flex flex-col items-center justify-center rounded-2xl border border-(--line) bg-(--card) p-5 text-center shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
                             <p className="text-sm text-(--ink-soft)">Avg Margin %</p>
                             <p
                                 className={`mt-2 font-display text-3xl ${
@@ -985,9 +1045,8 @@ export default function MarginAnalyticsPage() {
                             >
                                 {formatNumber(report.highlights.avgMarginPercent)}%
                             </p>
-                            <p className="mt-1 text-xs text-(--ink-soft)">Blended across all sold, matched products</p>
                         </article>
-                        <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
+                        <article className="flex flex-col items-center justify-center rounded-2xl border border-(--line) bg-(--card) p-5 text-center shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
                             <p className="text-sm text-(--ink-soft)">Est. Profit / Loss</p>
                             <p
                                 className={`mt-2 font-display text-3xl ${
@@ -1005,11 +1064,6 @@ export default function MarginAnalyticsPage() {
                     {flaggedRows.length > 0 ? (
                         <div className="rounded-2xl border border-(--line) bg-(--card) p-5">
                             <h2 className="font-display text-xl">Flagged Products ({flaggedRows.length})</h2>
-                            <p className="mt-1 text-sm text-(--ink-soft)">
-                                Products worth a closer look — no landed cost posted yet (understates true cost), never
-                                sold in this period, sold without a matching purchase, a negative margin, or a
-                                cost-correction journal entry.
-                            </p>
                             <div className="mt-3 max-h-80 space-y-2 overflow-y-auto pr-1">
                                 {flaggedRows.map((row) => (
                                     <div
@@ -1044,9 +1098,6 @@ export default function MarginAnalyticsPage() {
                         <div className="flex flex-wrap items-start justify-between gap-3">
                             <div>
                                 <h2 className="font-display text-2xl">Margin by Product</h2>
-                                <p className="mt-1 text-sm text-(--ink-soft)">
-                                    Margin % and profit/loss are shown only for products purchased and sold within the period.
-                                </p>
                             </div>
 
                             {report.rows.length > 0 ? (
@@ -1201,6 +1252,14 @@ export default function MarginAnalyticsPage() {
                                                                     ))}
                                                                 </div>
                                                             ) : null}
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => void openBreakdown(row.productId, row.productName)}
+                                                                className="mt-1.5 inline-flex cursor-pointer items-center gap-1 rounded-lg border border-(--line) bg-white px-2 py-1 text-[11px] font-medium text-(--brand) hover:bg-(--chip)"
+                                                            >
+                                                                <ListTree className="h-3 w-3" aria-hidden="true" />
+                                                                Breakdown
+                                                            </button>
                                                         </td>
                                                         <td className="border border-(--line) px-4 py-3 text-(--ink-soft)">{row.brandName}</td>
                                                         <td className="border border-(--line) px-4 py-3 text-(--ink-soft)">{row.originName}</td>
@@ -1235,35 +1294,50 @@ export default function MarginAnalyticsPage() {
                                                     </tr>
                                                     {expanded ? (
                                                         <tr>
-                                                            <td className="border border-(--line) bg-(--chip) px-4 py-3" />
-                                                            <td colSpan={10} className="border border-(--line) bg-(--chip) px-4 py-3">
-                                                                <p className="text-xs font-medium text-(--ink)">Cost breakdown (per unit)</p>
-                                                                <div className="mt-2 grid gap-x-6 gap-y-1 sm:grid-cols-3">
-                                                                    <div className="flex items-center justify-between gap-3 text-sm">
-                                                                        <span className="text-(--ink-soft)">Purchase price</span>
-                                                                        <span className="font-medium">
+                                                            <td className="border border-(--line) bg-(--chip) px-4 py-4" colSpan={11}>
+                                                                <p className="text-xs font-semibold uppercase tracking-wide text-(--ink-soft)">
+                                                                    Cost breakdown · per unit
+                                                                </p>
+                                                                <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-5">
+                                                                    <div className="rounded-xl border border-(--line) bg-(--card) px-3.5 py-2.5">
+                                                                        <p className="text-[11px] text-(--ink-soft)">Purchase price</p>
+                                                                        <p className="mt-1 text-sm font-semibold">
                                                                             {formatCurrency(row.avgPurchasePrice, report.currencyCode)}
-                                                                        </span>
+                                                                        </p>
                                                                     </div>
-                                                                    <div className="flex items-center justify-between gap-3 text-sm">
-                                                                        <span className="text-(--ink-soft)">Landed cost</span>
-                                                                        <span className="font-medium">
+                                                                    <div className="rounded-xl border border-(--line) bg-(--card) px-3.5 py-2.5">
+                                                                        <p className="text-[11px] text-(--ink-soft)">Landed cost</p>
+                                                                        <p className="mt-1 text-sm font-semibold">
                                                                             {formatCurrency(row.avgLandedCostPerUnit, report.currencyCode)}
-                                                                        </span>
+                                                                        </p>
                                                                     </div>
-                                                                    <div className="flex items-center justify-between gap-3 text-sm">
-                                                                        <span className="text-(--ink-soft)">Operation cost</span>
-                                                                        <span className="font-medium">
+                                                                    <div className="rounded-xl border border-(--line) bg-(--card) px-3.5 py-2.5">
+                                                                        <p className="text-[11px] text-(--ink-soft)">Operation cost</p>
+                                                                        <p
+                                                                            className={`mt-1 text-sm font-semibold ${
+                                                                                row.avgOperationCostPerUnit < 0 ? "text-red-600" : ""
+                                                                            }`}
+                                                                        >
                                                                             {formatCurrency(row.avgOperationCostPerUnit, report.currencyCode)}
-                                                                        </span>
+                                                                        </p>
+                                                                    </div>
+                                                                    <div className="rounded-xl border border-(--brand)/30 bg-[rgba(32,98,176,0.06)] px-3.5 py-2.5">
+                                                                        <p className="text-[11px] text-(--ink-soft)">Final landed cost</p>
+                                                                        <p className="mt-1 text-sm font-semibold text-(--brand)">
+                                                                            {formatCurrency(row.avgFinalLandedCostPerUnit, report.currencyCode)}
+                                                                        </p>
+                                                                    </div>
+                                                                    <div className="rounded-xl border border-(--line) bg-(--card) px-3.5 py-2.5">
+                                                                        <p className="text-[11px] text-(--ink-soft)">Total cost</p>
+                                                                        <p className="mt-1 text-sm font-semibold">
+                                                                            {formatCurrency(row.avgTotalCostPerUnit, report.currencyCode)}
+                                                                        </p>
                                                                     </div>
                                                                 </div>
                                                                 {row.originalCurrencies.length > 0 ? (
-                                                                    <p className="mt-2 flex items-center gap-1 text-xs text-(--ink-soft)">
+                                                                    <p className="mt-3 flex items-center gap-1.5 text-xs text-(--ink-soft)">
                                                                         <Coins className="h-3.5 w-3.5 text-purple-700" aria-hidden="true" />
-                                                                        Originally priced in {row.originalCurrencies.join(", ")}, converted
-                                                                        to {report.currencyCode} above using the home company&rsquo;s
-                                                                        exchange rate.
+                                                                        {`Originally priced in ${row.originalCurrencies.join(", ")}, converted to ${report.currencyCode} using the home company's exchange rate.`}
                                                                     </p>
                                                                 ) : null}
                                                             </td>
@@ -1279,6 +1353,234 @@ export default function MarginAnalyticsPage() {
                     </div>
                 </div>
             ) : null}
+
+            {breakdownProduct ? (
+                <BreakdownModal
+                    productName={breakdownProduct.name}
+                    breakdown={breakdown}
+                    loading={breakdownLoading}
+                    error={breakdownError}
+                    onClose={() => {
+                        setBreakdownProduct(null);
+                        setBreakdown(null);
+                        setBreakdownError(null);
+                    }}
+                />
+            ) : null}
         </section>
+    );
+}
+
+function BreakdownSection({
+    title,
+    subtitle,
+    rows,
+    currencyCode,
+    quantityLabel,
+    unitLabel,
+    emptyText,
+}: {
+    title: string;
+    subtitle: string;
+    rows: MarginBreakdownRow[];
+    currencyCode: string;
+    quantityLabel: string;
+    unitLabel: string;
+    emptyText: string;
+}) {
+    const totalQty = rows.reduce((sum, row) => sum + row.quantity, 0);
+    const totalAmount = rows.reduce((sum, row) => sum + row.amount, 0);
+
+    return (
+        <section className="rounded-xl border border-(--line)">
+            <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-(--line) bg-(--chip) px-4 py-2.5">
+                <div>
+                    <h3 className="text-sm font-semibold">
+                        {title} <span className="font-normal text-(--ink-soft)">({rows.length})</span>
+                    </h3>
+                    <p className="text-[11px] text-(--ink-soft)">{subtitle}</p>
+                </div>
+                <p className="text-sm font-semibold">{formatCurrency(totalAmount, currencyCode)}</p>
+            </header>
+
+            {rows.length === 0 ? (
+                <p className="px-4 py-3 text-sm text-(--ink-soft)">{emptyText}</p>
+            ) : (
+                <div className="max-h-72 overflow-auto">
+                    <table className="min-w-full border-collapse text-left text-xs">
+                        <thead className="sticky top-0 bg-(--card) text-(--ink-soft) shadow-[0_1px_0_var(--line)]">
+                            <tr>
+                                <th className="px-3 py-2 font-medium">Reference</th>
+                                <th className="px-3 py-2 font-medium">Date</th>
+                                <th className="px-3 py-2 font-medium">Partner / Order</th>
+                                <th className="px-3 py-2 font-medium">Lot</th>
+                                <th className="px-3 py-2 text-right font-medium">{quantityLabel}</th>
+                                <th className="px-3 py-2 text-right font-medium">{unitLabel}</th>
+                                <th className="px-3 py-2 text-right font-medium">Amount</th>
+                                <th className="px-3 py-2 font-medium">Note</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows.map((row, index) => (
+                                <tr key={`${row.reference}-${index}`} className="border-t border-(--line)">
+                                    <td className="px-3 py-2 font-medium">{row.reference}</td>
+                                    <td className="px-3 py-2 text-(--ink-soft)">{row.date || "-"}</td>
+                                    <td className="px-3 py-2 text-(--ink-soft)">{row.partnerName || "-"}</td>
+                                    <td className="px-3 py-2 text-(--ink-soft)">
+                                        {row.lots.length > 0 ? row.lots.join(", ") : "-"}
+                                    </td>
+                                    <td className="px-3 py-2 text-right">{formatNumber(row.quantity)}</td>
+                                    <td className="px-3 py-2 text-right">{formatNumber(row.unitPrice)}</td>
+                                    <td className={`px-3 py-2 text-right font-medium ${row.amount < 0 ? "text-red-600" : ""}`}>
+                                        {formatNumber(row.amount)}
+                                    </td>
+                                    <td className="px-3 py-2 text-(--ink-soft)">{row.note || "-"}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                        <tfoot className="sticky bottom-0 bg-(--chip)">
+                            <tr className="border-t border-(--line) font-semibold">
+                                <td className="px-3 py-2" colSpan={4}>
+                                    Total
+                                </td>
+                                <td className="px-3 py-2 text-right">{formatNumber(totalQty)}</td>
+                                <td className="px-3 py-2" />
+                                <td className="px-3 py-2 text-right">{formatNumber(totalAmount)}</td>
+                                <td className="px-3 py-2" />
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+            )}
+        </section>
+    );
+}
+
+function BreakdownModal({
+    productName,
+    breakdown,
+    loading,
+    error,
+    onClose,
+}: {
+    productName: string;
+    breakdown: MarginBreakdown | null;
+    loading: boolean;
+    error: string | null;
+    onClose: () => void;
+}) {
+    useEffect(() => {
+        function onKeyDown(event: KeyboardEvent) {
+            if (event.key === "Escape") {
+                onClose();
+            }
+        }
+        window.addEventListener("keydown", onKeyDown);
+        return () => window.removeEventListener("keydown", onKeyDown);
+    }, [onClose]);
+
+    const currencyCode = breakdown?.currencyCode ?? "AED";
+
+    return (
+        <div
+            className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:p-8"
+            onClick={onClose}
+        >
+            <div
+                className="w-full max-w-6xl rounded-2xl border border-(--line) bg-(--card) shadow-xl"
+                onClick={(event) => event.stopPropagation()}
+            >
+                <header className="flex items-start justify-between gap-4 border-b border-(--line) px-5 py-4">
+                    <div>
+                        <h2 className="font-display text-xl">{productName}</h2>
+                        {breakdown ? (
+                            <p className="mt-0.5 text-xs text-(--ink-soft)">
+                                {breakdown.startDate} → {breakdown.endDate} ·{" "}
+                                {breakdown.dateBasis === "order" ? "Order date basis" : "Receiving / invoice date basis"}
+                                {breakdown.unifiedLotName ? ` · Unified Lot ${breakdown.unifiedLotName}` : ""}
+                            </p>
+                        ) : null}
+                    </div>
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        aria-label="Close breakdown"
+                        className="cursor-pointer rounded-lg p-1 text-(--ink-soft) hover:bg-(--chip)"
+                    >
+                        <X className="h-5 w-5" aria-hidden="true" />
+                    </button>
+                </header>
+
+                <div className="space-y-4 px-5 py-4">
+                    {loading ? <p className="text-sm">Loading every underlying record…</p> : null}
+                    {error ? <p className="text-sm text-red-600">{error}</p> : null}
+
+                    {breakdown ? (
+                        <>
+                            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+                                {[
+                                    { label: "Purchased Qty", value: formatNumber(breakdown.totals.purchasedQty) },
+                                    { label: "Purchase Value", value: formatNumber(breakdown.totals.purchaseValue) },
+                                    { label: "Landed Cost", value: formatNumber(breakdown.totals.landedCostValue) },
+                                    { label: "Operation Cost", value: formatNumber(breakdown.totals.operationCostValue) },
+                                    { label: "Sold Qty", value: formatNumber(breakdown.totals.soldQty) },
+                                    { label: "Sales Value", value: formatNumber(breakdown.totals.salesValue) },
+                                ].map((tile) => (
+                                    <div key={tile.label} className="rounded-lg bg-(--chip) px-3 py-2">
+                                        <p className="text-[10px] text-(--ink-soft)">{tile.label}</p>
+                                        <p className="mt-0.5 text-sm font-semibold">{tile.value}</p>
+                                    </div>
+                                ))}
+                            </div>
+
+                            <BreakdownSection
+                                title="Purchase Orders"
+                                subtitle="Every purchase line counted toward the purchase price"
+                                rows={breakdown.purchases}
+                                currencyCode={currencyCode}
+                                quantityLabel="Qty"
+                                unitLabel={`Unit (${currencyCode})`}
+                                emptyText="No purchases matched this product in the selected period."
+                            />
+
+                            <BreakdownSection
+                                title="Landed Cost Records"
+                                subtitle="Odoo landed-cost allocations posted against these receipts"
+                                rows={breakdown.landedCosts}
+                                currencyCode={currencyCode}
+                                quantityLabel="Qty"
+                                unitLabel={`Per unit (${currencyCode})`}
+                                emptyText="No landed cost has been allocated to these receipts yet."
+                            />
+
+                            <BreakdownSection
+                                title="Accounting Corrections"
+                                subtitle={`Miscellaneous Operations entries on account ${"400001.1"} — "Qty" is this product's % share of the order, "Unit" the full entry, "Amount" the allocated share`}
+                                rows={breakdown.operationCosts}
+                                currencyCode={currencyCode}
+                                quantityLabel="Share %"
+                                unitLabel={`Entry (${currencyCode})`}
+                                emptyText="No operation-cost corrections were found for these purchase orders."
+                            />
+
+                            <BreakdownSection
+                                title="Sales Orders"
+                                subtitle="Every sale counted toward the selling price, with the lot each shipped from"
+                                rows={breakdown.sales}
+                                currencyCode={currencyCode}
+                                quantityLabel="Qty"
+                                unitLabel={`Unit (${currencyCode})`}
+                                emptyText="No sales matched this product in the selected period."
+                            />
+
+                            <p className="text-[11px] text-(--ink-soft)">
+                                All amounts converted to {currencyCode}. These are the exact records the report totals were
+                                built from — the section totals above add up to the figures on the product row.
+                            </p>
+                        </>
+                    ) : null}
+                </div>
+            </div>
+        </div>
     );
 }

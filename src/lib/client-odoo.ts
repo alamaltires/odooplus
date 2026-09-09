@@ -328,6 +328,7 @@ export function getMarginAnalyticsReport(input: {
             avgPurchasePrice: number;
             avgLandedCostPerUnit: number;
             avgOperationCostPerUnit: number;
+            avgFinalLandedCostPerUnit: number;
             avgTotalCostPerUnit: number;
             soldQty: number;
             avgSalesPrice: number;
@@ -350,6 +351,7 @@ export function getMarginAnalyticsReport(input: {
             avgPurchasePrice: number;
             avgLandedCostPerUnit: number;
             avgOperationCostPerUnit: number;
+            avgFinalLandedCostPerUnit: number;
             avgTotalCostPerUnit: number;
             avgSalesPrice: number;
             avgMarginPercent: number;
@@ -357,6 +359,50 @@ export function getMarginAnalyticsReport(input: {
         };
         unconvertedCurrencyCodes: string[];
     }>("/api/odoo/margin-analytics", input);
+}
+
+export type MarginBreakdownRow = {
+    reference: string;
+    date: string;
+    partnerName: string;
+    lots: string[];
+    quantity: number;
+    unitPrice: number;
+    currencyCode: string;
+    amount: number;
+    note: string;
+};
+
+export type MarginBreakdown = {
+    productId: number;
+    productName: string;
+    currencyCode: string;
+    startDate: string;
+    endDate: string;
+    dateBasis: "order" | "transaction";
+    unifiedLotName: string | null;
+    purchases: MarginBreakdownRow[];
+    landedCosts: MarginBreakdownRow[];
+    operationCosts: MarginBreakdownRow[];
+    sales: MarginBreakdownRow[];
+    totals: {
+        purchasedQty: number;
+        purchaseValue: number;
+        landedCostValue: number;
+        operationCostValue: number;
+        soldQty: number;
+        salesValue: number;
+    };
+};
+
+export function getMarginAnalyticsBreakdown(input: {
+    productId: number;
+    unifiedLotId?: number | null;
+    startDate: string;
+    endDate: string;
+    dateBasis?: "order" | "transaction" | null;
+}) {
+    return post<MarginBreakdown>("/api/odoo/margin-analytics-breakdown", input);
 }
 
 export function getSalespeople() {
