@@ -41,6 +41,7 @@ export async function GET(request: Request) {
                 email?: string;
                 role?: string;
                 createdAt?: Timestamp;
+                enabledApps?: string[];
             } | undefined])
         );
 
@@ -90,6 +91,7 @@ export async function GET(request: Request) {
                     email: String(profile?.email ?? userRecord.email ?? ""),
                     role: normalizeRole(String(profile?.role ?? "purchase")),
                     createdAt,
+                    enabledApps: Array.isArray(profile?.enabledApps) ? profile.enabledApps : null,
                 };
             })
             .sort((left, right) => left.email.localeCompare(right.email));

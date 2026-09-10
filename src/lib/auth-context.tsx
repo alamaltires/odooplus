@@ -24,6 +24,13 @@ export type UserRole = "admin" | "purchase" | "salesperson" | "sales_manager" | 
 type AuthContextValue = {
     user: User | null;
     role: UserRole;
+    /**
+     * Per-user override of which sidebar apps are visible, set via the
+     * permissions modal in Settings. `null` means no override is
+     * configured — the role's own default set applies (see
+     * `defaultAppHrefsForRole` in `@/lib/app-permissions`).
+     */
+    enabledApps: string[] | null;
     loading: boolean;
     login: (email: string, password: string) => Promise<void>;
     register: (email: string, password: string) => Promise<void>;
@@ -35,6 +42,7 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 export function AuthProvider({ children }: { children: ReactNode }) {
     const [user, setUser] = useState<User | null>(null);
     const [role, setRole] = useState<UserRole>("user");
+    const [enabledApps, setEnabledApps] = useState<string[] | null>(null);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
@@ -44,6 +52,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
             if (!nextUser) {
                 setRole("user");
+                setEnabledApps(null);
                 setLoading(false);
                 return;
             }
@@ -63,8 +72,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 } else {
                     setRole("user");
                 }
+
+                const rawEnabledApps = snapshot.data()?.enabledApps;
+                setEnabledApps(
+                    Array.isArray(rawEnabledApps) ? rawEnabledApps.filter((item): item is string => typeof item === "string") : null
+                );
             } catch {
                 setRole("user");
+                setEnabledApps(null);
             } finally {
                 setLoading(false);
             }
@@ -77,6 +92,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         () => ({
             user,
             role,
+            enabledApps,
             loading,
             login: async (email, password) => {
                 await signInWithEmailAndPassword(auth, email, password);
@@ -88,7 +104,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 await signOut(auth);
             },
         }),
-        [user, role, loading]
+        [user, role, enabledApps, loading]
     );
 
     return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

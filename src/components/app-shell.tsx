@@ -7,75 +7,48 @@ import { useEffect, useMemo, useCallback, useState } from "react";
 import { ClipboardList, LayoutDashboard, LogOut, Menu, PackageSearch, PiggyBank, ScanSearch, Settings, ShoppingBasket, Target, TrendingUp, Users, X, type LucideIcon } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { CompanySelector } from "@/components/company-selector";
+import { APP_DEFINITIONS, defaultAppHrefsForRole } from "@/lib/app-permissions";
 
-// Add new sidebar entries here — each one just needs a route, a label, and an icon.
-const links: Array<{ href: string; label: string; icon: LucideIcon }> = [
-    { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-    { href: "/orders/pending", label: "Pending Orders", icon: ClipboardList },
-    { href: "/product-scanner", label: "Product Scanner", icon: ScanSearch },
-    { href: "/product-requests", label: "Product Requests", icon: PackageSearch },
-    { href: "/purchase-order", label: "Purchase Order", icon: ShoppingBasket },
-    { href: "/products-performance", label: "Products Performance", icon: TrendingUp },
-    { href: "/margin-analytics", label: "Margin Analytics", icon: PiggyBank },
-    { href: "/salesperson-activity", label: "Salesperson Activity", icon: Users },
-    { href: "/sales-targets", label: "Sales Targets", icon: Target },
-    { href: "/settings", label: "Settings", icon: Settings },
-];
+// Add new sidebar entries here — each one just needs an icon; the route and
+// label live in `APP_DEFINITIONS` (shared with the per-user permissions
+// modal in Settings) so both stay in sync automatically.
+const ICONS: Record<string, LucideIcon> = {
+    "/dashboard": LayoutDashboard,
+    "/orders/pending": ClipboardList,
+    "/product-scanner": ScanSearch,
+    "/product-requests": PackageSearch,
+    "/purchase-order": ShoppingBasket,
+    "/products-performance": TrendingUp,
+    "/margin-analytics": PiggyBank,
+    "/salesperson-activity": Users,
+    "/sales-targets": Target,
+    "/settings": Settings,
+};
+
+const links: Array<{ href: string; label: string; icon: LucideIcon }> = APP_DEFINITIONS.map((app) => ({
+    ...app,
+    icon: ICONS[app.href] ?? LayoutDashboard,
+}));
 
 export function AppShell({ children }: { children: React.ReactNode }) {
     const pathname = usePathname();
     const router = useRouter();
-    const { user, role, loading, logout } = useAuth();
+    const { user, role, enabledApps, loading, logout } = useAuth();
     const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
     const visibleLinks = useMemo(() => {
-        if (role === "purchase") {
-            return links.filter(
-                (link) =>
-                    link.href === "/orders/pending" ||
-                    link.href === "/purchase-order" ||
-                    link.href === "/products-performance" ||
-                    link.href === "/settings" ||
-                    link.href === "/product-scanner" ||
-                    link.href === "/product-requests"
-            );
+        if (role === "admin") {
+            return links;
         }
 
-        if (role === "salesperson") {
-            return links.filter(
-                (link) =>
-                    link.href === "/sales-targets" ||
-                    link.href === "/settings" ||
-                    link.href === "/product-requests"
-            );
-        }
-
-        if (role === "sales_manager") {
-            return links.filter(
-                (link) =>
-                    link.href === "/sales-targets" ||
-                    link.href === "/salesperson-activity" ||
-                    link.href === "/settings" ||
-                    link.href === "/product-requests"
-            );
-        }
-
-        if (role === "store") {
-            return links.filter(
-                (link) =>
-                    link.href === "/orders/pending" ||
-                    link.href === "/product-scanner" ||
-                    link.href === "/settings" ||
-                    link.href === "/product-requests"
-            );
-        }
-
-        if (role === "user") {
-            return links.filter((link) => link.href === "/product-requests" || link.href === "/settings");
-        }
-
-        return links;
-    }, [role]);
+        // A per-user override (set via the permissions modal in Settings)
+        // replaces the role default entirely; `/settings` is always kept so
+        // a fully-restricted user can still reach their own account instead
+        // of being stuck on a blank "Loading..." screen.
+        const allowedHrefs = enabledApps ?? defaultAppHrefsForRole(role);
+        const effectiveHrefs = allowedHrefs.includes("/settings") ? allowedHrefs : [...allowedHrefs, "/settings"];
+        return links.filter((link) => effectiveHrefs.includes(link.href));
+    }, [role, enabledApps]);
 
     const isPathAllowed = useCallback((path: string) => {
         if (role === "admin") return true;
