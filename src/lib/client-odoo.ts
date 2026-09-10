@@ -305,8 +305,8 @@ export function getMarginAnalyticsReport(input: {
     categoryId?: number | null;
     brandId?: number | null;
     originId?: number | null;
-    rimDiameterId?: number | null;
-    unifiedLotId?: number | null;
+    rimDiameterIds?: number[] | null;
+    unifiedLotIds?: number[] | null;
     productId?: number | null;
     startDate: string;
     endDate: string;
@@ -380,7 +380,7 @@ export type MarginBreakdown = {
     startDate: string;
     endDate: string;
     dateBasis: "order" | "transaction";
-    unifiedLotName: string | null;
+    unifiedLotNames: string[];
     purchases: MarginBreakdownRow[];
     landedCosts: MarginBreakdownRow[];
     operationCosts: MarginBreakdownRow[];
@@ -397,7 +397,7 @@ export type MarginBreakdown = {
 
 export function getMarginAnalyticsBreakdown(input: {
     productId: number;
-    unifiedLotId?: number | null;
+    unifiedLotIds?: number[] | null;
     startDate: string;
     endDate: string;
     dateBasis?: "order" | "transaction" | null;

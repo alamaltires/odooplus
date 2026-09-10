@@ -10,8 +10,8 @@ export async function POST(request: Request) {
             categoryId?: number | null;
             brandId?: number | null;
             originId?: number | null;
-            rimDiameterId?: number | null;
-            unifiedLotId?: number | null;
+            rimDiameterIds?: number[] | null;
+            unifiedLotIds?: number[] | null;
             productId?: number | null;
             startDate: string;
             endDate: string;

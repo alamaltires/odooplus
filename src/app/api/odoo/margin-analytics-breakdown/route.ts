@@ -8,7 +8,7 @@ export async function POST(request: Request) {
         const companyIds = await getCompanyIdsFromRequest(request);
         const body = (await request.json()) as {
             productId: number;
-            unifiedLotId?: number | null;
+            unifiedLotIds?: number[] | null;
             startDate: string;
             endDate: string;
             dateBasis?: "order" | "transaction" | null;

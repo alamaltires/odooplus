@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, FormEvent, UIEvent, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Coins, Download, ListTree, PiggyBank, Search, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import {
@@ -189,6 +189,135 @@ function SearchableSelect({
     );
 }
 
+function MultiSearchableSelect({
+    label,
+    placeholder,
+    query,
+    onQueryChange,
+    options,
+    selected,
+    onToggle,
+    onRemove,
+    loading,
+    loadingMore,
+    error,
+    minQueryLength,
+    minQueryText,
+    menuOpen,
+    onFocus,
+    onBlur,
+    onScroll,
+    emptyText,
+}: {
+    label: string;
+    placeholder: string;
+    query: string;
+    onQueryChange: (value: string) => void;
+    options: Option[];
+    selected: Option[];
+    onToggle: (option: Option) => void;
+    onRemove: (id: number) => void;
+    loading: boolean;
+    loadingMore?: boolean;
+    error?: string | null;
+    minQueryLength?: number;
+    minQueryText?: string;
+    menuOpen: boolean;
+    onFocus: () => void;
+    onBlur: () => void;
+    onScroll?: (event: UIEvent<HTMLUListElement>) => void;
+    emptyText?: string;
+}) {
+    const selectedIds = useMemo(() => new Set(selected.map((option) => option.id)), [selected]);
+    const belowMinLength = minQueryLength != null && query.trim().length < minQueryLength;
+
+    return (
+        <label className="relative block">
+            <span className="mb-2 block text-sm font-medium">{label}</span>
+            <div className="relative">
+                <Search
+                    className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-(--ink-soft)"
+                    aria-hidden="true"
+                />
+                <input
+                    value={query}
+                    onChange={(event) => onQueryChange(event.target.value)}
+                    onFocus={onFocus}
+                    onBlur={() => window.setTimeout(onBlur, 120)}
+                    placeholder={loading ? "Loading..." : placeholder}
+                    className="w-full rounded-xl border border-(--line) bg-white py-2 pl-10 pr-3"
+                    disabled={loading && options.length === 0}
+                />
+            </div>
+
+            {selected.length > 0 ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                    {selected.map((option) => (
+                        <span
+                            key={option.id}
+                            className="inline-flex items-center gap-1 rounded-full bg-(--chip) px-2.5 py-1 text-xs font-medium"
+                        >
+                            {option.name}
+                            <button
+                                type="button"
+                                onMouseDown={(event) => {
+                                    event.preventDefault();
+                                    onRemove(option.id);
+                                }}
+                                aria-label={`Remove ${option.name}`}
+                                className="cursor-pointer rounded-full hover:bg-black/10"
+                            >
+                                <X className="h-3 w-3" aria-hidden="true" />
+                            </button>
+                        </span>
+                    ))}
+                </div>
+            ) : null}
+
+            {menuOpen ? (
+                <ul
+                    onScroll={onScroll}
+                    className="absolute z-20 mt-2 max-h-64 w-full overflow-auto rounded-xl border border-(--line) bg-white p-1 shadow-lg"
+                >
+                    {belowMinLength ? (
+                        <li className="px-3 py-2 text-sm text-(--ink-soft)">
+                            {minQueryText ?? `Type at least ${minQueryLength} characters to search.`}
+                        </li>
+                    ) : loading ? (
+                        <li className="px-3 py-2 text-sm text-(--ink-soft)">Searching...</li>
+                    ) : options.length === 0 ? (
+                        <li className="px-3 py-2 text-sm text-(--ink-soft)">{emptyText ?? "No results found."}</li>
+                    ) : (
+                        <>
+                            {options.map((option) => {
+                                const isSelected = selectedIds.has(option.id);
+                                return (
+                                    <li key={option.id}>
+                                        <button
+                                            type="button"
+                                            onMouseDown={() => onToggle(option)}
+                                            className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm hover:bg-(--chip) ${
+                                                isSelected ? "bg-(--chip)" : ""
+                                            }`}
+                                        >
+                                            <span>{option.name}</span>
+                                            {isSelected ? <span className="text-(--brand)">✓</span> : null}
+                                        </button>
+                                    </li>
+                                );
+                            })}
+                            {loadingMore ? (
+                                <li className="px-3 py-2 text-center text-xs text-(--ink-soft)">Loading more...</li>
+                            ) : null}
+                        </>
+                    )}
+                </ul>
+            ) : null}
+            {error ? <p className="mt-1 text-xs text-red-600">{error}</p> : null}
+        </label>
+    );
+}
+
 export default function MarginAnalyticsPage() {
     const { user } = useAuth();
     const hasLoadedCategoriesRef = useRef(false);
@@ -222,7 +351,7 @@ export default function MarginAnalyticsPage() {
     const [rimDiametersError, setRimDiametersError] = useState<string | null>(null);
     const [rimDiameterQuery, setRimDiameterQuery] = useState("");
     const [rimDiameterMenuOpen, setRimDiameterMenuOpen] = useState(false);
-    const [selectedRimDiameter, setSelectedRimDiameter] = useState<Option | null>(null);
+    const [selectedRimDiameters, setSelectedRimDiameters] = useState<Option[]>([]);
 
     const [productQuery, setProductQuery] = useState("");
     const [productActivated, setProductActivated] = useState(false);
@@ -242,7 +371,7 @@ export default function MarginAnalyticsPage() {
     const [unifiedLotLoadingMore, setUnifiedLotLoadingMore] = useState(false);
     const [unifiedLotOffset, setUnifiedLotOffset] = useState(0);
     const [unifiedLotHasMore, setUnifiedLotHasMore] = useState(false);
-    const [selectedUnifiedLot, setSelectedUnifiedLot] = useState<Option | null>(null);
+    const [selectedUnifiedLots, setSelectedUnifiedLots] = useState<Option[]>([]);
 
     const [startDate, setStartDate] = useState(() => {
         const now = new Date();
@@ -262,12 +391,12 @@ export default function MarginAnalyticsPage() {
     const [expandedProductIds, setExpandedProductIds] = useState<Set<number>>(new Set());
     const [exportLoading, setExportLoading] = useState<"csv" | "xlsx" | null>(null);
     const [appliedParams, setAppliedParams] = useState<{
-        unifiedLotId: number | null;
+        unifiedLotIds: number[];
         startDate: string;
         endDate: string;
         dateBasis: "order" | "transaction";
     } | null>(null);
-    const [breakdownProduct, setBreakdownProduct] = useState<{ id: number; name: string } | null>(null);
+    const [breakdownProduct, setBreakdownProduct] = useState<ReportRow | null>(null);
     const [breakdown, setBreakdown] = useState<MarginBreakdown | null>(null);
     const [breakdownLoading, setBreakdownLoading] = useState(false);
     const [breakdownError, setBreakdownError] = useState<string | null>(null);
@@ -481,7 +610,12 @@ export default function MarginAnalyticsPage() {
     }, [rimDiameterQuery, rimDiameters]);
 
     const hasAnyFilter = Boolean(
-        selectedCategory || selectedBrand || selectedOrigin || selectedRimDiameter || selectedUnifiedLot || selectedProduct
+        selectedCategory ||
+            selectedBrand ||
+            selectedOrigin ||
+            selectedRimDiameters.length > 0 ||
+            selectedUnifiedLots.length > 0 ||
+            selectedProduct
     );
 
     const filteredSortedRows = useMemo(() => {
@@ -517,8 +651,8 @@ export default function MarginAnalyticsPage() {
             selectedCategory?.name,
             selectedBrand?.name,
             selectedOrigin?.name,
-            selectedRimDiameter?.name,
-            selectedUnifiedLot?.name,
+            selectedRimDiameters.map((option) => option.name).join("/"),
+            selectedUnifiedLots.map((option) => option.name).join("/"),
             selectedProduct?.name,
         ].filter(Boolean);
         const scope = parts.join("-") || "margin-analytics";
@@ -529,8 +663,8 @@ export default function MarginAnalyticsPage() {
         selectedCategory?.name,
         selectedOrigin?.name,
         selectedProduct?.name,
-        selectedRimDiameter?.name,
-        selectedUnifiedLot?.name,
+        selectedRimDiameters,
+        selectedUnifiedLots,
         startDate,
     ]);
 
@@ -550,8 +684,8 @@ export default function MarginAnalyticsPage() {
                 categoryId: selectedCategory?.id,
                 brandId: selectedBrand?.id,
                 originId: selectedOrigin?.id,
-                rimDiameterId: selectedRimDiameter?.id,
-                unifiedLotId: selectedUnifiedLot?.id,
+                rimDiameterIds: selectedRimDiameters.map((option) => option.id),
+                unifiedLotIds: selectedUnifiedLots.map((option) => option.id),
                 productId: selectedProduct?.id,
                 startDate,
                 endDate,
@@ -562,7 +696,7 @@ export default function MarginAnalyticsPage() {
             // breakdown opened later reflects the numbers on screen even if
             // the form has since been edited without regenerating.
             setAppliedParams({
-                unifiedLotId: selectedUnifiedLot?.id ?? null,
+                unifiedLotIds: selectedUnifiedLots.map((option) => option.id),
                 startDate,
                 endDate,
                 dateBasis,
@@ -574,20 +708,20 @@ export default function MarginAnalyticsPage() {
         }
     }
 
-    async function openBreakdown(productId: number, productName: string) {
+    async function openBreakdown(row: ReportRow) {
         if (!appliedParams) {
             return;
         }
 
-        setBreakdownProduct({ id: productId, name: productName });
+        setBreakdownProduct(row);
         setBreakdown(null);
         setBreakdownError(null);
         setBreakdownLoading(true);
 
         try {
             const data = await getMarginAnalyticsBreakdown({
-                productId,
-                unifiedLotId: appliedParams.unifiedLotId,
+                productId: row.productId,
+                unifiedLotIds: appliedParams.unifiedLotIds,
                 startDate: appliedParams.startDate,
                 endDate: appliedParams.endDate,
                 dateBasis: appliedParams.dateBasis,
@@ -844,21 +978,25 @@ export default function MarginAnalyticsPage() {
                         onBlur={() => setOriginMenuOpen(false)}
                     />
 
-                    <SearchableSelect
+                    <MultiSearchableSelect
                         label="Rim Diameter"
                         placeholder="Search rim diameters"
                         query={rimDiameterQuery}
                         onQueryChange={(value) => {
                             setRimDiameterQuery(value);
                             setRimDiameterMenuOpen(true);
-                            setSelectedRimDiameter(null);
                         }}
                         options={filteredRimDiameters}
-                        onSelect={(option) => {
-                            setSelectedRimDiameter(option);
-                            setRimDiameterQuery(option.name);
-                            setRimDiameterMenuOpen(false);
+                        selected={selectedRimDiameters}
+                        onToggle={(option) => {
+                            setSelectedRimDiameters((current) =>
+                                current.some((item) => item.id === option.id)
+                                    ? current.filter((item) => item.id !== option.id)
+                                    : [...current, option]
+                            );
+                            setRimDiameterQuery("");
                         }}
+                        onRemove={(id) => setSelectedRimDiameters((current) => current.filter((item) => item.id !== id))}
                         loading={rimDiametersLoading}
                         error={rimDiametersError}
                         menuOpen={rimDiameterMenuOpen}
@@ -866,74 +1004,43 @@ export default function MarginAnalyticsPage() {
                         onBlur={() => setRimDiameterMenuOpen(false)}
                     />
 
-                    <label className="relative block">
-                        <span className="mb-2 block text-sm font-medium">Unified Lot</span>
-                        <div className="relative">
-                            <Search
-                                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-(--ink-soft)"
-                                aria-hidden="true"
-                            />
-                            <input
-                                value={unifiedLotQuery}
-                                onChange={(event) => {
-                                    setUnifiedLotQuery(event.target.value);
-                                    setUnifiedLotMenuOpen(true);
-                                    setUnifiedLotActivated(true);
-                                    setSelectedUnifiedLot(null);
-                                }}
-                                onFocus={() => {
-                                    setUnifiedLotMenuOpen(true);
-                                    setUnifiedLotActivated(true);
-                                }}
-                                onBlur={() => window.setTimeout(() => setUnifiedLotMenuOpen(false), 120)}
-                                placeholder="Search unified lot code"
-                                className="w-full rounded-xl border border-(--line) bg-white py-2 pl-10 pr-3"
-                            />
-                        </div>
-
-                        {unifiedLotMenuOpen ? (
-                            <ul
-                                onScroll={(event) => {
-                                    const target = event.currentTarget;
-                                    if (target.scrollHeight - target.scrollTop - target.clientHeight < SCROLL_LOAD_MORE_THRESHOLD_PX) {
-                                        loadMoreUnifiedLots();
-                                    }
-                                }}
-                                className="absolute z-20 mt-2 max-h-64 w-full overflow-auto rounded-xl border border-(--line) bg-white p-1 shadow-lg"
-                            >
-                                {unifiedLotQuery.trim().length < MIN_SEARCH_QUERY_LENGTH ? (
-                                    <li className="px-3 py-2 text-sm text-(--ink-soft)">
-                                        Type at least {MIN_SEARCH_QUERY_LENGTH} characters to search.
-                                    </li>
-                                ) : unifiedLotLoading ? (
-                                    <li className="px-3 py-2 text-sm text-(--ink-soft)">Searching...</li>
-                                ) : unifiedLotResults.length === 0 ? (
-                                    <li className="px-3 py-2 text-sm text-(--ink-soft)">No unified lots found.</li>
-                                ) : (
-                                    <>
-                                        {unifiedLotResults.map((lot) => (
-                                            <li key={lot.id}>
-                                                <button
-                                                    type="button"
-                                                    onMouseDown={() => {
-                                                        setSelectedUnifiedLot(lot);
-                                                        setUnifiedLotQuery(lot.name);
-                                                        setUnifiedLotMenuOpen(false);
-                                                    }}
-                                                    className="w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-(--chip)"
-                                                >
-                                                    {lot.name}
-                                                </button>
-                                            </li>
-                                        ))}
-                                        {unifiedLotLoadingMore ? (
-                                            <li className="px-3 py-2 text-center text-xs text-(--ink-soft)">Loading more...</li>
-                                        ) : null}
-                                    </>
-                                )}
-                            </ul>
-                        ) : null}
-                    </label>
+                    <MultiSearchableSelect
+                        label="Unified Lot"
+                        placeholder="Search unified lot code"
+                        query={unifiedLotQuery}
+                        onQueryChange={(value) => {
+                            setUnifiedLotQuery(value);
+                            setUnifiedLotMenuOpen(true);
+                            setUnifiedLotActivated(true);
+                        }}
+                        options={unifiedLotResults}
+                        selected={selectedUnifiedLots}
+                        onToggle={(option) => {
+                            setSelectedUnifiedLots((current) =>
+                                current.some((item) => item.id === option.id)
+                                    ? current.filter((item) => item.id !== option.id)
+                                    : [...current, option]
+                            );
+                            setUnifiedLotQuery("");
+                        }}
+                        onRemove={(id) => setSelectedUnifiedLots((current) => current.filter((item) => item.id !== id))}
+                        loading={unifiedLotLoading}
+                        loadingMore={unifiedLotLoadingMore}
+                        minQueryLength={MIN_SEARCH_QUERY_LENGTH}
+                        emptyText="No unified lots found."
+                        menuOpen={unifiedLotMenuOpen}
+                        onFocus={() => {
+                            setUnifiedLotMenuOpen(true);
+                            setUnifiedLotActivated(true);
+                        }}
+                        onBlur={() => setUnifiedLotMenuOpen(false)}
+                        onScroll={(event) => {
+                            const target = event.currentTarget;
+                            if (target.scrollHeight - target.scrollTop - target.clientHeight < SCROLL_LOAD_MORE_THRESHOLD_PX) {
+                                loadMoreUnifiedLots();
+                            }
+                        }}
+                    />
 
                     <div className="grid gap-4 sm:grid-cols-2">
                         <label className="block">
@@ -1254,7 +1361,7 @@ export default function MarginAnalyticsPage() {
                                                             ) : null}
                                                             <button
                                                                 type="button"
-                                                                onClick={() => void openBreakdown(row.productId, row.productName)}
+                                                                onClick={() => void openBreakdown(row)}
                                                                 className="mt-1.5 inline-flex cursor-pointer items-center gap-1 rounded-lg border border-(--line) bg-white px-2 py-1 text-[11px] font-medium text-(--brand) hover:bg-(--chip)"
                                                             >
                                                                 <ListTree className="h-3 w-3" aria-hidden="true" />
@@ -1356,7 +1463,8 @@ export default function MarginAnalyticsPage() {
 
             {breakdownProduct ? (
                 <BreakdownModal
-                    productName={breakdownProduct.name}
+                    product={breakdownProduct}
+                    currencyCode={report?.currencyCode ?? breakdown?.currencyCode ?? "AED"}
                     breakdown={breakdown}
                     loading={breakdownLoading}
                     error={breakdownError}
@@ -1457,18 +1565,23 @@ function BreakdownSection({
 }
 
 function BreakdownModal({
-    productName,
+    product,
+    currencyCode: reportCurrencyCode,
     breakdown,
     loading,
     error,
     onClose,
 }: {
-    productName: string;
+    product: ReportRow;
+    currencyCode: string;
     breakdown: MarginBreakdown | null;
     loading: boolean;
     error: string | null;
     onClose: () => void;
 }) {
+    const [exportLoading, setExportLoading] = useState(false);
+    const [exportError, setExportError] = useState<string | null>(null);
+
     useEffect(() => {
         function onKeyDown(event: KeyboardEvent) {
             if (event.key === "Escape") {
@@ -1479,7 +1592,62 @@ function BreakdownModal({
         return () => window.removeEventListener("keydown", onKeyDown);
     }, [onClose]);
 
-    const currencyCode = breakdown?.currencyCode ?? "AED";
+    const currencyCode = breakdown?.currencyCode ?? reportCurrencyCode;
+
+    async function handleExportBreakdown() {
+        if (!breakdown) return;
+
+        setExportLoading(true);
+        setExportError(null);
+
+        try {
+            const XLSX = await import("xlsx");
+            const workbook = XLSX.utils.book_new();
+
+            const summarySheet = XLSX.utils.json_to_sheet([
+                {
+                    Product: product.productName,
+                    Brand: product.brandName,
+                    Origin: product.originName,
+                    Rim: product.rimDiameterName,
+                    "Purchased Qty": product.purchasedQty,
+                    "Remaining Stock": product.currentStock,
+                    [`Avg Total Cost (${reportCurrencyCode})`]: product.avgTotalCostPerUnit,
+                    "Sold Qty": product.soldQty,
+                    [`Avg Sales Price (${reportCurrencyCode})`]: product.soldQty > 0 ? product.avgSalesPrice : "",
+                    "Margin %": product.hasSalesData ? product.marginPercent : "",
+                    [`Est. Profit/Loss (${reportCurrencyCode})`]: product.hasSalesData ? product.estimatedProfitLoss : "",
+                },
+            ]);
+            XLSX.utils.book_append_sheet(workbook, summarySheet, "Summary");
+
+            function appendSection(rows: MarginBreakdownRow[], sheetName: string, quantityLabel: string, unitLabel: string) {
+                const data = rows.map((row) => ({
+                    Reference: row.reference,
+                    Date: row.date,
+                    "Partner / Order": row.partnerName,
+                    Lot: row.lots.join(", "),
+                    [quantityLabel]: row.quantity,
+                    [unitLabel]: row.unitPrice,
+                    Amount: row.amount,
+                    Note: row.note,
+                }));
+                const sheet = XLSX.utils.json_to_sheet(data.length > 0 ? data : [{ Reference: "No records" }]);
+                XLSX.utils.book_append_sheet(workbook, sheet, sheetName.slice(0, 31));
+            }
+
+            appendSection(breakdown.purchases, "Purchase Orders", "Qty", `Unit (${currencyCode})`);
+            appendSection(breakdown.landedCosts, "Landed Cost Records", "Qty", `Per unit (${currencyCode})`);
+            appendSection(breakdown.operationCosts, "Accounting Corrections", "Share %", `Entry (${currencyCode})`);
+            appendSection(breakdown.sales, "Sales Orders", "Qty", `Unit (${currencyCode})`);
+
+            XLSX.writeFile(workbook, `${sanitizeFileName(product.productName)}-breakdown.xlsx`);
+        } catch (exportErr) {
+            setExportError(exportErr instanceof Error ? exportErr.message : "Failed to export breakdown.");
+        } finally {
+            setExportLoading(false);
+        }
+    }
 
     return (
         <div
@@ -1492,31 +1660,104 @@ function BreakdownModal({
             >
                 <header className="flex items-start justify-between gap-4 border-b border-(--line) px-5 py-4">
                     <div>
-                        <h2 className="font-display text-xl">{productName}</h2>
+                        <h2 className="font-display text-xl">{product.productName}</h2>
                         {breakdown ? (
                             <p className="mt-0.5 text-xs text-(--ink-soft)">
                                 {breakdown.startDate} → {breakdown.endDate} ·{" "}
                                 {breakdown.dateBasis === "order" ? "Order date basis" : "Receiving / invoice date basis"}
-                                {breakdown.unifiedLotName ? ` · Unified Lot ${breakdown.unifiedLotName}` : ""}
+                                {breakdown.unifiedLotNames.length > 0
+                                    ? ` · Unified Lot ${breakdown.unifiedLotNames.join(", ")}`
+                                    : ""}
                             </p>
                         ) : null}
                     </div>
-                    <button
-                        type="button"
-                        onClick={onClose}
-                        aria-label="Close breakdown"
-                        className="cursor-pointer rounded-lg p-1 text-(--ink-soft) hover:bg-(--chip)"
-                    >
-                        <X className="h-5 w-5" aria-hidden="true" />
-                    </button>
+                    <div className="flex items-center gap-2">
+                        {breakdown ? (
+                            <button
+                                type="button"
+                                onClick={() => void handleExportBreakdown()}
+                                disabled={exportLoading}
+                                className="inline-flex items-center gap-2 rounded-xl bg-(--brand) px-3.5 py-1.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
+                            >
+                                <Download className="h-4 w-4" aria-hidden="true" />
+                                {exportLoading ? "Exporting..." : "Export Excel"}
+                            </button>
+                        ) : null}
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            aria-label="Close breakdown"
+                            className="cursor-pointer rounded-lg p-1 text-(--ink-soft) hover:bg-(--chip)"
+                        >
+                            <X className="h-5 w-5" aria-hidden="true" />
+                        </button>
+                    </div>
                 </header>
 
                 <div className="space-y-4 px-5 py-4">
                     {loading ? <p className="text-sm">Loading every underlying record…</p> : null}
                     {error ? <p className="text-sm text-red-600">{error}</p> : null}
+                    {exportError ? <p className="text-sm text-red-600">{exportError}</p> : null}
 
                     {breakdown ? (
                         <>
+                            <div className="overflow-x-auto rounded-xl border border-(--line)">
+                                <table className="min-w-full border-collapse text-left text-xs">
+                                    <thead className="bg-(--chip) text-(--ink-soft)">
+                                        <tr>
+                                            <th className="px-3 py-2 font-medium">Product</th>
+                                            <th className="px-3 py-2 font-medium">Brand</th>
+                                            <th className="px-3 py-2 font-medium">Origin</th>
+                                            <th className="px-3 py-2 font-medium">Rim</th>
+                                            <th className="px-3 py-2 text-right font-medium">Purchased Qty</th>
+                                            <th className="px-3 py-2 text-right font-medium">Remaining Stock</th>
+                                            <th className="px-3 py-2 text-right font-medium">Avg Total Cost</th>
+                                            <th className="px-3 py-2 text-right font-medium">Sold Qty</th>
+                                            <th className="px-3 py-2 text-right font-medium">Avg Sales Price</th>
+                                            <th className="px-3 py-2 text-right font-medium">Margin %</th>
+                                            <th className="px-3 py-2 text-right font-medium">Est. Profit/Loss</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr className="border-t border-(--line)">
+                                            <td className="px-3 py-2 font-medium">{product.productName}</td>
+                                            <td className="px-3 py-2 text-(--ink-soft)">{product.brandName}</td>
+                                            <td className="px-3 py-2 text-(--ink-soft)">{product.originName}</td>
+                                            <td className="px-3 py-2 text-(--ink-soft)">{product.rimDiameterName}</td>
+                                            <td className="px-3 py-2 text-right">{formatNumber(product.purchasedQty)}</td>
+                                            <td className="px-3 py-2 text-right">{formatNumber(product.currentStock)}</td>
+                                            <td className="px-3 py-2 text-right">
+                                                {formatCurrency(product.avgTotalCostPerUnit, reportCurrencyCode)}
+                                            </td>
+                                            <td className="px-3 py-2 text-right">{formatNumber(product.soldQty)}</td>
+                                            <td className="px-3 py-2 text-right">
+                                                {product.soldQty > 0
+                                                    ? formatCurrency(product.avgSalesPrice, reportCurrencyCode)
+                                                    : "-"}
+                                            </td>
+                                            <td className="px-3 py-2 text-right">
+                                                {product.hasSalesData ? (
+                                                    <span className={product.marginPercent < 0 ? "text-red-600" : "text-(--accent)"}>
+                                                        {formatNumber(product.marginPercent)}%
+                                                    </span>
+                                                ) : (
+                                                    "-"
+                                                )}
+                                            </td>
+                                            <td className="px-3 py-2 text-right font-medium">
+                                                {product.hasSalesData ? (
+                                                    <span className={product.estimatedProfitLoss < 0 ? "text-red-600" : ""}>
+                                                        {formatCurrency(product.estimatedProfitLoss, reportCurrencyCode)}
+                                                    </span>
+                                                ) : (
+                                                    "-"
+                                                )}
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+
                             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
                                 {[
                                     { label: "Purchased Qty", value: formatNumber(breakdown.totals.purchasedQty) },

@@ -4323,8 +4323,8 @@ export async function getMarginAnalyticsReport(
         categoryId?: number | null;
         brandId?: number | null;
         originId?: number | null;
-        rimDiameterId?: number | null;
-        unifiedLotId?: number | null;
+        rimDiameterIds?: number[] | null;
+        unifiedLotIds?: number[] | null;
         productId?: number | null;
         startDate: string;
         endDate: string;
@@ -4353,10 +4353,14 @@ export async function getMarginAnalyticsReport(
     const hasBrand = Number.isFinite(brandId) && brandId > 0;
     const originId = Number(input.originId);
     const hasOrigin = Number.isFinite(originId) && originId > 0;
-    const rimDiameterId = Number(input.rimDiameterId);
-    const hasRimDiameter = Number.isFinite(rimDiameterId) && rimDiameterId > 0;
-    const unifiedLotId = Number(input.unifiedLotId);
-    const hasUnifiedLot = Number.isFinite(unifiedLotId) && unifiedLotId > 0;
+    const rimDiameterIds = Array.isArray(input.rimDiameterIds)
+        ? Array.from(new Set(input.rimDiameterIds.map(Number).filter((id) => Number.isFinite(id) && id > 0)))
+        : [];
+    const hasRimDiameter = rimDiameterIds.length > 0;
+    const unifiedLotIds = Array.isArray(input.unifiedLotIds)
+        ? Array.from(new Set(input.unifiedLotIds.map(Number).filter((id) => Number.isFinite(id) && id > 0)))
+        : [];
+    const hasUnifiedLot = unifiedLotIds.length > 0;
     const productId = Number(input.productId);
     const hasProduct = Number.isFinite(productId) && productId > 0;
 
@@ -4379,7 +4383,7 @@ export async function getMarginAnalyticsReport(
         templateDomain.push(["origin", "=", originId]);
     }
     if (hasRimDiameter) {
-        templateDomain.push(["rim_diameter", "=", rimDiameterId]);
+        templateDomain.push(["rim_diameter", "in", rimDiameterIds]);
     }
 
     const idSets: Array<Set<number>> = [];
@@ -4417,7 +4421,7 @@ export async function getMarginAnalyticsReport(
             credentials,
             uid,
             "stock.lot",
-            [["unified_lot_id", "=", unifiedLotId]],
+            [["unified_lot_id", "in", unifiedLotIds]],
             ["id", "product_id"]
         );
 
@@ -5481,7 +5485,7 @@ export type MarginAnalyticsBreakdown = {
     startDate: string;
     endDate: string;
     dateBasis: "order" | "transaction";
-    unifiedLotName: string | null;
+    unifiedLotNames: string[];
     purchases: MarginAnalyticsBreakdownRow[];
     landedCosts: MarginAnalyticsBreakdownRow[];
     operationCosts: MarginAnalyticsBreakdownRow[];
@@ -5512,7 +5516,7 @@ export async function getMarginAnalyticsBreakdown(
     credentials: OdooCredentials,
     input: {
         productId: number;
-        unifiedLotId?: number | null;
+        unifiedLotIds?: number[] | null;
         startDate: string;
         endDate: string;
         dateBasis?: "order" | "transaction" | null;
@@ -5529,8 +5533,10 @@ export async function getMarginAnalyticsBreakdown(
     const endDate = input.endDate;
     ensureDateRange(startDate, endDate);
 
-    const unifiedLotId = Number(input.unifiedLotId);
-    const hasUnifiedLot = Number.isFinite(unifiedLotId) && unifiedLotId > 0;
+    const unifiedLotIds = Array.isArray(input.unifiedLotIds)
+        ? Array.from(new Set(input.unifiedLotIds.map(Number).filter((id) => Number.isFinite(id) && id > 0)))
+        : [];
+    const hasUnifiedLot = unifiedLotIds.length > 0;
 
     const productRows = await executeKw<Array<Record<string, unknown>>>(
         credentials,
@@ -5574,7 +5580,7 @@ export async function getMarginAnalyticsBreakdown(
         currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
 
     // Same Unified Lot resolution as the report (paginated, product-scoped).
-    let unifiedLotName: string | null = null;
+    let unifiedLotNames: string[] = [];
     let unifiedLotOrderIds: number[] | null = null;
     let unifiedLotSaleLineIds: number[] | null = null;
     const unifiedLotQtyBySaleLineId = new Map<number, number>();
@@ -5585,16 +5591,18 @@ export async function getMarginAnalyticsBreakdown(
             uid,
             "stock.unified.lot",
             "read",
-            [[unifiedLotId]],
+            [unifiedLotIds],
             { fields: ["id", "name"] }
         );
-        unifiedLotName = toDisplayString(unifiedLots[0]?.name) || null;
+        unifiedLotNames = unifiedLots
+            .map((lot) => toDisplayString(lot.name))
+            .filter((name): name is string => Boolean(name));
 
         const lots = await searchReadAll(
             credentials,
             uid,
             "stock.lot",
-            [["unified_lot_id", "=", unifiedLotId], ["product_id", "=", productId]],
+            [["unified_lot_id", "in", unifiedLotIds], ["product_id", "=", productId]],
             ["id"]
         );
         const lotIds = lots.map((lot) => Number(lot.id ?? 0)).filter((id) => id > 0);
@@ -6280,7 +6288,7 @@ export async function getMarginAnalyticsBreakdown(
         startDate,
         endDate,
         dateBasis,
-        unifiedLotName,
+        unifiedLotNames,
         purchases: purchases.sort((a, b) => a.date.localeCompare(b.date)),
         landedCosts: landedCosts.sort((a, b) => a.date.localeCompare(b.date)),
         operationCosts: operationCosts.sort((a, b) => a.date.localeCompare(b.date)),
