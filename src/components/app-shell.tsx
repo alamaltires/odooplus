@@ -81,12 +81,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     const brandBlock = (
         <div className="flex items-center gap-3 px-5 pt-6 pb-5">
             <div className="shrink-0 overflow-hidden rounded-2xl shadow-[0_10px_24px_rgba(109,40,217,0.18)]">
-                <Image src="/logo-odoopp.svg" alt="Odoo++ logo" width={40} height={40} className="h-10 w-10" priority unoptimized />
+                <Image src="/logo.png" alt="Al Amal Odoo++ logo" width={40} height={40} className="h-10 w-10" priority unoptimized />
             </div>
             <div className="min-w-0">
-                <p className="truncate font-display text-lg tracking-tight text-(--brand)">Odoo++</p>
+                <p className="truncate font-display text-lg tracking-tight text-(--brand)">Al Amal Tyres</p>
                 <span className="inline-flex rounded-full bg-[rgba(74,184,72,0.12)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.12em] text-(--accent)">
-                    Sales Hub
+                    Odoo++ Hub
                 </span>
             </div>
         </div>
@@ -152,9 +152,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <header className="flex items-center justify-between border-b border-(--line) bg-(--card)/90 px-4 py-3 shadow-[0_10px_35px_rgba(32,98,176,0.08)] backdrop-blur lg:hidden">
                 <div className="flex items-center gap-2.5">
                     <div className="overflow-hidden rounded-xl shadow-[0_6px_16px_rgba(109,40,217,0.18)]">
-                        <Image src="/logo-odoopp.svg" alt="Odoo++ logo" width={32} height={32} className="h-8 w-8" priority unoptimized />
+                        <Image src="/logo.png" alt="Al Amal Odoo++ logo" width={32} height={32} className="h-8 w-8" priority unoptimized />
                     </div>
-                    <p className="font-display text-base tracking-tight text-(--brand)">Odoo++</p>
+                    <p className="font-display text-base tracking-tight text-(--brand)">Al Amal Tyres</p>
                 </div>
                 <button
                     type="button"
