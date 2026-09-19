@@ -363,7 +363,17 @@ async function authenticate(credentials: OdooCredentials) {
     }
 
     if (!uid || uid <= 0) {
-        throw new Error("Authentication failed: received invalid user ID from Odoo");
+        // Odoo answers a bad login with `false` rather than an error, so this
+        // is the only signal that the credentials themselves were rejected.
+        // The app signs in to Odoo as the user's own account (same email and
+        // password as the app login) so that Odoo's access rights apply, which
+        // makes a mismatched or changed password the usual cause.
+        throw new Error(
+            `Odoo rejected the login for "${credentials.username}". ` +
+            "Your OdooPlus password must match the password of the Odoo user with this email. " +
+            "Update it in Settings, or save a different Odoo username/password there. " +
+            "If that Odoo user has two-factor authentication enabled, use an Odoo API key as the password."
+        );
     }
 
     return uid;

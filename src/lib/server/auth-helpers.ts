@@ -63,6 +63,52 @@ export async function getOdooSystemSettings(): Promise<{ url: string; db: string
     return { url: data.url, db: data.db };
 }
 
+/**
+ * Server-side counterpart of `syncOdooSettingsFromLogin` (see
+ * `src/lib/firestore-settings.ts`), used when an admin creates a user or
+ * changes their email/password in Settings, so the account can reach Odoo
+ * straight away instead of only after its first sign-in.
+ *
+ * Respects the same `source: "manual"` pin: credentials the user typed in
+ * themselves are never overwritten. Pass only the field that changed — the
+ * other one is carried over from what is already stored, and nothing is
+ * written when that leaves the pair incomplete.
+ */
+export async function syncOdooUserCredentials(
+    userId: string,
+    changes: { username?: string; password?: string }
+): Promise<void> {
+    if (!changes.username && !changes.password) {
+        return;
+    }
+
+    const ref = getAdminDb().collection("users").doc(userId).collection("integrations").doc("odoo");
+    const snapshot = await ref.get();
+    const existing = snapshot.data() as
+        | { credentials?: Partial<OdooUserCredentials>; source?: string }
+        | undefined;
+
+    if (existing?.source === "manual") {
+        return;
+    }
+
+    const username = changes.username ?? existing?.credentials?.username;
+    const password = changes.password ?? existing?.credentials?.password;
+
+    if (!username || !password) {
+        return;
+    }
+
+    await ref.set(
+        {
+            credentials: { username, password },
+            updatedAt: new Date().toISOString(),
+            source: "login",
+        },
+        { merge: true }
+    );
+}
+
 export async function saveOdooSystemSettings(input: { url: string; db: string; updatedBy: string }): Promise<void> {
     await getAdminDb().collection("system").doc("odoo").set(
         {

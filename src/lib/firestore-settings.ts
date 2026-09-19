@@ -8,18 +8,63 @@ const SALES_TARGETS_COLLECTION = "sales-targets";
 type OdooSettingsDocument = {
     credentials: OdooUserCredentials;
     updatedAt: string;
+    /**
+     * Where the stored credentials came from. `"login"` means they were
+     * mirrored from the app sign-in (the default — see `syncOdooSettingsFromLogin`);
+     * `"manual"` means the user typed them into Settings themselves, which
+     * pins them so a later sign-in does not overwrite them.
+     */
+    source?: "login" | "manual";
 };
 
 /**
  * Saves this user's own Odoo username/password. The Odoo URL + Database are
  * a system-wide setting an admin manages instead — see
  * `src/lib/client-odoo.ts`'s `getSystemOdooSettings`/`saveSystemOdooSettings`.
+ *
+ * Marks the credentials as `manual`, which stops `syncOdooSettingsFromLogin`
+ * from overwriting them at the next sign-in.
  */
 export async function saveOdooSettings(userId: string, credentials: OdooUserCredentials) {
     const ref = doc(db, "users", userId, "integrations", SETTINGS_DOC);
     const payload: OdooSettingsDocument = {
         credentials,
         updatedAt: new Date().toISOString(),
+        source: "manual",
+    };
+
+    await setDoc(ref, payload, { merge: true });
+}
+
+/**
+ * Mirrors the app sign-in onto the user's Odoo credentials, so every OdooPlus
+ * account talks to Odoo as itself — and therefore inherits that Odoo user's
+ * own access rights — without anyone having to re-type the same login under
+ * Settings. This is why an OdooPlus account's password must match the password
+ * of the Odoo user with the same email.
+ *
+ * Skipped when the user pinned credentials manually in Settings (`source:
+ * "manual"`), which is the escape hatch for accounts whose Odoo login differs
+ * from their app login, or that need an API key instead of a password (Odoo
+ * rejects password RPC auth when two-factor authentication is enabled).
+ */
+export async function syncOdooSettingsFromLogin(userId: string, email: string, password: string) {
+    const ref = doc(db, "users", userId, "integrations", SETTINGS_DOC);
+    const snapshot = await getDoc(ref);
+    const existing = snapshot.exists() ? (snapshot.data() as OdooSettingsDocument) : null;
+
+    if (existing?.source === "manual") {
+        return;
+    }
+
+    if (existing?.credentials?.username === email && existing?.credentials?.password === password) {
+        return;
+    }
+
+    const payload: OdooSettingsDocument = {
+        credentials: { username: email, password },
+        updatedAt: new Date().toISOString(),
+        source: "login",
     };
 
     await setDoc(ref, payload, { merge: true });

@@ -35,7 +35,13 @@ export function CompanySelector() {
                     setSelectedCompanyIds(data.companies.map((company) => company.id));
                 }
             })
-            .catch(() => {
+            .catch((error) => {
+                // The selector hides itself when there are no companies, so a
+                // failure here is invisible — including an Odoo login failure,
+                // which breaks every Odoo-backed screen. Log it so the cause is
+                // findable instead of only surfacing on whichever page happens
+                // to render its own error.
+                console.warn("[CompanySelector] Failed to load companies from Odoo:", error);
                 if (!cancelled) setCompanies([]);
             })
             .finally(() => {

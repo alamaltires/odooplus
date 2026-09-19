@@ -389,8 +389,11 @@ export default function SettingsPage() {
             <article className="rounded-3xl border border-(--line) bg-(--card) p-6">
                 <h1 className="font-display text-2xl">Your Odoo Login</h1>
                 <p className="mt-1 text-sm text-(--ink-soft)">
-                    Save your own Odoo username and password to use dashboard features. The URL and Database are
-                    configured system-wide by an admin.
+                    This app connects to Odoo as you, so you see exactly what your Odoo access rights allow. Your
+                    sign-in email and password are used automatically &mdash; keep your OdooPlus password the same as
+                    your Odoo password and there is nothing to fill in here. Save a username and password below only
+                    to override that (a different Odoo login, or an API key if your Odoo user has two-factor
+                    authentication). The URL and Database are configured system-wide by an admin.
                 </p>
 
                 <form onSubmit={handleSubmit} className="mt-6 grid gap-4 sm:grid-cols-2">
@@ -435,7 +438,9 @@ export default function SettingsPage() {
                 <article className="rounded-3xl border border-(--line) bg-(--card) p-6">
                     <h2 className="font-display text-2xl">User Management</h2>
                     <p className="mt-1 text-sm text-(--ink-soft)">
-                        List users from Firestore and create new users with login credentials.
+                        List users from Firestore and create new users with login credentials. Use the user&apos;s Odoo
+                        email and their Odoo password &mdash; the app signs in to Odoo with them, so each user sees only
+                        what their own Odoo access rights allow.
                     </p>
 
                     <form onSubmit={handleCreateUser} className="mt-5 grid gap-4 md:grid-cols-4">
