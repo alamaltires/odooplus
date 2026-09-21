@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Download, FileSpreadsheet, Search } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
+import { Select2 } from "@/components/select2";
 import { getProductBrands, getProductCategories, getPurchaseOrderReport } from "@/lib/client-odoo";
 
 type Category = {
@@ -490,17 +491,14 @@ export default function PurchaseOrderPage() {
 
                     <label className="block">
                         <span className="mb-2 block text-sm font-medium">Stock Duration</span>
-                        <select
-                            value={stockDurationMonths}
-                            onChange={(event) => setStockDurationMonths(Number(event.target.value))}
-                            className="w-full rounded-xl border border-(--line) bg-white px-3 py-2"
-                        >
-                            {Array.from({ length: 12 }, (_, index) => index + 1).map((month) => (
-                                <option key={month} value={month}>
-                                    {month} Month{month > 1 ? "s" : ""}
-                                </option>
-                            ))}
-                        </select>
+                        <Select2
+                            value={String(stockDurationMonths)}
+                            onChange={(next) => setStockDurationMonths(Number(next))}
+                            options={Array.from({ length: 12 }, (_, index) => index + 1).map((month) => ({
+                                value: String(month),
+                                label: `${month} Month${month > 1 ? "s" : ""}`,
+                            }))}
+                        />
                     </label>
                 </div>
 

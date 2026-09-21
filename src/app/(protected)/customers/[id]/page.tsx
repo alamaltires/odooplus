@@ -153,45 +153,83 @@ export default function CustomerReportPage() {
                         <MetricCard
                             title="Tracked Brands"
                             value={formatNumber(report.topBrands.length)}
-                            description="Top selling brands or categories identified for this customer."
+                            description="Distinct brands sold to this customer."
                             icon={Building2}
                         />
                     </div>
 
-                    <div className="rounded-2xl border border-(--line) bg-(--card) p-5">
-                        <div>
-                            <h2 className="font-display text-2xl">Most Sold Brands</h2>
-                            <p className="text-sm text-(--ink-soft)">
-                                Ranked by total confirmed sales for this customer.
-                            </p>
+                    <div className="grid gap-6 xl:grid-cols-2">
+                        <div className="rounded-2xl border border-(--line) bg-(--card) p-5">
+                            <div>
+                                <h2 className="font-display text-2xl">Most Sold Brands</h2>
+                                <p className="text-sm text-(--ink-soft)">
+                                    Ranked by total confirmed sales for this customer.
+                                </p>
+                            </div>
+
+                            {report.topBrands.length === 0 ? (
+                                <p className="mt-4 text-sm text-(--ink-soft)">
+                                    No sold brands were found for this customer.
+                                </p>
+                            ) : (
+                                <div className="mt-4 overflow-hidden rounded-xl border border-(--line)">
+                                    <table className="w-full border-collapse text-left text-sm">
+                                        <thead className="bg-(--chip) text-(--ink-soft)">
+                                            <tr>
+                                                <th className="px-4 py-3 font-medium">Brand</th>
+                                                <th className="px-4 py-3 font-medium text-right">Quantity Sold</th>
+                                                <th className="px-4 py-3 font-medium text-right">Total Sales</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {report.topBrands.map((brand) => (
+                                                <tr key={brand.brandName} className="border-t border-(--line)">
+                                                    <td className="px-4 py-3">{brand.brandName}</td>
+                                                    <td className="px-4 py-3 text-right">{formatNumber(brand.quantitySold)}</td>
+                                                    <td className="px-4 py-3 text-right">{formatCurrency(brand.totalSales)}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
                         </div>
 
-                        {report.topBrands.length === 0 ? (
-                            <p className="mt-4 text-sm text-(--ink-soft)">
-                                No sold brands were found for this customer.
-                            </p>
-                        ) : (
-                            <div className="mt-4 overflow-hidden rounded-xl border border-(--line)">
-                                <table className="w-full border-collapse text-left text-sm">
-                                    <thead className="bg-(--chip) text-(--ink-soft)">
-                                        <tr>
-                                            <th className="px-4 py-3 font-medium">Brand</th>
-                                            <th className="px-4 py-3 font-medium text-right">Quantity Sold</th>
-                                            <th className="px-4 py-3 font-medium text-right">Total Sales</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {report.topBrands.map((brand) => (
-                                            <tr key={brand.brandName} className="border-t border-(--line)">
-                                                <td className="px-4 py-3">{brand.brandName}</td>
-                                                <td className="px-4 py-3 text-right">{formatNumber(brand.quantitySold)}</td>
-                                                <td className="px-4 py-3 text-right">{formatCurrency(brand.totalSales)}</td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
+                        <div className="rounded-2xl border border-(--line) bg-(--card) p-5">
+                            <div>
+                                <h2 className="font-display text-2xl">Most Sold Categories</h2>
+                                <p className="text-sm text-(--ink-soft)">
+                                    Ranked by total confirmed sales for this customer.
+                                </p>
                             </div>
-                        )}
+
+                            {report.topCategories.length === 0 ? (
+                                <p className="mt-4 text-sm text-(--ink-soft)">
+                                    No sold categories were found for this customer.
+                                </p>
+                            ) : (
+                                <div className="mt-4 overflow-hidden rounded-xl border border-(--line)">
+                                    <table className="w-full border-collapse text-left text-sm">
+                                        <thead className="bg-(--chip) text-(--ink-soft)">
+                                            <tr>
+                                                <th className="px-4 py-3 font-medium">Category</th>
+                                                <th className="px-4 py-3 font-medium text-right">Quantity Sold</th>
+                                                <th className="px-4 py-3 font-medium text-right">Total Sales</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {report.topCategories.map((category) => (
+                                                <tr key={category.brandName} className="border-t border-(--line)">
+                                                    <td className="px-4 py-3">{category.brandName}</td>
+                                                    <td className="px-4 py-3 text-right">{formatNumber(category.quantitySold)}</td>
+                                                    <td className="px-4 py-3 text-right">{formatCurrency(category.totalSales)}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                        </div>
                     </div>
                 </div>
             ) : null}

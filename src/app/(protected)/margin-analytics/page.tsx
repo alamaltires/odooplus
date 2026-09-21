@@ -3,6 +3,7 @@
 import { Fragment, FormEvent, UIEvent, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Coins, Download, ListTree, PiggyBank, Search, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
+import { Select2 } from "@/components/select2";
 import {
     getMarginAnalyticsBreakdown,
     getMarginAnalyticsReport,
@@ -1068,14 +1069,14 @@ export default function MarginAnalyticsPage() {
 
                     <label className="block">
                         <span className="mb-2 block text-sm font-medium">Date Basis</span>
-                        <select
+                        <Select2
                             value={dateBasis}
-                            onChange={(event) => setDateBasis(event.target.value as "order" | "transaction")}
-                            className="w-full rounded-xl border border-(--line) bg-white px-3 py-2.5"
-                        >
-                            <option value="order">Default (Purchase Order + Sales Order date)</option>
-                            <option value="transaction">Receiving (validation) + Invoice date</option>
-                        </select>
+                            onChange={(next) => setDateBasis(next as "order" | "transaction")}
+                            options={[
+                                { value: "order", label: "Default (Purchase Order + Sales Order date)" },
+                                { value: "transaction", label: "Receiving (validation) + Invoice date" },
+                            ]}
+                        />
                     </label>
                 </div>
 

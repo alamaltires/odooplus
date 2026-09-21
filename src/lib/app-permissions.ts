@@ -16,6 +16,7 @@ export const APP_DEFINITIONS: Array<{ href: string; label: string }> = [
     { href: "/margin-analytics", label: "Margin Analytics" },
     { href: "/salesperson-activity", label: "Salesperson Activity" },
     { href: "/sales-targets", label: "Sales Targets" },
+    { href: "/payment-followup", label: "Payment Followup" },
     { href: "/settings", label: "Settings" },
 ];
 
@@ -38,9 +39,9 @@ export function defaultAppHrefsForRole(role: AppUserRole): string[] {
                 "/product-requests",
             ];
         case "salesperson":
-            return ["/sales-targets", "/settings", "/product-requests"];
+            return ["/sales-targets", "/payment-followup", "/settings", "/product-requests"];
         case "sales_manager":
-            return ["/sales-targets", "/salesperson-activity", "/settings", "/product-requests"];
+            return ["/sales-targets", "/salesperson-activity", "/payment-followup", "/settings", "/product-requests"];
         case "store":
             return ["/orders/pending", "/product-scanner", "/settings", "/product-requests"];
         case "user":

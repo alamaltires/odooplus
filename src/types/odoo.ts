@@ -185,6 +185,7 @@ export type OdooCustomerReport = {
     lastVisitSalespersonName: string;
     openQuotationCount: number;
     topBrands: OdooCustomerBrandSummary[];
+    topCategories: OdooCustomerBrandSummary[];
 };
 
 export type OdooCurrencyTotal = {
@@ -291,4 +292,108 @@ export type OdooSalesTargetDetailsReport = {
     otherCurrencyTotals: Array<{ currencyCode: string; total: number; orderCount: number }>;
     products: OdooSalesTargetBrandProduct[];
     servedCustomers: OdooSalesTargetBrandCustomer[];
+};
+
+export type PaymentFollowupAgingBucket = "notDue" | "d1_30" | "d31_60" | "d61_90" | "d91_120" | "older";
+
+export type PaymentFollowupAgingTotals = {
+    notDue: number;
+    d1_30: number;
+    d31_60: number;
+    d61_90: number;
+    d91_120: number;
+    older: number;
+};
+
+export type PaymentFollowupInvoiceRow = {
+    invoiceId: number;
+    invoiceNumber: string;
+    moveType: "out_invoice" | "out_refund";
+    invoiceDate: string;
+    dueDate: string;
+    paymentTermsName: string;
+    amountTotal: number;
+    amountResidual: number;
+    currencyCode: string;
+    daysOverdue: number;
+    agingBucket: PaymentFollowupAgingBucket;
+};
+
+export type PaymentFollowupUnappliedEntry = {
+    id: number;
+    date: string;
+    journalName: string;
+    reference: string;
+    amount: number;
+    currencyCode: string;
+};
+
+export type PaymentFollowupCheque = {
+    id: number;
+    number: string;
+    date: string;
+    amount: number;
+    currencyCode: string;
+    state: string;
+    bankName: string;
+    isPending: boolean;
+};
+
+export type PaymentFollowupCustomerRow = {
+    customerId: number;
+    customerName: string;
+    salespersonName: string;
+    email: string;
+    phone: string;
+    street: string;
+    city: string;
+    currencyCode: string;
+    totalInvoiceDue: number;
+    totalUnapplied: number;
+    totalPdcPending: number;
+    totalPayableDue: number;
+    netDue: number;
+    oldestDueDate: string;
+    maxDaysOverdue: number;
+    agingBucket: PaymentFollowupAgingBucket;
+    agingBuckets: PaymentFollowupAgingTotals;
+    invoices: PaymentFollowupInvoiceRow[];
+    unappliedPayments: PaymentFollowupUnappliedEntry[];
+    cheques: PaymentFollowupCheque[];
+};
+
+export type PaymentFollowupReport = {
+    scope: "salesperson" | "customer";
+    salesperson: OdooSalesperson | null;
+    asOfDate: string;
+    dateBasis: "due" | "invoice";
+    currencyCode: string;
+    pdcModuleDetected: boolean;
+    pdcDebug: {
+        paymentMethods: Array<{ code: string; name: string; paymentType: string }>;
+        matchedPaymentMethodCode: string | null;
+        candidateModels: Array<{ model: string; name: string; transient: boolean }>;
+        fieldMatches: Array<{ model: string; modelLabel: string; field: string; fieldLabel: string; transient: boolean }>;
+        relationProbe: {
+            sourceField: string;
+            targetModel: string;
+            targetPartnerField: string;
+            targetModelBlocked: boolean;
+            targetModelTransient: boolean;
+            resolved: boolean;
+            targetModelFields: string[];
+        } | null;
+        error: string | null;
+    } | null;
+    pdcRawMatchCount: number | null;
+    pdcAppliedFilters: string[];
+    customers: PaymentFollowupCustomerRow[];
+    totals: {
+        totalInvoiceDue: number;
+        totalUnapplied: number;
+        totalPdcPending: number;
+        totalPayableDue: number;
+        netDue: number;
+        agingBuckets: PaymentFollowupAgingTotals;
+    };
 };

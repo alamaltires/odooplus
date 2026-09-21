@@ -4,7 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useCallback, useState } from "react";
-import { ClipboardList, LayoutDashboard, LogOut, Menu, PackageSearch, PiggyBank, ScanSearch, Settings, ShoppingBasket, Target, TrendingUp, Users, X, type LucideIcon } from "lucide-react";
+import { ClipboardList, HandCoins, LayoutDashboard, LogOut, Menu, PackageSearch, PiggyBank, ScanSearch, Settings, ShoppingBasket, Target, TrendingUp, Users, X, type LucideIcon } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { CompanySelector } from "@/components/company-selector";
 import { APP_DEFINITIONS, defaultAppHrefsForRole } from "@/lib/app-permissions";
@@ -22,6 +22,7 @@ const ICONS: Record<string, LucideIcon> = {
     "/margin-analytics": PiggyBank,
     "/salesperson-activity": Users,
     "/sales-targets": Target,
+    "/payment-followup": HandCoins,
     "/settings": Settings,
 };
 

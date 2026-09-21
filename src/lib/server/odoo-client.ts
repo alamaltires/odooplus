@@ -205,6 +205,7 @@ type CustomerReport = {
     lastVisitSalespersonName: string;
     openQuotationCount: number;
     topBrands: CustomerBrandSummary[];
+    topCategories: CustomerBrandSummary[];
 };
 
 type CurrencyTotal = {
@@ -573,6 +574,14 @@ function ensureDateRange(startDate: string, endDate: string) {
     if (startDate > endDate) {
         throw new Error("Start date must be before or equal to end date.");
     }
+}
+
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Falls back to today when `value` is missing/malformed — used for the
+ * Payment Followup report's "as of" date, which defaults to today. */
+function resolveAsOfDate(value: string | undefined | null): string {
+    return value && ISO_DATE_PATTERN.test(value) ? value : new Date().toISOString().slice(0, 10);
 }
 
 function toDisplayString(value: unknown) {
@@ -1118,7 +1127,7 @@ async function getPreferredBrandField(
     credentials: OdooCredentials,
     uid: number
 ): Promise<{ fieldName: string; label: string }> {
-    const candidateFields = ["brand_id", "product_brand_id", "x_brand_id"];
+    const candidateFields = ["tire_brand", "brand_id", "product_brand_id", "x_brand_id"];
     const fields = await executeKw<Record<string, { string?: string }>>(
         credentials,
         uid,
@@ -2515,7 +2524,7 @@ export async function getCustomerReport(
             "read",
             [templateIds],
             {
-                fields: ["id", brandField.fieldName],
+                fields: Array.from(new Set(["id", brandField.fieldName, "categ_id"])),
             }
         )
         : [];
@@ -2534,7 +2543,32 @@ export async function getCustomerReport(
         }
     }
 
+    function accumulateBrandSummary(
+        map: Map<string, CustomerBrandSummary>,
+        name: string,
+        quantity: number,
+        sales: number
+    ) {
+        const existing = map.get(name);
+        if (!existing) {
+            map.set(name, {
+                brandName: name,
+                quantitySold: Number(quantity.toFixed(2)),
+                totalSales: Number(sales.toFixed(2)),
+            });
+            return;
+        }
+
+        existing.quantitySold = Number((existing.quantitySold + quantity).toFixed(2));
+        existing.totalSales = Number((existing.totalSales + sales).toFixed(2));
+    }
+
+    // Brand and category are tracked as two independent breakdowns — a
+    // Odoo instance without a real brand field (see `getPreferredBrandField`)
+    // makes these degenerate to the same grouping, but on one that has both,
+    // conflating them lost real brand-level detail behind a generic category.
     const brandMap = new Map<string, CustomerBrandSummary>();
+    const categoryMap = new Map<string, CustomerBrandSummary>();
     for (const line of saleLines) {
         const productId = getRelationalId(line.product_id);
         if (!productId) {
@@ -2543,23 +2577,15 @@ export async function getCustomerReport(
 
         const templateId = productToTemplateId.get(productId);
         const template = typeof templateId === "number" ? templateById.get(templateId) : undefined;
-        const brandValue = template?.[brandField.fieldName];
-        const brandName = getRelationalName(brandValue) || toDisplayString(brandValue) || `Unknown ${brandField.label}`;
         const quantity = Number(line.product_uom_qty ?? 0);
         const sales = Number(line.price_subtotal ?? 0);
-        const existing = brandMap.get(brandName);
 
-        if (!existing) {
-            brandMap.set(brandName, {
-                brandName,
-                quantitySold: Number(quantity.toFixed(2)),
-                totalSales: Number(sales.toFixed(2)),
-            });
-            continue;
-        }
+        const brandValue = template?.[brandField.fieldName];
+        const brandName = getRelationalName(brandValue) || toDisplayString(brandValue) || `Unknown ${brandField.label}`;
+        accumulateBrandSummary(brandMap, brandName, quantity, sales);
 
-        existing.quantitySold = Number((existing.quantitySold + quantity).toFixed(2));
-        existing.totalSales = Number((existing.totalSales + sales).toFixed(2));
+        const categoryName = getRelationalName(template?.categ_id) || "Uncategorized";
+        accumulateBrandSummary(categoryMap, categoryName, quantity, sales);
     }
 
     const lastVisit = latestVisit[0];
@@ -2576,6 +2602,9 @@ export async function getCustomerReport(
         lastVisitSalespersonName: getRelationalName(lastVisit?.user_id),
         openQuotationCount,
         topBrands: Array.from(brandMap.values())
+            .sort((a, b) => b.totalSales - a.totalSales || b.quantitySold - a.quantitySold)
+            .slice(0, 10),
+        topCategories: Array.from(categoryMap.values())
             .sort((a, b) => b.totalSales - a.totalSales || b.quantitySold - a.quantitySold)
             .slice(0, 10),
     };
@@ -3053,6 +3082,1296 @@ export async function getSalespersonMonthlyInvoices(
             brandTotalCount: brandTotals.length,
         },
     };
+}
+
+// Mirrors Odoo's own "Aged Receivable" report buckets (Not Due, 1-30, 31-60,
+// 61-90, 91-120, Older), measured from a selectable `asOfDate` rather than
+// always "today" — the same report can be re-run as of a past date.
+export type PaymentFollowupAgingBucket = "notDue" | "d1_30" | "d31_60" | "d61_90" | "d91_120" | "older";
+
+export type PaymentFollowupAgingTotals = {
+    notDue: number;
+    d1_30: number;
+    d31_60: number;
+    d61_90: number;
+    d91_120: number;
+    older: number;
+};
+
+function emptyAgingTotals(): PaymentFollowupAgingTotals {
+    return { notDue: 0, d1_30: 0, d31_60: 0, d61_90: 0, d91_120: 0, older: 0 };
+}
+
+export type PaymentFollowupInvoiceRow = {
+    invoiceId: number;
+    invoiceNumber: string;
+    moveType: "out_invoice" | "out_refund";
+    invoiceDate: string;
+    dueDate: string;
+    paymentTermsName: string;
+    amountTotal: number;
+    amountResidual: number;
+    currencyCode: string;
+    daysOverdue: number;
+    agingBucket: PaymentFollowupAgingBucket;
+};
+
+export type PaymentFollowupUnappliedEntry = {
+    id: number;
+    date: string;
+    journalName: string;
+    reference: string;
+    amount: number;
+    currencyCode: string;
+};
+
+export type PaymentFollowupCheque = {
+    id: number;
+    number: string;
+    date: string;
+    amount: number;
+    currencyCode: string;
+    state: string;
+    bankName: string;
+    isPending: boolean;
+};
+
+export type PaymentFollowupCustomerRow = {
+    customerId: number;
+    customerName: string;
+    salespersonName: string;
+    email: string;
+    phone: string;
+    street: string;
+    city: string;
+    currencyCode: string;
+    totalInvoiceDue: number;
+    totalUnapplied: number;
+    totalPdcPending: number;
+    // Open vendor bills/refunds against this same (commercial) partner —
+    // what we owe them, netted out of `netDue` below. Zero for a partner
+    // that's only ever a customer.
+    totalPayableDue: number;
+    netDue: number;
+    oldestDueDate: string;
+    maxDaysOverdue: number;
+    agingBucket: PaymentFollowupAgingBucket;
+    // Open-invoice residual (credit notes netted in as negative), summed into
+    // each bucket independently — a customer can have money in more than one
+    // bucket at once, same as Odoo's own Aged Receivable report.
+    agingBuckets: PaymentFollowupAgingTotals;
+    invoices: PaymentFollowupInvoiceRow[];
+    unappliedPayments: PaymentFollowupUnappliedEntry[];
+    cheques: PaymentFollowupCheque[];
+};
+
+export type PaymentFollowupReport = {
+    scope: "salesperson" | "customer";
+    salesperson: SalespersonOption | null;
+    asOfDate: string;
+    dateBasis: "due" | "invoice";
+    currencyCode: string;
+    pdcModuleDetected: boolean;
+    // Only populated when `pdcModuleDetected` is false — what PDC detection
+    // actually found (or didn't), so a failed detection is diagnosable from
+    // the report itself instead of a bare "not detected" message.
+    pdcDebug: {
+        paymentMethods: Array<{ code: string; name: string; paymentType: string }>;
+        matchedPaymentMethodCode: string | null;
+        candidateModels: Array<{ model: string; name: string; transient: boolean }>;
+        fieldMatches: Array<{ model: string; modelLabel: string; field: string; fieldLabel: string; transient: boolean }>;
+        relationProbe: {
+            sourceField: string;
+            targetModel: string;
+            targetPartnerField: string;
+            targetModelBlocked: boolean;
+            targetModelTransient: boolean;
+            resolved: boolean;
+            targetModelFields: string[];
+        } | null;
+        error: string | null;
+    } | null;
+    // Populated whenever a PDC model WAS resolved (regardless of how many
+    // cheques ended up in the report) — how many records in that model
+    // matched this scope's partners before the model's own extra filters
+    // (e.g. inbound/outbound) were applied, so a wrong guess about those
+    // filters is diagnosable instead of looking identical to "no cheques".
+    pdcRawMatchCount: number | null;
+    // Human-readable form of the resolved PDC model's own `extraDomain`
+    // (e.g. `payment_type = "inbound"`) — what's actually narrowing
+    // `pdcRawMatchCount` down to the cheques shown, so a wrong guess about
+    // that field's values is visible rather than silent.
+    pdcAppliedFilters: string[];
+    customers: PaymentFollowupCustomerRow[];
+    totals: {
+        totalInvoiceDue: number;
+        totalUnapplied: number;
+        totalPdcPending: number;
+        totalPayableDue: number;
+        netDue: number;
+        agingBuckets: PaymentFollowupAgingTotals;
+    };
+};
+
+/**
+ * Odoo 17+ moved the receivable/payable distinction onto `account.account`'s
+ * own `account_type` field (values like `asset_receivable`); older versions
+ * only carry it one hop away via `user_type_id.type`. Detected once via
+ * `fields_get` (same "does this field exist" pattern as
+ * `getInvoiceSalespersonField`/`getPreferredBrandField`) rather than hardcoded,
+ * so the unapplied-payments lookup below works on either version.
+ */
+async function getReceivableAccountDomainTriple(
+    credentials: OdooCredentials,
+    uid: number
+): Promise<[string, string, string]> {
+    const fields = await executeKw<Record<string, { string?: string }>>(
+        credentials,
+        uid,
+        "account.account",
+        "fields_get",
+        [["account_type"]],
+        { attributes: ["string"] }
+    );
+
+    return fields.account_type
+        ? ["account_id.account_type", "=", "asset_receivable"]
+        : ["account_id.user_type_id.type", "=", "receivable"];
+}
+
+type PdcModelInfo = {
+    model: string;
+    partnerField: string;
+    numberField: string;
+    dateField: string;
+    amountField: string;
+    stateField: string | null;
+    bankField: string | null;
+    currencyField: string | null;
+    // Boolean field where `true` means the cheque already cleared/reconciled
+    // (e.g. `account.payment.is_reconciled`) — a more reliable "pending"
+    // signal than guessing from state text, when the model has one.
+    pendingField: string | null;
+    // True when `stateField` resolved to a PDC-specific field
+    // (`cheque_status`/`pdc_state`) rather than a model's generic workflow
+    // `state`/`status` — only then is that field's vocabulary trustworthy
+    // enough to apply the precise "only Registered is still pending" rule
+    // (verified live against one addon's actual New/Registered/Deposit/
+    // Bounce/Done/Cancel lifecycle) instead of the much looser
+    // resolved-keyword denylist a generic `state` field needs.
+    stateFieldIsPdcSpecific: boolean;
+    // Extra domain conditions this particular PDC source always needs (e.g.
+    // scoping the shared `account.payment` model down to just PDC-method,
+    // inbound rows) — empty for a model that's already PDC-only.
+    extraDomain: unknown[];
+};
+
+// Keyword-based guess at which PDC states mean "already resolved" (cleared,
+// deposited, cancelled, bounced) vs. still awaiting collection — every PDC
+// addon names its states differently, so this can't be exact, but it keeps
+// the "pending" total from double-counting cheques that already cleared.
+const PDC_RESOLVED_STATE_KEYWORDS = [
+    "collect",
+    "clear",
+    "cash",
+    "deposit",
+    "cancel",
+    "reject",
+    "bounce",
+    "void",
+    "paid",
+    "done",
+    "return",
+];
+
+// Surfaced back to the UI whenever PDC detection comes up empty, so the
+// actual reason (no PDC-shaped payment method, no cheque-shaped model, or an
+// outright error talking to Odoo) is visible on the page instead of a single
+// unexplained "not detected" message.
+type PdcDiagnostics = {
+    paymentMethods: Array<{ code: string; name: string; paymentType: string }>;
+    matchedPaymentMethodCode: string | null;
+    candidateModels: Array<{ model: string; name: string; transient: boolean }>;
+    // Every field anywhere in the database whose own technical name mentions
+    // "pdc"/"cheque" — this catches an addon that tags an existing model
+    // (typically `account.payment`) with a new field rather than adding a
+    // whole new model (see `base_accounting_kit`'s `account.payment` fields),
+    // which a model-name-only search would miss entirely.
+    fieldMatches: Array<{ model: string; modelLabel: string; field: string; fieldLabel: string; transient: boolean }>;
+    // What following `res.partner.pdc_ids`/`pdc_records` found, whether or
+    // not it ended up usable — populated whenever that relation exists, so a
+    // failure here is diagnosable (wrong/blocked target model, no field on
+    // it that looks like a partner link, or no usable amount/date field)
+    // instead of silently falling through to the next strategy.
+    relationProbe: {
+        sourceField: string;
+        targetModel: string;
+        targetPartnerField: string;
+        targetModelBlocked: boolean;
+        targetModelTransient: boolean;
+        resolved: boolean;
+        targetModelFields: string[];
+    } | null;
+    error: string | null;
+};
+
+/**
+ * Post-dated cheques rarely get a model of their own, and different PDC
+ * addons disagree on how they're stored, so this tries three
+ * increasingly-broad strategies in order, stopping at the first that
+ * produces a usable shape (a model with a partner-pointing field, an amount
+ * field, and a date field):
+ *
+ * 1. A payment method whose `code` is `"pdc"` (or is otherwise obviously
+ *    PDC-shaped) — the Cybrosys "Accounting Kit" convention, where a PDC
+ *    cheque is just an `account.payment` tagged that way, with a few extra
+ *    fields (`effective_date`, `cheque_reference`, `bank_reference`).
+ * 2. Following `res.partner.pdc_ids`/`pdc_records` (a "this customer's PDC
+ *    cheques" relation some addons add directly to the partner) to whatever
+ *    model it actually points to, resolved authoritatively via
+ *    `ir.model.fields`'s `relation`/`relation_field` rather than guessed —
+ *    this is what finds an addon (e.g. one that also tags
+ *    `account.move.pdc_payment_ids`/`pdc_id`) whose real cheque model has no
+ *    "pdc"/"cheque" in its own name or fields at all.
+ * 3. Any OTHER model (never a general-ledger model — see `NEVER_PDC_MODELS`;
+ *    matching one of those risks treating every invoice/bill/payment as a
+ *    pending cheque, which is worse than showing nothing) that has a field
+ *    whose own name mentions "pdc"/"cheque", found via `ir.model.fields`
+ *    rather than guessing the *model's* name — this is what finds an addon
+ *    like Softhealer's, which tags a dedicated, oddly-named persistent model
+ *    this way.
+ * 4. A model whose own name mentions "cheque"/"pdc" (`ir.model`), for an
+ *    addon that doesn't add any distinctively-named field either.
+ *
+ * All four skip transient models (Odoo's `ir.model.transient` flag) — a
+ * wizard's records don't persist, so one can never hold the report's PDC
+ * data no matter how promising its name looks (e.g. Softhealer's own
+ * `pdc.wizard`).
+ */
+async function getPdcModelInfo(
+    credentials: OdooCredentials,
+    uid: number
+): Promise<{ info: PdcModelInfo | null; debug: PdcDiagnostics }> {
+    const debug: PdcDiagnostics = {
+        paymentMethods: [],
+        matchedPaymentMethodCode: null,
+        candidateModels: [],
+        fieldMatches: [],
+        relationProbe: null,
+        error: null,
+    };
+
+    // General-ledger/shared models can never be "the PDC model" — each is
+    // already the source of a different section of this report (invoices,
+    // unapplied entries, payments), holds every accounting movement for a
+    // partner regardless of type, and has no notion of "customer PDC cheque"
+    // on its own. Matching one here (e.g. because some addon happened to tag
+    // account.move with a pdc-named custom field) would silently sweep in
+    // vendor bills, vendor payments, and every other journal entry for the
+    // partner as if each were a pending cheque — verified live: this is
+    // exactly what inflated one customer's "pending PDC" total ~18x and
+    // pulled in a vendor payment reference ("SUPP.OUT/PDC/...").
+    const NEVER_PDC_MODELS = new Set([
+        "account.move",
+        "account.move.line",
+        "account.payment",
+        "account.bank.statement",
+        "account.bank.statement.line",
+        "res.partner",
+    ]);
+
+    function buildInfoFromFields(
+        model: string,
+        fields: Record<string, { string?: string }>,
+        strict: boolean,
+        partnerField = "partner_id"
+    ): PdcModelInfo | null {
+        if (NEVER_PDC_MODELS.has(model) || !fields[partnerField]) {
+            return null;
+        }
+
+        // `strict` applies when the model was matched only because some
+        // field on it happens to be pdc/cheque-named (Strategy 3 below) —
+        // the model's own name gives no assurance it's actually dedicated to
+        // PDC, so generic field names like "amount_total"/"date" (which any
+        // ledger-ish model can have) aren't trusted as the amount/date
+        // fields there. A model whose own *name* is cheque/pdc-shaped
+        // (Strategy 4), or one reached by directly following a partner's own
+        // `pdc_ids`/`pdc_records` relation (Strategy 2), is trustworthy
+        // enough to accept those generic fallbacks.
+        // `payment_amount`/`payment_date` verified live on a real addon's PDC
+        // model (one whose whole field set — `payment_amount`, `payment_date`,
+        // `payment_type`, `partner_id` — mirrors `account.payment`'s own
+        // naming, despite the model itself being named unhelpfully
+        // "pdc.wizard"), so both are trusted even in `strict` mode: neither
+        // is a name generic enough to show up on an unrelated model by
+        // accident the way "amount_total"/"date" are.
+        const amountField = (strict
+            ? ["cheque_amount", "pdc_amount", "payment_amount", "signed_amount"]
+            : ["cheque_amount", "pdc_amount", "payment_amount", "signed_amount", "amount", "amount_total"]
+        ).find((f) => fields[f]);
+        const dateField = (strict
+            ? ["cheque_date", "pdc_date", "check_date", "due_date", "payment_date"]
+            : ["cheque_date", "pdc_date", "check_date", "due_date", "payment_date", "effective_date", "date"]
+        ).find((f) => fields[f]);
+
+        if (!amountField || !dateField) {
+            return null;
+        }
+
+        // Whichever PDC-specific status field exists (if any) is trusted
+        // over a model's generic workflow `state` — the two can coexist
+        // (e.g. `state` = "posted" for the accounting entry, unrelated to
+        // whether the cheque itself has cleared) and only the PDC-specific
+        // one reflects the cheque's own lifecycle.
+        const pdcSpecificStateField = ["cheque_status", "pdc_state"].find((f) => fields[f]);
+        const stateField = pdcSpecificStateField ?? ["state", "status"].find((f) => fields[f]) ?? null;
+
+        return {
+            model,
+            partnerField,
+            numberField:
+                ["cheque_number", "pdc_number", "check_number", "reference", "number"].find((f) => fields[f]) ??
+                "name",
+            dateField,
+            amountField,
+            stateField,
+            stateFieldIsPdcSpecific: Boolean(pdcSpecificStateField),
+            bankField: ["bank_id", "issuer_bank", "bank_name"].find((f) => fields[f]) ?? null,
+            currencyField: fields.currency_id ? "currency_id" : null,
+            pendingField: fields.is_reconciled ? "is_reconciled" : null,
+            // No direction filter here (unlike the account.payment strategy
+            // above, where "inbound" is a load-bearing core-Odoo constant,
+            // not a guess). A guessed value for an unknown model's own
+            // direction-shaped field (tried: matching the field's declared
+            // option labels against "receive"/"send"-ish keywords) proved
+            // unreliable live — it picked a plausible-looking option that
+            // matched zero of a customer's 7 real, confirmed cheque records,
+            // silently hiding all of them. The partner match alone was
+            // already verified to return exactly the right records for that
+            // customer, so no further scoping is applied.
+            extraDomain: [],
+        };
+    }
+
+    // Strategy 1: payment-method code.
+    try {
+        const paymentMethods = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "account.payment.method",
+            "search_read",
+            [[]],
+            { fields: ["code", "name", "payment_type"], limit: 100 }
+        );
+
+        debug.paymentMethods = paymentMethods.map((method) => ({
+            code: toDisplayString(method.code),
+            name: toDisplayString(method.name),
+            paymentType: toDisplayString(method.payment_type),
+        }));
+
+        const pdcMethod =
+            paymentMethods.find((method) => toDisplayString(method.code).toLowerCase() === "pdc") ??
+            paymentMethods.find((method) => {
+                const code = toDisplayString(method.code).toLowerCase();
+                const name = toDisplayString(method.name).toLowerCase();
+                const paymentType = toDisplayString(method.payment_type).toLowerCase();
+                return (
+                    paymentType !== "outbound" &&
+                    (code.includes("pdc") ||
+                        code.includes("cheque") ||
+                        name.includes("pdc") ||
+                        name.includes("post-dated") ||
+                        name.includes("post dated") ||
+                        name.includes("postdated"))
+                );
+            });
+
+        if (pdcMethod) {
+            const matchedCode = toDisplayString(pdcMethod.code);
+            debug.matchedPaymentMethodCode = matchedCode;
+
+            const fields = await executeKw<Record<string, { string?: string }>>(
+                credentials,
+                uid,
+                "account.payment",
+                "fields_get",
+                [["effective_date", "cheque_reference", "bank_reference", "check_number", "is_reconciled", "currency_id"]],
+                { attributes: ["string"] }
+            );
+
+            return {
+                info: {
+                    model: "account.payment",
+                    partnerField: "partner_id",
+                    numberField: fields.cheque_reference ? "cheque_reference" : fields.check_number ? "check_number" : "name",
+                    dateField: fields.effective_date ? "effective_date" : "date",
+                    amountField: "amount",
+                    stateField: "state",
+                    stateFieldIsPdcSpecific: false,
+                    bankField: fields.bank_reference ? "bank_reference" : null,
+                    currencyField: fields.currency_id ? "currency_id" : null,
+                    pendingField: fields.is_reconciled ? "is_reconciled" : null,
+                    // Scope the shared account.payment model down to just
+                    // inbound customer PDC cheques — everything else on this
+                    // model is a regular payment/refund unrelated to PDC.
+                    extraDomain: [
+                        ["payment_method_id.code", "=", matchedCode],
+                        ["payment_type", "=", "inbound"],
+                    ],
+                },
+                debug,
+            };
+        }
+    } catch (error) {
+        debug.error = error instanceof Error ? error.message : String(error);
+    }
+
+    // Strategy 2: follow `res.partner`'s own `pdc_ids`/`pdc_records`
+    // relation (a One2many field an addon adds directly to the partner to
+    // list "this customer's PDC cheques") to whatever model it actually
+    // points to, via `ir.model.fields`, which records both the target model
+    // (`relation`) and the inverse field name on it (`relation_field`) for
+    // any relational field — the authoritative answer, not a name/field
+    // guess. This is what actually finds an addon (e.g. one that also adds
+    // `account.move.pdc_payment_ids`/`pdc_id`) whose real cheque-record model
+    // has no "pdc"/"cheque" in its own name or fields at all.
+    try {
+        // `ttype` intentionally not restricted to "one2many" — a computed
+        // `pdc_ids` (very plausible for something aggregating "PDCs relevant
+        // to this partner") reports the same `relation` metadata without
+        // necessarily setting `relation_field`, since there's no single
+        // stored inverse column for the ORM to name.
+        const partnerRelationFields = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "ir.model.fields",
+            "search_read",
+            [[
+                ["model", "=", "res.partner"],
+                ["name", "in", ["pdc_ids", "pdc_records"]],
+            ]],
+            { fields: ["name", "relation", "relation_field", "ttype"], limit: 5 }
+        );
+
+        const relationField = partnerRelationFields.find((field) => toDisplayString(field.relation));
+
+        if (relationField) {
+            const targetModel = toDisplayString(relationField.relation);
+            const sourceFieldName = toDisplayString(relationField.name);
+            let targetPartnerField = toDisplayString(relationField.relation_field);
+
+            const targetModelMeta = targetModel
+                ? await executeKw<Array<{ transient?: boolean }>>(
+                    credentials,
+                    uid,
+                    "ir.model",
+                    "search_read",
+                    [[["model", "=", targetModel]]],
+                    { fields: ["transient"], limit: 1 }
+                )
+                : [];
+            const isTransient = Boolean(targetModelMeta[0]?.transient);
+            const isBlocked = Boolean(targetModel) && NEVER_PDC_MODELS.has(targetModel);
+
+            let info: PdcModelInfo | null = null;
+            let targetFieldNames: string[] = [];
+
+            if (targetModel && !isTransient && !isBlocked) {
+                const targetFields = await executeKw<Record<string, { string?: string; type?: string; relation?: string }>>(
+                    credentials,
+                    uid,
+                    targetModel,
+                    "fields_get",
+                    [],
+                    { attributes: ["string", "type", "relation"] }
+                );
+                targetFieldNames = Object.keys(targetFields).sort();
+
+                // No stored inverse field name (see above) — find any
+                // many2one on the target that itself points back to
+                // res.partner, preferring one that reads like a partner
+                // field over an incidental one (e.g. "created_by").
+                if (!targetPartnerField || !targetFields[targetPartnerField]) {
+                    const partnerLinkCandidates = Object.entries(targetFields)
+                        .filter(([, field]) => field.type === "many2one" && field.relation === "res.partner")
+                        .map(([name]) => name);
+                    targetPartnerField =
+                        partnerLinkCandidates.find((name) => name.includes("partner") || name.includes("customer")) ??
+                        partnerLinkCandidates[0] ??
+                        "";
+                }
+
+                if (targetPartnerField) {
+                    info = buildInfoFromFields(targetModel, targetFields, false, targetPartnerField);
+                }
+            }
+
+            debug.relationProbe = {
+                sourceField: sourceFieldName,
+                targetModel,
+                targetPartnerField,
+                targetModelBlocked: isBlocked,
+                targetModelTransient: isTransient,
+                resolved: Boolean(info),
+                targetModelFields: targetFieldNames,
+            };
+
+            if (info) {
+                return { info, debug };
+            }
+        }
+    } catch (error) {
+        debug.error = debug.error ?? (error instanceof Error ? error.message : String(error));
+    }
+
+    // Strategy 3: any field anywhere named like a cheque/PDC field, on a
+    // persistent model other than account.payment.
+    try {
+        const fieldMatches = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "ir.model.fields",
+            "search_read",
+            [["|", ["name", "ilike", "pdc"], ["name", "ilike", "cheque"]]],
+            { fields: ["model", "name", "field_description"], limit: 200 }
+        );
+
+        const distinctModelNames = Array.from(
+            new Set(fieldMatches.map((field) => toDisplayString(field.model)).filter(Boolean))
+        );
+
+        const modelMeta = distinctModelNames.length > 0
+            ? await executeKw<Array<Record<string, unknown>>>(
+                credentials,
+                uid,
+                "ir.model",
+                "search_read",
+                [[["model", "in", distinctModelNames]]],
+                { fields: ["model", "name", "transient"] }
+            )
+            : [];
+        const modelLabelByName = new Map(modelMeta.map((m) => [toDisplayString(m.model), toDisplayString(m.name)]));
+        const transientByName = new Map(modelMeta.map((m) => [toDisplayString(m.model), Boolean(m.transient)]));
+
+        debug.fieldMatches = fieldMatches.map((field) => {
+            const model = toDisplayString(field.model);
+            return {
+                model,
+                modelLabel: modelLabelByName.get(model) ?? "",
+                field: toDisplayString(field.name),
+                fieldLabel: toDisplayString(field.field_description),
+                transient: transientByName.get(model) ?? false,
+            };
+        });
+
+        const persistentCandidates = distinctModelNames.filter(
+            (model) => !NEVER_PDC_MODELS.has(model) && !transientByName.get(model)
+        );
+
+        for (const model of persistentCandidates) {
+            try {
+                const fields = await executeKw<Record<string, { string?: string }>>(
+                    credentials,
+                    uid,
+                    model,
+                    "fields_get",
+                    [],
+                    { attributes: ["string", "type"] }
+                );
+
+                const info = buildInfoFromFields(model, fields, true);
+                if (info) {
+                    return { info, debug };
+                }
+            } catch {
+                continue;
+            }
+        }
+    } catch (error) {
+        debug.error = debug.error ?? (error instanceof Error ? error.message : String(error));
+    }
+
+    // Strategy 4: a model whose own name mentions cheque/pdc.
+    try {
+        const candidateModels = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "ir.model",
+            "search_read",
+            [["|", ["model", "ilike", "cheque"], ["model", "ilike", "pdc"]]],
+            { fields: ["model", "name", "transient"], limit: 15 }
+        );
+        debug.candidateModels = candidateModels.map((candidate) => ({
+            model: toDisplayString(candidate.model),
+            name: toDisplayString(candidate.name),
+            transient: Boolean(candidate.transient),
+        }));
+
+        for (const candidate of debug.candidateModels) {
+            if (candidate.transient) {
+                continue;
+            }
+
+            try {
+                const fields = await executeKw<Record<string, { string?: string }>>(
+                    credentials,
+                    uid,
+                    candidate.model,
+                    "fields_get",
+                    [],
+                    { attributes: ["string", "type"] }
+                );
+
+                const info = buildInfoFromFields(candidate.model, fields, false);
+                if (info) {
+                    return { info, debug };
+                }
+            } catch {
+                // Not a usable candidate (e.g. no read access) — try the next one.
+                continue;
+            }
+        }
+    } catch (error) {
+        debug.error = debug.error ?? (error instanceof Error ? error.message : String(error));
+    }
+
+    return { info: null, debug };
+}
+
+function getAgingBucket(daysOverdue: number): PaymentFollowupAgingBucket {
+    if (daysOverdue <= 0) return "notDue";
+    if (daysOverdue <= 30) return "d1_30";
+    if (daysOverdue <= 60) return "d31_60";
+    if (daysOverdue <= 90) return "d61_90";
+    if (daysOverdue <= 120) return "d91_120";
+    return "older";
+}
+
+/**
+ * Shared report builder behind both `getPaymentFollowupForSalesperson` and
+ * `getPaymentFollowupForCustomer`. For each of the given (already-canonical,
+ * i.e. commercial partner) `customerIds`, combines three independent signals
+ * of what's actually still owed:
+ *
+ * 1. Open invoices/credit notes (`account.move`, `amount_residual` — what
+ *    Odoo itself considers unpaid).
+ * 2. Unreconciled receivable journal entries with no invoice attached
+ *    (`account.move.line` on the receivable account, `reconciled = false`,
+ *    `move_type = "entry"`) — money the customer already paid that was never
+ *    applied to an invoice, which a residual-only view would miss entirely.
+ * 3. Pending post-dated cheques from whichever PDC addon (if any) is
+ *    installed — see `getPdcModelInfo`.
+ */
+async function buildPaymentFollowupReport(
+    credentials: OdooCredentials,
+    uid: number,
+    customerIds: number[],
+    scope: "salesperson" | "customer",
+    salesperson: SalespersonOption | null,
+    asOfDate: string,
+    dateBasis: "due" | "invoice"
+): Promise<PaymentFollowupReport> {
+    const todayStr = asOfDate;
+    const todayMs = new Date(`${todayStr}T00:00:00Z`).getTime();
+
+    if (customerIds.length === 0) {
+        return {
+            scope,
+            salesperson,
+            asOfDate: todayStr,
+            dateBasis,
+            currencyCode: TARGET_CURRENCY_CODE,
+            pdcModuleDetected: false,
+            pdcDebug: null,
+            pdcRawMatchCount: null,
+            pdcAppliedFilters: [],
+            customers: [],
+            totals: {
+                totalInvoiceDue: 0,
+                totalUnapplied: 0,
+                totalPdcPending: 0,
+                totalPayableDue: 0,
+                netDue: 0,
+                agingBuckets: emptyAgingTotals(),
+            },
+        };
+    }
+
+    const partnerFields = await getAvailablePartnerFields(credentials, uid);
+    const customerRecords = await readPartnersByIds(credentials, uid, customerIds, partnerFields);
+    const customerRecordById = new Map<number, Record<string, unknown>>();
+    for (const record of customerRecords) {
+        customerRecordById.set(Number(record.id ?? 0), record);
+    }
+
+    const [invoices, payableBills, receivableTriple, pdcLookup] = await Promise.all([
+        searchReadAll(
+            credentials,
+            uid,
+            "account.move",
+            [
+                ["commercial_partner_id", "in", customerIds],
+                ["move_type", "in", ["out_invoice", "out_refund"]],
+                ["state", "=", "posted"],
+                ["payment_state", "not in", ["paid", "in_payment", "reversed"]],
+            ],
+            [
+                "id",
+                "name",
+                "move_type",
+                "commercial_partner_id",
+                "invoice_date",
+                "invoice_date_due",
+                "invoice_payment_term_id",
+                "amount_total",
+                "amount_residual",
+                "currency_id",
+            ],
+            { order: "invoice_date_due asc" }
+        ),
+        // Vendor bills/refunds against the same partner — a customer who is
+        // also a supplier (verified live: not unusual in this business) is
+        // owed money by us on this side, which needs to offset what they owe
+        // us before "net due" means anything, not just be silently ignored.
+        searchReadAll(
+            credentials,
+            uid,
+            "account.move",
+            [
+                ["commercial_partner_id", "in", customerIds],
+                ["move_type", "in", ["in_invoice", "in_refund"]],
+                ["state", "=", "posted"],
+                ["payment_state", "not in", ["paid", "in_payment", "reversed"]],
+            ],
+            ["id", "move_type", "commercial_partner_id", "amount_residual", "currency_id"]
+        ),
+        getReceivableAccountDomainTriple(credentials, uid),
+        getPdcModelInfo(credentials, uid).catch((error) => ({
+            info: null,
+            debug: {
+                paymentMethods: [],
+                matchedPaymentMethodCode: null,
+                candidateModels: [],
+                fieldMatches: [],
+                relationProbe: null,
+                error: error instanceof Error ? error.message : String(error),
+            },
+        })),
+    ]);
+    const pdcInfo = pdcLookup.info;
+    const pdcDebug = pdcLookup.debug;
+
+    const unappliedLines = await searchReadAll(
+        credentials,
+        uid,
+        "account.move.line",
+        [
+            ["move_id.commercial_partner_id", "in", customerIds],
+            ["move_id.state", "=", "posted"],
+            ["move_id.move_type", "=", "entry"],
+            receivableTriple,
+            ["reconciled", "=", false],
+            ["balance", "<", 0],
+        ],
+        ["id", "move_id", "date", "balance", "amount_currency", "currency_id"]
+    );
+
+    const unappliedMoveIds = Array.from(
+        new Set(
+            unappliedLines
+                .map((line) => getRelationalId(line.move_id))
+                .filter((id): id is number => typeof id === "number")
+        )
+    );
+    const unappliedMoves = unappliedMoveIds.length > 0
+        ? await readInBatches(credentials, uid, "account.move", unappliedMoveIds, [
+            "id",
+            "name",
+            "ref",
+            "commercial_partner_id",
+            "journal_id",
+        ])
+        : [];
+    const unappliedMoveById = new Map<number, Record<string, unknown>>();
+    for (const move of unappliedMoves) {
+        unappliedMoveById.set(Number(move.id ?? 0), move);
+    }
+
+    let pdcRecords: Array<Record<string, unknown>> = [];
+    if (pdcInfo) {
+        try {
+            const pdcFields = [
+                "id",
+                pdcInfo.partnerField,
+                pdcInfo.numberField,
+                pdcInfo.dateField,
+                pdcInfo.amountField,
+            ];
+            if (pdcInfo.stateField) pdcFields.push(pdcInfo.stateField);
+            if (pdcInfo.bankField) pdcFields.push(pdcInfo.bankField);
+            if (pdcInfo.currencyField) pdcFields.push(pdcInfo.currencyField);
+            if (pdcInfo.pendingField) pdcFields.push(pdcInfo.pendingField);
+
+            pdcRecords = await searchReadAll(
+                credentials,
+                uid,
+                pdcInfo.model,
+                [
+                    // Dot-path traversal, not a domain on `partnerField`
+                    // itself — the cheque's own partner can be a child
+                    // contact rather than the commercial partner `customerIds`
+                    // is keyed by (e.g. a PDC registered on a company's
+                    // "Accounts Payable" sub-contact).
+                    [`${pdcInfo.partnerField}.commercial_partner_id`, "in", customerIds],
+                    ...pdcInfo.extraDomain,
+                ],
+                Array.from(new Set(pdcFields))
+            );
+        } catch {
+            pdcRecords = [];
+        }
+    }
+
+    // Diagnostic only, not used for the report itself — how many records in
+    // the resolved PDC model match this scope's partners *before* applying
+    // `extraDomain` (e.g. the `payment_type = "inbound"` guard). Lets the UI
+    // tell apart "this customer/salesperson genuinely has none" from "our
+    // direction/state filter is excluding real cheques", without which a
+    // wrong guess about the addon's own field values (verified live: risked
+    // exactly this) would look identical to a customer with none.
+    let pdcRawMatchCount: number | null = null;
+    if (pdcInfo) {
+        try {
+            pdcRawMatchCount = await executeKw<number>(
+                credentials,
+                uid,
+                pdcInfo.model,
+                "search_count",
+                [[[`${pdcInfo.partnerField}.commercial_partner_id`, "in", customerIds]]]
+            );
+        } catch {
+            pdcRawMatchCount = null;
+        }
+    }
+
+    // Resolve each cheque's own partner to the canonical (commercial)
+    // customer it should be grouped under, same as the invoice/unapplied
+    // sections — the query above matches on `commercial_partner_id` but
+    // still returns each record's direct `partner_id`.
+    const pdcPartnerIds = pdcInfo
+        ? Array.from(
+            new Set(
+                pdcRecords
+                    .map((record) => getRelationalId(record[pdcInfo.partnerField]))
+                    .filter((id): id is number => typeof id === "number")
+            )
+        )
+        : [];
+    const pdcCanonicalMap = pdcPartnerIds.length > 0
+        ? await getCanonicalCustomerMap(credentials, uid, pdcPartnerIds)
+        : new Map<number, Record<string, unknown>>();
+
+    // Currency conversion (to AED, the currency every other blended total in
+    // this app is expressed in — see `TARGET_CURRENCY_CODE`) follows the same
+    // approach as `getSalespersonMonthlyInvoices`: each amount stays in its own
+    // transaction currency for display, and is only converted for the totals.
+    const currencyIdsSeen = new Set<number>();
+    for (const invoice of invoices) {
+        const id = getRelationalId(invoice.currency_id);
+        if (id) currencyIdsSeen.add(id);
+    }
+    for (const bill of payableBills) {
+        const id = getRelationalId(bill.currency_id);
+        if (id) currencyIdsSeen.add(id);
+    }
+    for (const line of unappliedLines) {
+        const id = getRelationalId(line.currency_id);
+        if (id) currencyIdsSeen.add(id);
+    }
+    if (pdcInfo?.currencyField) {
+        for (const record of pdcRecords) {
+            const id = getRelationalId(record[pdcInfo.currencyField]);
+            if (id) currencyIdsSeen.add(id);
+        }
+    }
+
+    const primaryCurrencyId = await getPrimaryCurrencyId(
+        credentials,
+        uid,
+        Array.from(currencyIdsSeen).map((currencyId) => ({ currencyId }))
+    );
+    const homeCompanyId = await getHomeCompanyId(credentials, uid);
+    const nonPrimaryCurrencyIds = Array.from(currencyIdsSeen).filter((id) => id !== primaryCurrencyId);
+    const rateByCurrencyId = homeCompanyId && nonPrimaryCurrencyIds.length > 0
+        ? await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, nonPrimaryCurrencyIds, todayStr)
+        : new Map<number, number>();
+    const multiplierByCurrencyId = buildCurrencyMultipliers(primaryCurrencyId, rateByCurrencyId);
+
+    function toHomeAmount(amount: number, currencyId: number | null): number {
+        if (!currencyId) return amount;
+        const multiplier = multiplierByCurrencyId.get(currencyId);
+        return typeof multiplier === "number" ? amount * multiplier : amount;
+    }
+
+    const rowByCustomerId = new Map<number, PaymentFollowupCustomerRow>();
+    function ensureRow(customerId: number): PaymentFollowupCustomerRow {
+        const existing = rowByCustomerId.get(customerId);
+        if (existing) return existing;
+
+        const record = customerRecordById.get(customerId);
+        const summary = record
+            ? toCustomerSummary(record, salesperson?.name ?? "-")
+            : {
+                customerId,
+                customerName: `Customer #${customerId}`,
+                salespersonName: salesperson?.name ?? "-",
+                email: "",
+                phone: "",
+                street: "",
+                city: "",
+            };
+
+        const row: PaymentFollowupCustomerRow = {
+            customerId,
+            customerName: summary.customerName,
+            salespersonName: summary.salespersonName,
+            email: summary.email,
+            phone: summary.phone,
+            street: summary.street,
+            city: summary.city,
+            currencyCode: TARGET_CURRENCY_CODE,
+            totalInvoiceDue: 0,
+            totalUnapplied: 0,
+            totalPdcPending: 0,
+            totalPayableDue: 0,
+            netDue: 0,
+            oldestDueDate: "",
+            maxDaysOverdue: -Infinity,
+            agingBucket: "notDue",
+            agingBuckets: emptyAgingTotals(),
+            invoices: [],
+            unappliedPayments: [],
+            cheques: [],
+        };
+        rowByCustomerId.set(customerId, row);
+        return row;
+    }
+
+    // Each open invoice's residual converted to home currency, captured here
+    // (rather than recomputed later) since only currency-aware code in this
+    // scope knows how — used by the FIFO unapplied-credit netting below to
+    // find the true oldest still-outstanding invoice.
+    const invoiceHomeResidualById = new Map<number, number>();
+
+    for (const invoice of invoices) {
+        const customerId = getRelationalId(invoice.commercial_partner_id);
+        if (!customerId) continue;
+
+        const currencyId = getRelationalId(invoice.currency_id);
+        const currencyCode = getRelationalName(invoice.currency_id) || TARGET_CURRENCY_CODE;
+        const moveType = invoice.move_type === "out_refund" ? "out_refund" : "out_invoice";
+        const residual = Number(invoice.amount_residual ?? 0);
+        const invoiceDate = normalizeOdooDate(invoice.invoice_date);
+        const dueDate = normalizeOdooDate(invoice.invoice_date_due) || invoiceDate;
+        // "Due Date" (the default, matching Odoo's own Aged Receivable) ages
+        // from when payment is actually expected; "Invoice Date" ages from
+        // when the invoice was raised instead — same toggle Odoo's report
+        // offers, since a customer can want either view of the same data.
+        const agingReferenceDate = dateBasis === "invoice" ? invoiceDate : dueDate;
+        const agingMs = agingReferenceDate ? new Date(`${agingReferenceDate}T00:00:00Z`).getTime() : todayMs;
+        const daysOverdue = Math.round((todayMs - agingMs) / 86400000);
+        const bucket = getAgingBucket(daysOverdue);
+
+        const row = ensureRow(customerId);
+        row.invoices.push({
+            invoiceId: Number(invoice.id),
+            invoiceNumber: toDisplayString(invoice.name),
+            moveType,
+            invoiceDate,
+            dueDate,
+            paymentTermsName: getRelationalName(invoice.invoice_payment_term_id) || "-",
+            amountTotal: Number(Number(invoice.amount_total ?? 0).toFixed(2)),
+            amountResidual: Number(residual.toFixed(2)),
+            currencyCode,
+            daysOverdue,
+            agingBucket: bucket,
+        });
+
+        if (moveType === "out_refund") {
+            // Credit notes aren't touched by the FIFO credit-netting pass
+            // below (that's specifically for applying *unapplied payments*
+            // against open invoices) — accumulate them into the totals
+            // immediately, same as before.
+            const signedHomeAmount = -toHomeAmount(residual, currencyId);
+            row.totalInvoiceDue = Number((row.totalInvoiceDue + signedHomeAmount).toFixed(2));
+            row.agingBuckets[bucket] = Number((row.agingBuckets[bucket] + signedHomeAmount).toFixed(2));
+        } else if (residual > 0) {
+            // Deliberately NOT added to `row.totalInvoiceDue`/`agingBuckets`
+            // here — the FIFO pass below adds each invoice's *net* (post
+            // unapplied-credit) amount instead, oldest invoice first, so
+            // "Open Invoices Due" and the aging matrix both already reflect
+            // unapplied credit rather than needing it subtracted again.
+            invoiceHomeResidualById.set(Number(invoice.id), toHomeAmount(residual, currencyId));
+        }
+    }
+
+    // Vendor bills/refunds against the same partner — what we owe them,
+    // which must reduce "net due" (see the type's own doc comment) rather
+    // than being invisible to this report.
+    for (const bill of payableBills) {
+        const customerId = getRelationalId(bill.commercial_partner_id);
+        if (!customerId) continue;
+
+        const currencyId = getRelationalId(bill.currency_id);
+        const residual = Number(bill.amount_residual ?? 0);
+        const moveType = bill.move_type === "in_refund" ? -1 : 1;
+        const signedHomeAmount = toHomeAmount(residual, currencyId) * moveType;
+
+        const row = ensureRow(customerId);
+        row.totalPayableDue = Number((row.totalPayableDue + signedHomeAmount).toFixed(2));
+    }
+
+    for (const line of unappliedLines) {
+        const move = unappliedMoveById.get(getRelationalId(line.move_id) ?? -1);
+        const customerId = move ? getRelationalId(move.commercial_partner_id) : null;
+        if (!customerId) continue;
+
+        const currencyId = getRelationalId(line.currency_id);
+        const currencyCode = currencyId ? getRelationalName(line.currency_id) || TARGET_CURRENCY_CODE : TARGET_CURRENCY_CODE;
+        const amount = Math.abs(Number((currencyId ? line.amount_currency : line.balance) ?? line.balance ?? 0));
+
+        const row = ensureRow(customerId);
+        row.unappliedPayments.push({
+            id: Number(line.id),
+            date: normalizeOdooDate(line.date),
+            journalName: getRelationalName(move?.journal_id) || "-",
+            reference: toDisplayString(move?.ref) || toDisplayString(move?.name) || "-",
+            amount: Number(amount.toFixed(2)),
+            currencyCode,
+        });
+
+        row.totalUnapplied = Number((row.totalUnapplied + toHomeAmount(amount, currencyId)).toFixed(2));
+    }
+
+    if (pdcInfo) {
+        for (const record of pdcRecords) {
+            const rawPartnerId = getRelationalId(record[pdcInfo.partnerField]);
+            if (!rawPartnerId) continue;
+            const customerId = Number(pdcCanonicalMap.get(rawPartnerId)?.id ?? rawPartnerId);
+
+            const currencyId = pdcInfo.currencyField ? getRelationalId(record[pdcInfo.currencyField]) : null;
+            const currencyCode = currencyId
+                ? getRelationalName(record[pdcInfo.currencyField as string]) || TARGET_CURRENCY_CODE
+                : TARGET_CURRENCY_CODE;
+            const amount = Number(record[pdcInfo.amountField] ?? 0);
+            const stateValue = pdcInfo.stateField ? toDisplayString(record[pdcInfo.stateField]) : "";
+            const lowerStateValue = stateValue.toLowerCase();
+            // Prefer an explicit "already reconciled/cleared" boolean (e.g.
+            // `account.payment.is_reconciled`) when the model has one.
+            // Otherwise, for a genuinely PDC-lifecycle state field
+            // (`cheque_status`/`pdc_state`), only "Registered" counts as
+            // still outstanding — confirmed live against a real addon whose
+            // New/Registered/Deposit/Bounce/Done/Cancel states don't fit a
+            // generic resolved-keyword denylist (its "Done" cheques were
+            // already correctly excluded by that denylist, but the business
+            // rule here is narrower: not-yet-deposited/registered is the
+            // only state actually worth following up on). A model whose
+            // state field is just its generic workflow `state`/`status`
+            // (e.g. account.payment's draft/posted/cancel) has no such
+            // "Registered" vocabulary, so it keeps the looser denylist.
+            const isPending = pdcInfo.pendingField
+                ? !record[pdcInfo.pendingField]
+                : pdcInfo.stateFieldIsPdcSpecific
+                    ? lowerStateValue.includes("regist")
+                    : !PDC_RESOLVED_STATE_KEYWORDS.some((keyword) => lowerStateValue.includes(keyword));
+
+            const row = ensureRow(customerId);
+            row.cheques.push({
+                id: Number(record.id),
+                number: toDisplayString(record[pdcInfo.numberField]) || `#${record.id}`,
+                date: normalizeOdooDate(record[pdcInfo.dateField]),
+                amount: Number(amount.toFixed(2)),
+                currencyCode,
+                state: stateValue || "-",
+                bankName: pdcInfo.bankField ? getRelationalName(record[pdcInfo.bankField]) || toDisplayString(record[pdcInfo.bankField]) : "",
+                isPending,
+            });
+
+            if (isPending) {
+                row.totalPdcPending = Number((row.totalPdcPending + toHomeAmount(amount, currencyId)).toFixed(2));
+            }
+        }
+    }
+
+    for (const row of rowByCustomerId.values()) {
+        // FIFO-apply unapplied credit against open invoices oldest-first
+        // (same order as the aging buckets themselves: Older before 91-120
+        // before ... before Not Due) — a customer who already sent payment
+        // that just isn't formally allocated to an invoice yet shouldn't
+        // still read as owing it, and the credit has to come off their
+        // oldest debt first, not their most recent. This single pass is
+        // what both "Open Invoices Due" (`totalInvoiceDue`, credit notes'
+        // own negative contribution already folded in above) and the aging
+        // matrix's bucket amounts are built from, so a bucket only shows
+        // what's genuinely still outstanding after that credit is spent —
+        // e.g. all of it comes off "Older" before touching "1-30" if that's
+        // where the oldest debt actually is.
+        const openInvoicesOldestFirst = row.invoices
+            .filter((invoice) => invoice.moveType === "out_invoice" && invoice.amountResidual > 0)
+            .slice()
+            .sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : 0));
+
+        let remainingCredit = row.totalUnapplied;
+        row.oldestDueDate = "";
+        row.maxDaysOverdue = 0;
+        row.agingBucket = "notDue";
+        for (const invoice of openInvoicesOldestFirst) {
+            const homeResidual = invoiceHomeResidualById.get(invoice.invoiceId) ?? invoice.amountResidual;
+            const appliedCredit = Math.min(Math.max(remainingCredit, 0), homeResidual);
+            const netHomeAmount = Number((homeResidual - appliedCredit).toFixed(2));
+            remainingCredit = Number((remainingCredit - appliedCredit).toFixed(2));
+
+            row.totalInvoiceDue = Number((row.totalInvoiceDue + netHomeAmount).toFixed(2));
+            row.agingBuckets[invoice.agingBucket] = Number(
+                (row.agingBuckets[invoice.agingBucket] + netHomeAmount).toFixed(2)
+            );
+
+            if (!row.oldestDueDate && netHomeAmount > 0.01) {
+                row.oldestDueDate = invoice.dueDate;
+                row.maxDaysOverdue = invoice.daysOverdue;
+                row.agingBucket = invoice.agingBucket;
+            }
+        }
+
+        // Credit left over once every open invoice is fully covered is a
+        // genuine credit balance (they've paid more than they currently
+        // owe) — still reduces net due, just with nothing left to net it
+        // against inside `totalInvoiceDue` (which is already floored at 0
+        // per invoice by the pass above, so subtracting it again there would
+        // double-count).
+        row.netDue = Number((row.totalInvoiceDue - Math.max(remainingCredit, 0) - row.totalPayableDue).toFixed(2));
+
+        row.invoices.sort((a, b) => b.daysOverdue - a.daysOverdue);
+        row.unappliedPayments.sort((a, b) => (b.date > a.date ? 1 : -1));
+        row.cheques.sort((a, b) => (a.date > b.date ? 1 : -1));
+    }
+
+    const customers = Array.from(rowByCustomerId.values())
+        .filter((row) => row.invoices.length > 0 || row.unappliedPayments.length > 0 || row.cheques.length > 0)
+        .sort((a, b) => b.maxDaysOverdue - a.maxDaysOverdue || b.netDue - a.netDue);
+
+    const totals = customers.reduce(
+        (acc, row) => ({
+            totalInvoiceDue: Number((acc.totalInvoiceDue + row.totalInvoiceDue).toFixed(2)),
+            totalUnapplied: Number((acc.totalUnapplied + row.totalUnapplied).toFixed(2)),
+            totalPdcPending: Number((acc.totalPdcPending + row.totalPdcPending).toFixed(2)),
+            totalPayableDue: Number((acc.totalPayableDue + row.totalPayableDue).toFixed(2)),
+            netDue: Number((acc.netDue + row.netDue).toFixed(2)),
+            agingBuckets: {
+                notDue: Number((acc.agingBuckets.notDue + row.agingBuckets.notDue).toFixed(2)),
+                d1_30: Number((acc.agingBuckets.d1_30 + row.agingBuckets.d1_30).toFixed(2)),
+                d31_60: Number((acc.agingBuckets.d31_60 + row.agingBuckets.d31_60).toFixed(2)),
+                d61_90: Number((acc.agingBuckets.d61_90 + row.agingBuckets.d61_90).toFixed(2)),
+                d91_120: Number((acc.agingBuckets.d91_120 + row.agingBuckets.d91_120).toFixed(2)),
+                older: Number((acc.agingBuckets.older + row.agingBuckets.older).toFixed(2)),
+            },
+        }),
+        { totalInvoiceDue: 0, totalUnapplied: 0, totalPdcPending: 0, totalPayableDue: 0, netDue: 0, agingBuckets: emptyAgingTotals() }
+    );
+
+    return {
+        scope,
+        salesperson,
+        asOfDate: todayStr,
+        dateBasis,
+        currencyCode: TARGET_CURRENCY_CODE,
+        pdcModuleDetected: Boolean(pdcInfo),
+        pdcDebug: pdcInfo ? null : pdcDebug,
+        pdcRawMatchCount,
+        pdcAppliedFilters: pdcInfo
+            ? pdcInfo.extraDomain
+                .filter((clause): clause is [string, string, unknown] => Array.isArray(clause) && clause.length === 3)
+                .map((clause) => `${clause[0]} ${clause[1]} ${JSON.stringify(clause[2])}`)
+            : [],
+        customers,
+        totals,
+    };
+}
+
+export async function getPaymentFollowupForSalesperson(
+    credentials: OdooCredentials,
+    input: { salespersonId: number; asOfDate?: string; dateBasis?: "due" | "invoice" }
+): Promise<PaymentFollowupReport> {
+    const uid = await authenticate(credentials);
+    const salespersonId = Number(input.salespersonId);
+
+    if (!Number.isFinite(salespersonId) || salespersonId <= 0) {
+        throw new Error("A valid salesperson is required.");
+    }
+
+    const salespeople = await getSalespeople(credentials);
+    const salesperson = salespeople.find((item) => item.id === salespersonId);
+    if (!salesperson) {
+        throw new Error("Selected salesperson was not found in Odoo.");
+    }
+
+    const assignedPartners = await executeKw<Array<{ id: number }>>(
+        credentials,
+        uid,
+        "res.partner",
+        "search_read",
+        [[
+            ["user_id", "=", salespersonId],
+            ["customer_rank", ">", 0],
+        ]],
+        { fields: ["id"], limit: 5000 }
+    );
+
+    const canonicalMap = await getCanonicalCustomerMap(
+        credentials,
+        uid,
+        assignedPartners.map((partner) => Number(partner.id))
+    );
+    const customerIds = Array.from(
+        new Set(Array.from(canonicalMap.values()).map((customer) => Number(customer.id ?? 0)))
+    ).filter((id) => id > 0);
+
+    return buildPaymentFollowupReport(
+        credentials,
+        uid,
+        customerIds,
+        "salesperson",
+        salesperson,
+        resolveAsOfDate(input.asOfDate),
+        input.dateBasis === "invoice" ? "invoice" : "due"
+    );
+}
+
+export async function getPaymentFollowupForCustomer(
+    credentials: OdooCredentials,
+    input: { customerId: number; asOfDate?: string; dateBasis?: "due" | "invoice" }
+): Promise<PaymentFollowupReport> {
+    const uid = await authenticate(credentials);
+    const customerId = Number(input.customerId);
+
+    if (!Number.isFinite(customerId) || customerId <= 0) {
+        throw new Error("A valid customer is required.");
+    }
+
+    const customer = await getCommercialPartner(credentials, uid, customerId);
+    const canonicalId = Number(customer.id ?? 0);
+
+    return buildPaymentFollowupReport(
+        credentials,
+        uid,
+        [canonicalId],
+        "customer",
+        null,
+        resolveAsOfDate(input.asOfDate),
+        input.dateBasis === "invoice" ? "invoice" : "due"
+    );
 }
 
 export async function getSalesTargetDetails(

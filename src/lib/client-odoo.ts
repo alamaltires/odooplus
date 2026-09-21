@@ -14,6 +14,7 @@ import {
     OdooSalesTargetDetailsReport,
     OdooSalespersonMonthlyInvoices,
     OdooOrderLineInput,
+    PaymentFollowupReport,
     PurchaseFromBackorderRow,
     SalesOrderMatch,
 } from "@/types/odoo";
@@ -597,6 +598,22 @@ export function sendPendingOrderEmail(input: {
     }>;
 }) {
     return post<{ success: boolean }>("/api/odoo/pending-order-email", input);
+}
+
+export function getPaymentFollowupBySalesperson(input: {
+    salespersonId: number;
+    asOfDate?: string;
+    dateBasis?: "due" | "invoice";
+}) {
+    return post<PaymentFollowupReport>("/api/odoo/payment-followup-by-salesperson", input);
+}
+
+export function getPaymentFollowupByCustomer(input: {
+    customerId: number;
+    asOfDate?: string;
+    dateBasis?: "due" | "invoice";
+}) {
+    return post<PaymentFollowupReport>("/api/odoo/payment-followup-by-customer", input);
 }
 
 export function getSalesTargetDetails(input: {

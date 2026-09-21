@@ -16,6 +16,7 @@ import {
     getSalespersonMonthlyInvoices,
 } from "@/lib/client-odoo";
 import { useAuth } from "@/lib/auth-context";
+import { Select2 } from "@/components/select2";
 import {
     OdooSalesperson,
     OdooSalespersonMonthlyInvoices,
@@ -805,53 +806,37 @@ export default function SalesTargetsPage() {
                 <div className="grid gap-4 md:grid-cols-4">
                     <label className="block md:col-span-2">
                         <span className="mb-2 block text-sm font-medium">Salesperson</span>
-                        <select
+                        <Select2
                             value={selectedSalespersonId}
-                            onChange={(event) => setSelectedSalespersonId(event.target.value)}
-                            className="w-full rounded-xl border border-(--line) bg-white px-4 py-2.5"
-                            disabled={salespeopleLoading || Boolean(salespeopleError)}
-                            required
-                        >
-                            {salespeople.length === 0 ? (
-                                <option value="">{salespeopleLoading ? "Loading salespeople..." : "No salespeople found"}</option>
-                            ) : null}
-                            {salespeople.map((salesperson) => (
-                                <option key={salesperson.id} value={salesperson.id}>
-                                    {salesperson.name}
-                                    {salesperson.email ? ` (${salesperson.email})` : ""}
-                                </option>
-                            ))}
-                        </select>
+                            onChange={setSelectedSalespersonId}
+                            loading={salespeopleLoading}
+                            loadingText="Loading salespeople..."
+                            emptyText="No salespeople found"
+                            disabled={Boolean(salespeopleError)}
+                            options={salespeople.map((salesperson) => ({
+                                value: String(salesperson.id),
+                                label: salesperson.name,
+                                description: salesperson.email || undefined,
+                            }))}
+                        />
                     </label>
 
                     <label className="block">
                         <span className="mb-2 block text-sm font-medium">Month</span>
-                        <select
+                        <Select2
                             value={selectedMonth}
-                            onChange={(event) => setSelectedMonth(event.target.value)}
-                            className="w-full rounded-xl border border-(--line) bg-white px-4 py-2.5"
-                        >
-                            {months.map((month) => (
-                                <option key={month.value} value={month.value}>
-                                    {month.label}
-                                </option>
-                            ))}
-                        </select>
+                            onChange={setSelectedMonth}
+                            options={months.map((month) => ({ value: String(month.value), label: month.label }))}
+                        />
                     </label>
 
                     <label className="block">
                         <span className="mb-2 block text-sm font-medium">Year</span>
-                        <select
+                        <Select2
                             value={selectedYear}
-                            onChange={(event) => setSelectedYear(event.target.value)}
-                            className="w-full rounded-xl border border-(--line) bg-white px-4 py-2.5"
-                        >
-                            {yearOptions.map((year) => (
-                                <option key={year} value={year}>
-                                    {year}
-                                </option>
-                            ))}
-                        </select>
+                            onChange={setSelectedYear}
+                            options={yearOptions.map((year) => ({ value: String(year), label: String(year) }))}
+                        />
                     </label>
                 </div>
 
@@ -1153,31 +1138,24 @@ export default function SalesTargetsPage() {
                                         <div key={`target-entry-${index}`} className="grid gap-3 rounded-xl border border-(--line) bg-white p-4 md:grid-cols-[1.2fr_1fr_auto] md:items-end">
                                             <label className="block">
                                                 <span className="mb-2 block text-sm font-medium">Product Brand</span>
-                                                <select
+                                                <Select2
                                                     value={entry.brandValue}
-                                                    onChange={(event) =>
-                                                        updateTargetRow(index, { brandValue: event.target.value })
-                                                    }
-                                                    className="w-full rounded-xl border border-(--line) bg-white px-4 py-2.5"
-                                                    disabled={brandsLoading || Boolean(brandsError)}
-                                                    required
-                                                >
-                                                    <option
-                                                        value={GENERAL_BRAND_VALUE}
-                                                        disabled={selectedValues.has(GENERAL_BRAND_VALUE)}
-                                                    >
-                                                        General
-                                                    </option>
-                                                    {brands.map((brand) => (
-                                                        <option
-                                                            key={brand.id}
-                                                            value={brand.id}
-                                                            disabled={selectedValues.has(String(brand.id))}
-                                                        >
-                                                            {brand.name}
-                                                        </option>
-                                                    ))}
-                                                </select>
+                                                    onChange={(next) => updateTargetRow(index, { brandValue: next })}
+                                                    loading={brandsLoading}
+                                                    disabled={Boolean(brandsError)}
+                                                    options={[
+                                                        {
+                                                            value: GENERAL_BRAND_VALUE,
+                                                            label: "General",
+                                                            disabled: selectedValues.has(GENERAL_BRAND_VALUE),
+                                                        },
+                                                        ...brands.map((brand) => ({
+                                                            value: String(brand.id),
+                                                            label: brand.name,
+                                                            disabled: selectedValues.has(String(brand.id)),
+                                                        })),
+                                                    ]}
+                                                />
                                             </label>
 
                                             <label className="block">

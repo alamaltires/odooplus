@@ -8,6 +8,7 @@ import { getOdooSettings, saveOdooSettings } from "@/lib/firestore-settings";
 import { getSystemOdooSettings, saveSystemOdooSettings } from "@/lib/client-odoo";
 import { OdooUserCredentials } from "@/types/odoo";
 import { APP_DEFINITIONS, defaultAppHrefsForRole } from "@/lib/app-permissions";
+import { Select2, type Select2Option } from "@/components/select2";
 
 type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "store" | "user";
 
@@ -19,6 +20,15 @@ const ROLE_LABELS: Record<Role, string> = {
     store: "store",
     user: "user (product requests only)",
 };
+
+const ROLE_OPTIONS: Select2Option[] = [
+    { value: "purchase", label: "Purchase" },
+    { value: "salesperson", label: "Salesperson" },
+    { value: "sales_manager", label: "Sales Manager" },
+    { value: "store", label: "Store" },
+    { value: "user", label: "User (Product Requests only)" },
+    { value: "admin", label: "Admin" },
+];
 
 type UserRow = { id: string; email: string; role: Role; createdAt: string | null; enabledApps: string[] | null };
 
@@ -467,20 +477,11 @@ export default function SettingsPage() {
                         </label>
                         <label>
                             <span className="mb-1 block text-sm text-(--ink-soft)">Role</span>
-                            <select
+                            <Select2
                                 value={newUser.role}
-                                onChange={(event) =>
-                                    setNewUser((prev) => ({ ...prev, role: event.target.value as Role }))
-                                }
-                                className="w-full rounded-xl border border-(--line) bg-white px-4 py-2.5"
-                            >
-                                <option value="purchase">Purchase</option>
-                                <option value="salesperson">Salesperson</option>
-                                <option value="sales_manager">Sales Manager</option>
-                                <option value="store">Store</option>
-                                <option value="user">User (Product Requests only)</option>
-                                <option value="admin">Admin</option>
-                            </select>
+                                onChange={(next) => setNewUser((prev) => ({ ...prev, role: next as Role }))}
+                                options={ROLE_OPTIONS}
+                            />
                         </label>
 
                         <button
@@ -756,18 +757,11 @@ function EditUserModal({
 
                 <label className="block">
                     <span className="mb-1 block text-sm text-(--ink-soft)">Role</span>
-                    <select
+                    <Select2
                         value={form.role}
-                        onChange={(event) => onChange({ ...form, role: event.target.value as Role })}
-                        className="w-full rounded-xl border border-(--line) bg-white px-4 py-2.5"
-                    >
-                        <option value="purchase">Purchase</option>
-                        <option value="salesperson">Salesperson</option>
-                        <option value="sales_manager">Sales Manager</option>
-                        <option value="store">Store</option>
-                        <option value="user">User (Product Requests only)</option>
-                        <option value="admin">Admin</option>
-                    </select>
+                        onChange={(next) => onChange({ ...form, role: next as Role })}
+                        options={ROLE_OPTIONS}
+                    />
                 </label>
 
                 <label className="block">

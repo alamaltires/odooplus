@@ -8,6 +8,7 @@ import {
     getSalespersonActivityReport,
 } from "@/lib/client-odoo";
 import { useAuth } from "@/lib/auth-context";
+import { Select2 } from "@/components/select2";
 import {
     OdooCustomerSummary,
     OdooInactiveCustomer,
@@ -537,25 +538,19 @@ export default function SalespersonActivityPage() {
                 <div className="grid gap-4 md:grid-cols-4">
                     <label className="block md:col-span-2">
                         <span className="mb-2 block text-sm font-medium">Salesperson</span>
-                        <select
+                        <Select2
                             value={selectedSalespersonId}
-                            onChange={(event) => setSelectedSalespersonId(event.target.value)}
-                            className="w-full rounded-xl border border-(--line) bg-white px-4 py-2.5"
-                            disabled={salespeopleLoading || Boolean(salespeopleError)}
-                            required
-                        >
-                            {salespeople.length === 0 ? (
-                                <option value="">
-                                    {salespeopleLoading ? "Loading salespeople..." : "No salespeople found"}
-                                </option>
-                            ) : null}
-                            {salespeople.map((salesperson) => (
-                                <option key={salesperson.id} value={salesperson.id}>
-                                    {salesperson.name}
-                                    {salesperson.email ? ` (${salesperson.email})` : ""}
-                                </option>
-                            ))}
-                        </select>
+                            onChange={setSelectedSalespersonId}
+                            loading={salespeopleLoading}
+                            loadingText="Loading salespeople..."
+                            emptyText="No salespeople found"
+                            disabled={Boolean(salespeopleError)}
+                            options={salespeople.map((salesperson) => ({
+                                value: String(salesperson.id),
+                                label: salesperson.name,
+                                description: salesperson.email || undefined,
+                            }))}
+                        />
                     </label>
 
                     <label className="block">
