@@ -399,11 +399,11 @@ export default function SettingsPage() {
             <article className="rounded-3xl border border-(--line) bg-(--card) p-6">
                 <h1 className="font-display text-2xl">Your Odoo Login</h1>
                 <p className="mt-1 text-sm text-(--ink-soft)">
-                    This app connects to Odoo as you, so you see exactly what your Odoo access rights allow. Your
-                    sign-in email and password are used automatically &mdash; keep your OdooPlus password the same as
-                    your Odoo password and there is nothing to fill in here. Save a username and password below only
-                    to override that (a different Odoo login, or an API key if your Odoo user has two-factor
-                    authentication). The URL and Database are configured system-wide by an admin.
+                    This app connects to Odoo as you, so you see exactly what your Odoo access rights allow. Enter
+                    your real Odoo email and password below &mdash; this is separate from your OdooPlus sign-in, so
+                    the two don&apos;t need to match. If your Odoo user has two-factor authentication enabled, use an
+                    Odoo API key as the password instead. The URL and Database are configured system-wide by an
+                    admin.
                 </p>
 
                 <form onSubmit={handleSubmit} className="mt-6 grid gap-4 sm:grid-cols-2">
@@ -448,9 +448,10 @@ export default function SettingsPage() {
                 <article className="rounded-3xl border border-(--line) bg-(--card) p-6">
                     <h2 className="font-display text-2xl">User Management</h2>
                     <p className="mt-1 text-sm text-(--ink-soft)">
-                        List users from Firestore and create new users with login credentials. Use the user&apos;s Odoo
-                        email and their Odoo password &mdash; the app signs in to Odoo with them, so each user sees only
-                        what their own Odoo access rights allow.
+                        Create app accounts with any email and password you like &mdash; these sign people into
+                        OdooPlus only and are unrelated to Odoo. Each person then connects their own account to Odoo
+                        by entering their real Odoo email and password under &quot;Your Odoo Login&quot; in Settings,
+                        so they see exactly what their own Odoo access rights allow.
                     </p>
 
                     <form onSubmit={handleCreateUser} className="mt-5 grid gap-4 md:grid-cols-4">

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { Timestamp } from "firebase-admin/firestore";
 import { getAdminAuth, getAdminDb } from "@/lib/server/firebase-admin";
-import { getUserIdFromRequest, getUserRoleFromRequest, syncOdooUserCredentials } from "@/lib/server/auth-helpers";
+import { getUserIdFromRequest, getUserRoleFromRequest } from "@/lib/server/auth-helpers";
 
 type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "store" | "user";
 
@@ -145,10 +145,9 @@ export async function POST(request: Request) {
             { merge: true }
         );
 
-        // The app signs in to Odoo as this same account, so the password set
-        // here must be the password of the Odoo user with this email.
-        await syncOdooUserCredentials(created.uid, { username: email, password });
-
+        // This account's own Odoo login is unrelated — the person signs in
+        // to Odoo separately for themselves under "Your Odoo Login" in
+        // Settings.
         return NextResponse.json({
             user: {
                 id: created.uid,

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { getAdminAuth, getAdminDb } from "@/lib/server/firebase-admin";
-import { getUserIdFromRequest, getUserRoleFromRequest, syncOdooUserCredentials } from "@/lib/server/auth-helpers";
+import { getUserIdFromRequest, getUserRoleFromRequest } from "@/lib/server/auth-helpers";
 import { APP_HREFS } from "@/lib/app-permissions";
 
 type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "store" | "user";
@@ -52,12 +52,9 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
         }
         if (Object.keys(authUpdate).length > 0) {
             await adminAuth.updateUser(id, authUpdate);
-            // Keep the Odoo login this account connects with in step with the
-            // app login it just got.
-            await syncOdooUserCredentials(id, {
-                username: authUpdate.email,
-                password: authUpdate.password,
-            });
+            // This account's own Odoo login is separate and untouched here —
+            // the person manages it themselves under "Your Odoo Login" in
+            // Settings.
         }
 
         const firestoreUpdate: Record<string, unknown> = {

@@ -18,7 +18,6 @@ import {
 import { doc, getDoc } from "firebase/firestore";
 import { auth } from "@/lib/firebase";
 import { db } from "@/lib/firebase";
-import { syncOdooSettingsFromLogin } from "@/lib/firestore-settings";
 
 export type UserRole = "admin" | "purchase" | "salesperson" | "sales_manager" | "store" | "user";
 
@@ -39,24 +38,6 @@ type AuthContextValue = {
 };
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
-
-/**
- * Every OdooPlus account connects to Odoo as itself, using the same email and
- * password it signs in with, so the data it sees is exactly what that Odoo
- * user's own access rights allow. Mirroring the credentials here is what keeps
- * the two in step — an account whose app password no longer matches its Odoo
- * password gets `Authentication failed` from every Odoo-backed screen.
- *
- * Never allowed to break sign-in: a failed mirror (offline, Firestore rules)
- * only means the previously stored credentials stay in place.
- */
-async function mirrorLoginToOdoo(userId: string, email: string, password: string) {
-    try {
-        await syncOdooSettingsFromLogin(userId, email.trim().toLowerCase(), password);
-    } catch {
-        // Ignored on purpose — see above.
-    }
-}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
     const [user, setUser] = useState<User | null>(null);
@@ -113,13 +94,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             role,
             enabledApps,
             loading,
+            // The app's own sign-in is deliberately independent of Odoo — see
+            // "Your Odoo Login" in Settings, which each account configures
+            // for itself instead of inheriting anything from this login.
             login: async (email, password) => {
-                const credential = await signInWithEmailAndPassword(auth, email, password);
-                await mirrorLoginToOdoo(credential.user.uid, email, password);
+                await signInWithEmailAndPassword(auth, email, password);
             },
             register: async (email, password) => {
-                const credential = await createUserWithEmailAndPassword(auth, email, password);
-                await mirrorLoginToOdoo(credential.user.uid, email, password);
+                await createUserWithEmailAndPassword(auth, email, password);
             },
             logout: async () => {
                 await signOut(auth);
