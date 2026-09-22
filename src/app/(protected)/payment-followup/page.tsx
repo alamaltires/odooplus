@@ -125,6 +125,23 @@ function AgingBadge({ bucket, days }: { bucket: PaymentFollowupAgingBucket; days
     );
 }
 
+// Keyword-matched rather than exact-string, since a PDC addon's own state
+// vocabulary varies — this just needs to look right for whatever it turns
+// out to say (Draft, Registered, Done, Bounced, ...).
+function chequeStateBadgeClasses(state: string, isDeposited: boolean): string {
+    if (isDeposited) return "bg-violet-100 text-violet-800";
+    const lower = state.toLowerCase();
+    if (lower.includes("regist")) return "bg-amber-100 text-amber-800";
+    if (lower.includes("done") || lower.includes("clear") || lower.includes("cash") || lower.includes("paid")) {
+        return "bg-emerald-100 text-emerald-800";
+    }
+    if (lower.includes("bounce") || lower.includes("reject")) return "bg-red-100 text-red-800";
+    if (lower.includes("cancel") || lower.includes("void")) return "bg-(--chip) text-(--ink-soft)";
+    if (lower.includes("return")) return "bg-orange-100 text-orange-800";
+    if (lower.includes("draft")) return "bg-slate-100 text-slate-700";
+    return "bg-(--chip) text-(--ink-soft)";
+}
+
 function toWhatsAppNumber(phone: string): string | null {
     const digits = phone.replace(/[^\d]/g, "");
     return digits.length >= 7 ? digits : null;
@@ -627,6 +644,11 @@ function ChequesTable({ rows, currencyCode }: { rows: PaymentFollowupCustomerRow
         [rows]
     );
 
+    const depositedAmountAll = useMemo(
+        () => rows.filter((row) => row.isDeposited).reduce((sum, row) => sum + row.amount, 0),
+        [rows]
+    );
+
     const filteredRows = useMemo(() => {
         const normalizedQuery = query.trim().toLowerCase();
         if (!normalizedQuery) return rows;
@@ -672,7 +694,11 @@ function ChequesTable({ rows, currencyCode }: { rows: PaymentFollowupCustomerRow
             icon={Landmark}
             title="Post-Dated Cheques (PDC)"
             count={rows.length}
-            totalLabel={rows.length > 0 ? `Pending ${formatCurrency(pendingAmountAll, currencyCode)}` : null}
+            totalLabel={
+                rows.length > 0
+                    ? `Pending ${formatCurrency(pendingAmountAll, currencyCode)} · Deposit ${formatCurrency(depositedAmountAll, currencyCode)}`
+                    : null
+            }
             collapsed={collapsed}
             onToggle={() => setCollapsed((value) => !value)}
         >
@@ -711,10 +737,7 @@ function ChequesTable({ rows, currencyCode }: { rows: PaymentFollowupCustomerRow
                                             <td className="px-3 py-2 text-(--ink-soft)">{row.bankName || "-"}</td>
                                             <td className="px-3 py-2">
                                                 <span
-                                                    className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium ${row.isPending
-                                                        ? "bg-amber-100 text-amber-800"
-                                                        : "bg-(--chip) text-(--ink-soft)"
-                                                        }`}
+                                                    className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium ${chequeStateBadgeClasses(row.state, row.isDeposited)}`}
                                                 >
                                                     {row.state}
                                                 </span>
@@ -1225,6 +1248,7 @@ export default function PaymentFollowupPage() {
                             value={formatCurrency(report.totals.totalPdcPending, report.currencyCode)}
                             tone="purple"
                             icon={Landmark}
+                            hint={`Total Deposit: ${formatCurrency(report.totals.totalPdcDeposited, report.currencyCode)}`}
                         />
                         <StatCard
                             label="Payables"

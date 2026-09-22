@@ -3134,6 +3134,10 @@ export type PaymentFollowupCheque = {
     state: string;
     bankName: string;
     isPending: boolean;
+    // Whether the cheque has been physically deposited at the bank —
+    // independent of `state`/`isPending` (a Registered cheque can be either
+    // deposited or not), tracked separately as "Total Deposit".
+    isDeposited: boolean;
 };
 
 export type PaymentFollowupCustomerRow = {
@@ -3148,9 +3152,15 @@ export type PaymentFollowupCustomerRow = {
     totalInvoiceDue: number;
     totalUnapplied: number;
     totalPdcPending: number;
+    // Amount of `totalPdcPending`'s cheques (and any others) already
+    // physically deposited at the bank — a subset shown alongside it, not
+    // netted out of it (a deposited cheque hasn't cleared yet).
+    totalPdcDeposited: number;
     // Open vendor bills/refunds against this same (commercial) partner —
-    // what we owe them, netted out of `netDue` below. Zero for a partner
-    // that's only ever a customer.
+    // what we owe them. Informational total shown on its own; each bill is
+    // separately aged onto `agingBuckets` below by its own due/invoice date,
+    // which is what actually nets it against `totalInvoiceDue`/`netDue`.
+    // Zero for a partner that's only ever a customer.
     totalPayableDue: number;
     netDue: number;
     oldestDueDate: string;
@@ -3207,6 +3217,7 @@ export type PaymentFollowupReport = {
         totalInvoiceDue: number;
         totalUnapplied: number;
         totalPdcPending: number;
+        totalPdcDeposited: number;
         totalPayableDue: number;
         netDue: number;
         agingBuckets: PaymentFollowupAgingTotals;
@@ -3252,37 +3263,24 @@ type PdcModelInfo = {
     // (e.g. `account.payment.is_reconciled`) — a more reliable "pending"
     // signal than guessing from state text, when the model has one.
     pendingField: string | null;
-    // True when `stateField` resolved to a PDC-specific field
-    // (`cheque_status`/`pdc_state`) rather than a model's generic workflow
-    // `state`/`status` — only then is that field's vocabulary trustworthy
-    // enough to apply the precise "only Registered is still pending" rule
-    // (verified live against one addon's actual New/Registered/Deposit/
-    // Bounce/Done/Cancel lifecycle) instead of the much looser
-    // resolved-keyword denylist a generic `state` field needs.
-    stateFieldIsPdcSpecific: boolean;
+    // A Selection field stores a short internal code ("draft") while
+    // displaying a human label ("Registered") — verified live: every cheque
+    // on one addon's model read back as the same code regardless of its real
+    // status, because the record's raw stored value, not its label, was
+    // being read and matched against. `null` when `stateField` isn't a
+    // selection field (nothing to translate).
+    stateFieldSelectionLabelByValue: Record<string, string> | null;
+    // Boolean field where `true` means the cheque has been physically
+    // deposited at the bank — a cross-cutting flag independent of
+    // `stateField` (verified live: a cheque can be state "Registered" with
+    // this either set or not), tracked as its own "Total Deposit" figure
+    // rather than folded into the pending total.
+    depositField: string | null;
     // Extra domain conditions this particular PDC source always needs (e.g.
     // scoping the shared `account.payment` model down to just PDC-method,
     // inbound rows) — empty for a model that's already PDC-only.
     extraDomain: unknown[];
 };
-
-// Keyword-based guess at which PDC states mean "already resolved" (cleared,
-// deposited, cancelled, bounced) vs. still awaiting collection — every PDC
-// addon names its states differently, so this can't be exact, but it keeps
-// the "pending" total from double-counting cheques that already cleared.
-const PDC_RESOLVED_STATE_KEYWORDS = [
-    "collect",
-    "clear",
-    "cash",
-    "deposit",
-    "cancel",
-    "reject",
-    "bounce",
-    "void",
-    "paid",
-    "done",
-    "return",
-];
 
 // Surfaced back to the UI whenever PDC detection comes up empty, so the
 // actual reason (no PDC-shaped payment method, no cheque-shaped model, or an
@@ -3382,7 +3380,7 @@ async function getPdcModelInfo(
 
     function buildInfoFromFields(
         model: string,
-        fields: Record<string, { string?: string }>,
+        fields: Record<string, { string?: string; selection?: Array<[string, string]> }>,
         strict: boolean,
         partnerField = "partner_id"
     ): PdcModelInfo | null {
@@ -3419,13 +3417,28 @@ async function getPdcModelInfo(
             return null;
         }
 
-        // Whichever PDC-specific status field exists (if any) is trusted
-        // over a model's generic workflow `state` — the two can coexist
-        // (e.g. `state` = "posted" for the accounting entry, unrelated to
-        // whether the cheque itself has cleared) and only the PDC-specific
-        // one reflects the cheque's own lifecycle.
-        const pdcSpecificStateField = ["cheque_status", "pdc_state"].find((f) => fields[f]);
-        const stateField = pdcSpecificStateField ?? ["state", "status"].find((f) => fields[f]) ?? null;
+        // `state`/`status` is preferred over a PDC-specific-*named* field
+        // like `cheque_status` — counterintuitively verified live: one
+        // addon's `cheque_status` sat permanently at "Draft" on every
+        // record regardless of its real status (effectively an unused/decoy
+        // field), while the model's own generic `state` was what actually
+        // carried the real lifecycle ("Done", etc.). A model can still have
+        // both; only fall back to a `cheque_status`/`pdc_state`-named field
+        // when there's no `state`/`status` at all to prefer instead.
+        // `state`/`status` preferred over a PDC-specific-*named* field like
+        // `cheque_status` — counterintuitively verified live: one addon's
+        // `cheque_status` sat permanently at "Draft" on every record
+        // regardless of its real status (effectively an unused/decoy
+        // field), while the model's own generic `state` was what actually
+        // carried the real lifecycle ("Registered", "Done", etc.).
+        const stateField = ["state", "status", "cheque_status", "pdc_state"].find((f) => fields[f]) ?? null;
+
+        function selectionLabelMapFor(fieldName: string): Record<string, string> | null {
+            const selection = fields[fieldName]?.selection;
+            return selection
+                ? Object.fromEntries(selection.map(([value, label]) => [String(value), String(label)]))
+                : null;
+        }
 
         return {
             model,
@@ -3436,7 +3449,8 @@ async function getPdcModelInfo(
             dateField,
             amountField,
             stateField,
-            stateFieldIsPdcSpecific: Boolean(pdcSpecificStateField),
+            stateFieldSelectionLabelByValue: stateField ? selectionLabelMapFor(stateField) : null,
+            depositField: ["is_deposit", "is_deposited", "deposited"].find((f) => fields[f]) ?? null,
             bankField: ["bank_id", "issuer_bank", "bank_name"].find((f) => fields[f]) ?? null,
             currencyField: fields.currency_id ? "currency_id" : null,
             pendingField: fields.is_reconciled ? "is_reconciled" : null,
@@ -3509,7 +3523,8 @@ async function getPdcModelInfo(
                     dateField: fields.effective_date ? "effective_date" : "date",
                     amountField: "amount",
                     stateField: "state",
-                    stateFieldIsPdcSpecific: false,
+                    stateFieldSelectionLabelByValue: null,
+                    depositField: null,
                     bankField: fields.bank_reference ? "bank_reference" : null,
                     currencyField: fields.currency_id ? "currency_id" : null,
                     pendingField: fields.is_reconciled ? "is_reconciled" : null,
@@ -3579,13 +3594,15 @@ async function getPdcModelInfo(
             let targetFieldNames: string[] = [];
 
             if (targetModel && !isTransient && !isBlocked) {
-                const targetFields = await executeKw<Record<string, { string?: string; type?: string; relation?: string }>>(
+                const targetFields = await executeKw<
+                    Record<string, { string?: string; type?: string; relation?: string; selection?: Array<[string, string]> }>
+                >(
                     credentials,
                     uid,
                     targetModel,
                     "fields_get",
                     [],
-                    { attributes: ["string", "type", "relation"] }
+                    { attributes: ["string", "type", "relation", "selection"] }
                 );
                 targetFieldNames = Object.keys(targetFields).sort();
 
@@ -3672,13 +3689,13 @@ async function getPdcModelInfo(
 
         for (const model of persistentCandidates) {
             try {
-                const fields = await executeKw<Record<string, { string?: string }>>(
+                const fields = await executeKw<Record<string, { string?: string; selection?: Array<[string, string]> }>>(
                     credentials,
                     uid,
                     model,
                     "fields_get",
                     [],
-                    { attributes: ["string", "type"] }
+                    { attributes: ["string", "type", "selection"] }
                 );
 
                 const info = buildInfoFromFields(model, fields, true);
@@ -3715,13 +3732,13 @@ async function getPdcModelInfo(
             }
 
             try {
-                const fields = await executeKw<Record<string, { string?: string }>>(
+                const fields = await executeKw<Record<string, { string?: string; selection?: Array<[string, string]> }>>(
                     credentials,
                     uid,
                     candidate.model,
                     "fields_get",
                     [],
-                    { attributes: ["string", "type"] }
+                    { attributes: ["string", "type", "selection"] }
                 );
 
                 const info = buildInfoFromFields(candidate.model, fields, false);
@@ -3792,6 +3809,7 @@ async function buildPaymentFollowupReport(
                 totalInvoiceDue: 0,
                 totalUnapplied: 0,
                 totalPdcPending: 0,
+                totalPdcDeposited: 0,
                 totalPayableDue: 0,
                 netDue: 0,
                 agingBuckets: emptyAgingTotals(),
@@ -3845,7 +3863,7 @@ async function buildPaymentFollowupReport(
                 ["state", "=", "posted"],
                 ["payment_state", "not in", ["paid", "in_payment", "reversed"]],
             ],
-            ["id", "move_type", "commercial_partner_id", "amount_residual", "currency_id"]
+            ["id", "move_type", "commercial_partner_id", "invoice_date", "invoice_date_due", "amount_residual", "currency_id"]
         ),
         getReceivableAccountDomainTriple(credentials, uid),
         getPdcModelInfo(credentials, uid).catch((error) => ({
@@ -3913,6 +3931,7 @@ async function buildPaymentFollowupReport(
             if (pdcInfo.bankField) pdcFields.push(pdcInfo.bankField);
             if (pdcInfo.currencyField) pdcFields.push(pdcInfo.currencyField);
             if (pdcInfo.pendingField) pdcFields.push(pdcInfo.pendingField);
+            if (pdcInfo.depositField) pdcFields.push(pdcInfo.depositField);
 
             pdcRecords = await searchReadAll(
                 credentials,
@@ -4045,6 +4064,7 @@ async function buildPaymentFollowupReport(
             totalInvoiceDue: 0,
             totalUnapplied: 0,
             totalPdcPending: 0,
+            totalPdcDeposited: 0,
             totalPayableDue: 0,
             netDue: 0,
             oldestDueDate: "",
@@ -4102,24 +4122,30 @@ async function buildPaymentFollowupReport(
         if (moveType === "out_refund") {
             // Credit notes aren't touched by the FIFO credit-netting pass
             // below (that's specifically for applying *unapplied payments*
-            // against open invoices) — accumulate them into the totals
-            // immediately, same as before.
+            // against open invoices) — accumulate them into their bucket
+            // immediately, same as before. `totalInvoiceDue` itself is
+            // derived from the buckets once everything (this, the FIFO pass,
+            // and payables) has been folded in, further down.
             const signedHomeAmount = -toHomeAmount(residual, currencyId);
-            row.totalInvoiceDue = Number((row.totalInvoiceDue + signedHomeAmount).toFixed(2));
             row.agingBuckets[bucket] = Number((row.agingBuckets[bucket] + signedHomeAmount).toFixed(2));
         } else if (residual > 0) {
-            // Deliberately NOT added to `row.totalInvoiceDue`/`agingBuckets`
-            // here — the FIFO pass below adds each invoice's *net* (post
-            // unapplied-credit) amount instead, oldest invoice first, so
+            // Deliberately NOT added to `agingBuckets` here — the FIFO pass
+            // below adds each invoice's *net* (post unapplied-credit) amount
+            // instead, oldest invoice first, so
             // "Open Invoices Due" and the aging matrix both already reflect
             // unapplied credit rather than needing it subtracted again.
             invoiceHomeResidualById.set(Number(invoice.id), toHomeAmount(residual, currencyId));
         }
     }
 
-    // Vendor bills/refunds against the same partner — what we owe them,
-    // which must reduce "net due" (see the type's own doc comment) rather
-    // than being invisible to this report.
+    // Vendor bills/refunds against the same partner — what we owe them.
+    // `totalPayableDue` (below) is the informational running total shown on
+    // its own stat card, same treatment as `totalUnapplied`; separately,
+    // each bill is also aged by its own due/invoice date (same `dateBasis`
+    // toggle as receivables) and subtracted directly from that bucket in the
+    // Aged Receivables matrix, so a payable due *now* offsets a receivable
+    // due *now* rather than being netted against the total as one lump sum
+    // regardless of either side's own timing.
     for (const bill of payableBills) {
         const customerId = getRelationalId(bill.commercial_partner_id);
         if (!customerId) continue;
@@ -4131,6 +4157,15 @@ async function buildPaymentFollowupReport(
 
         const row = ensureRow(customerId);
         row.totalPayableDue = Number((row.totalPayableDue + signedHomeAmount).toFixed(2));
+
+        const billInvoiceDate = normalizeOdooDate(bill.invoice_date);
+        const billDueDate = normalizeOdooDate(bill.invoice_date_due) || billInvoiceDate;
+        const billAgingReferenceDate = dateBasis === "invoice" ? billInvoiceDate : billDueDate;
+        const billAgingMs = billAgingReferenceDate ? new Date(`${billAgingReferenceDate}T00:00:00Z`).getTime() : todayMs;
+        const billDaysOverdue = Math.round((todayMs - billAgingMs) / 86400000);
+        const billBucket = getAgingBucket(billDaysOverdue);
+
+        row.agingBuckets[billBucket] = Number((row.agingBuckets[billBucket] - signedHomeAmount).toFixed(2));
     }
 
     for (const line of unappliedLines) {
@@ -4166,26 +4201,34 @@ async function buildPaymentFollowupReport(
                 ? getRelationalName(record[pdcInfo.currencyField as string]) || TARGET_CURRENCY_CODE
                 : TARGET_CURRENCY_CODE;
             const amount = Number(record[pdcInfo.amountField] ?? 0);
-            const stateValue = pdcInfo.stateField ? toDisplayString(record[pdcInfo.stateField]) : "";
-            const lowerStateValue = stateValue.toLowerCase();
+            // A Selection field's raw stored value is a short internal code
+            // ("draft") distinct from what it displays ("Registered") — read
+            // and matched directly, every record looked identical regardless
+            // of its real status (verified live). Translating through the
+            // field's own declared options first is what actually reflects
+            // reality.
+            const rawStateValue = pdcInfo.stateField ? toDisplayString(record[pdcInfo.stateField]) : "";
+            const stateLabel = pdcInfo.stateFieldSelectionLabelByValue?.[rawStateValue] ?? rawStateValue;
+            const lowerStateLabel = stateLabel.toLowerCase();
+            const isDeposited = pdcInfo.depositField ? Boolean(record[pdcInfo.depositField]) : false;
             // Prefer an explicit "already reconciled/cleared" boolean (e.g.
             // `account.payment.is_reconciled`) when the model has one.
-            // Otherwise, for a genuinely PDC-lifecycle state field
-            // (`cheque_status`/`pdc_state`), only "Registered" counts as
-            // still outstanding — confirmed live against a real addon whose
-            // New/Registered/Deposit/Bounce/Done/Cancel states don't fit a
-            // generic resolved-keyword denylist (its "Done" cheques were
-            // already correctly excluded by that denylist, but the business
-            // rule here is narrower: not-yet-deposited/registered is the
-            // only state actually worth following up on). A model whose
-            // state field is just its generic workflow `state`/`status`
-            // (e.g. account.payment's draft/posted/cancel) has no such
-            // "Registered" vocabulary, so it keeps the looser denylist.
-            const isPending = pdcInfo.pendingField
-                ? !record[pdcInfo.pendingField]
-                : pdcInfo.stateFieldIsPdcSpecific
-                    ? lowerStateValue.includes("regist")
-                    : !PDC_RESOLVED_STATE_KEYWORDS.some((keyword) => lowerStateValue.includes(keyword));
+            // Otherwise, only "Registered" counts as still pending — verified
+            // live against a real addon's actual New/Registered/Deposit/
+            // Bounce/Done/Cancel lifecycle. Already-deposited cheques are
+            // excluded from "pending" too (tracked in `totalPdcDeposited`
+            // instead) — "Pending" specifically means not yet handed to the
+            // bank at all, so `totalPdcPending` never double-counts what
+            // `totalPdcDeposited` already shows.
+            const isPending =
+                (pdcInfo.pendingField ? !record[pdcInfo.pendingField] : lowerStateLabel.includes("regist")) &&
+                !isDeposited;
+            // `is_deposit` is independent of `state` (a Registered cheque can
+            // be either deposited or not) — shown as a compound label rather
+            // than replacing the real state, so "still Registered but not
+            // yet deposited" stays distinguishable from "Registered and
+            // Deposited".
+            const displayState = isDeposited ? "Registered & Deposited" : stateLabel || "-";
 
             const row = ensureRow(customerId);
             row.cheques.push({
@@ -4194,13 +4237,17 @@ async function buildPaymentFollowupReport(
                 date: normalizeOdooDate(record[pdcInfo.dateField]),
                 amount: Number(amount.toFixed(2)),
                 currencyCode,
-                state: stateValue || "-",
+                state: displayState,
                 bankName: pdcInfo.bankField ? getRelationalName(record[pdcInfo.bankField]) || toDisplayString(record[pdcInfo.bankField]) : "",
                 isPending,
+                isDeposited,
             });
 
             if (isPending) {
                 row.totalPdcPending = Number((row.totalPdcPending + toHomeAmount(amount, currencyId)).toFixed(2));
+            }
+            if (isDeposited) {
+                row.totalPdcDeposited = Number((row.totalPdcDeposited + toHomeAmount(amount, currencyId)).toFixed(2));
             }
         }
     }
@@ -4233,7 +4280,6 @@ async function buildPaymentFollowupReport(
             const netHomeAmount = Number((homeResidual - appliedCredit).toFixed(2));
             remainingCredit = Number((remainingCredit - appliedCredit).toFixed(2));
 
-            row.totalInvoiceDue = Number((row.totalInvoiceDue + netHomeAmount).toFixed(2));
             row.agingBuckets[invoice.agingBucket] = Number(
                 (row.agingBuckets[invoice.agingBucket] + netHomeAmount).toFixed(2)
             );
@@ -4245,13 +4291,31 @@ async function buildPaymentFollowupReport(
             }
         }
 
+        // `totalInvoiceDue` ("Open Invoices Due") is derived from the aging
+        // buckets rather than tracked in parallel, now that three different
+        // things feed into them (credit notes, FIFO-netted invoices, and
+        // payables aged onto the same buckets above) — a single source of
+        // truth so the matrix's own "Total" column and this stat can never
+        // drift apart.
+        row.totalInvoiceDue = Number(
+            (
+                row.agingBuckets.notDue +
+                row.agingBuckets.d1_30 +
+                row.agingBuckets.d31_60 +
+                row.agingBuckets.d61_90 +
+                row.agingBuckets.d91_120 +
+                row.agingBuckets.older
+            ).toFixed(2)
+        );
+
         // Credit left over once every open invoice is fully covered is a
         // genuine credit balance (they've paid more than they currently
         // owe) — still reduces net due, just with nothing left to net it
         // against inside `totalInvoiceDue` (which is already floored at 0
         // per invoice by the pass above, so subtracting it again there would
-        // double-count).
-        row.netDue = Number((row.totalInvoiceDue - Math.max(remainingCredit, 0) - row.totalPayableDue).toFixed(2));
+        // double-count). Payables are not subtracted again here either —
+        // they're already inside `totalInvoiceDue` via the buckets.
+        row.netDue = Number((row.totalInvoiceDue - Math.max(remainingCredit, 0)).toFixed(2));
 
         row.invoices.sort((a, b) => b.daysOverdue - a.daysOverdue);
         row.unappliedPayments.sort((a, b) => (b.date > a.date ? 1 : -1));
@@ -4267,6 +4331,7 @@ async function buildPaymentFollowupReport(
             totalInvoiceDue: Number((acc.totalInvoiceDue + row.totalInvoiceDue).toFixed(2)),
             totalUnapplied: Number((acc.totalUnapplied + row.totalUnapplied).toFixed(2)),
             totalPdcPending: Number((acc.totalPdcPending + row.totalPdcPending).toFixed(2)),
+            totalPdcDeposited: Number((acc.totalPdcDeposited + row.totalPdcDeposited).toFixed(2)),
             totalPayableDue: Number((acc.totalPayableDue + row.totalPayableDue).toFixed(2)),
             netDue: Number((acc.netDue + row.netDue).toFixed(2)),
             agingBuckets: {
@@ -4278,7 +4343,15 @@ async function buildPaymentFollowupReport(
                 older: Number((acc.agingBuckets.older + row.agingBuckets.older).toFixed(2)),
             },
         }),
-        { totalInvoiceDue: 0, totalUnapplied: 0, totalPdcPending: 0, totalPayableDue: 0, netDue: 0, agingBuckets: emptyAgingTotals() }
+        {
+            totalInvoiceDue: 0,
+            totalUnapplied: 0,
+            totalPdcPending: 0,
+            totalPdcDeposited: 0,
+            totalPayableDue: 0,
+            netDue: 0,
+            agingBuckets: emptyAgingTotals(),
+        }
     );
 
     return {

@@ -337,6 +337,7 @@ export type PaymentFollowupCheque = {
     state: string;
     bankName: string;
     isPending: boolean;
+    isDeposited: boolean;
 };
 
 export type PaymentFollowupCustomerRow = {
@@ -351,6 +352,7 @@ export type PaymentFollowupCustomerRow = {
     totalInvoiceDue: number;
     totalUnapplied: number;
     totalPdcPending: number;
+    totalPdcDeposited: number;
     totalPayableDue: number;
     netDue: number;
     oldestDueDate: string;
@@ -392,6 +394,7 @@ export type PaymentFollowupReport = {
         totalInvoiceDue: number;
         totalUnapplied: number;
         totalPdcPending: number;
+        totalPdcDeposited: number;
         totalPayableDue: number;
         netDue: number;
         agingBuckets: PaymentFollowupAgingTotals;
