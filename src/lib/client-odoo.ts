@@ -604,6 +604,7 @@ export function getPaymentFollowupBySalesperson(input: {
     salespersonId: number;
     asOfDate?: string;
     dateBasis?: "due" | "invoice";
+    agingSystem?: "day" | "month";
 }) {
     return post<PaymentFollowupReport>("/api/odoo/payment-followup-by-salesperson", input);
 }
@@ -612,6 +613,7 @@ export function getPaymentFollowupByCustomer(input: {
     customerId: number;
     asOfDate?: string;
     dateBasis?: "due" | "invoice";
+    agingSystem?: "day" | "month";
 }) {
     return post<PaymentFollowupReport>("/api/odoo/payment-followup-by-customer", input);
 }

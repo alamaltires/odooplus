@@ -3179,6 +3179,7 @@ export type PaymentFollowupReport = {
     salesperson: SalespersonOption | null;
     asOfDate: string;
     dateBasis: "due" | "invoice";
+    agingSystem: "day" | "month";
     currencyCode: string;
     pdcModuleDetected: boolean;
     // Only populated when `pdcModuleDetected` is false — what PDC detection
@@ -3765,6 +3766,47 @@ function getAgingBucket(daysOverdue: number): PaymentFollowupAgingBucket {
     return "older";
 }
 
+// How many calendar-month boundaries separate two "YYYY-MM-DD" dates —
+// e.g. an Aug 31 reference date and a Sep 5 as-of date are 1 apart, same
+// as an Aug 1 reference date, even though the two are 5 and 35 days apart
+// respectively. That's the whole point of the "month" aging system below:
+// group by which calendar month something fell in, not by a fixed day
+// window.
+function monthsElapsedBetween(referenceDateIso: string, asOfDateIso: string): number {
+    const [refYear, refMonth] = referenceDateIso.split("-").map(Number);
+    const [asOfYear, asOfMonth] = asOfDateIso.split("-").map(Number);
+    return (asOfYear * 12 + asOfMonth) - (refYear * 12 + refMonth);
+}
+
+// Calendar-month analogue of `getAgingBucket`. A reference date still
+// within the as-of date's own calendar month (0 boundaries crossed) is
+// the first overdue tier, not "not due" — mirroring how the day-based
+// system already lumps "1 day late" through "30 days late" into one
+// first bucket rather than treating any of it as not-yet-due.
+function getAgingBucketByMonth(daysOverdue: number, monthsElapsed: number): PaymentFollowupAgingBucket {
+    if (daysOverdue <= 0) return "notDue";
+    if (monthsElapsed <= 0) return "d1_30";
+    if (monthsElapsed === 1) return "d31_60";
+    if (monthsElapsed === 2) return "d61_90";
+    if (monthsElapsed === 3) return "d91_120";
+    return "older";
+}
+
+function resolveAgingBucket(
+    daysOverdue: number,
+    referenceDateIso: string,
+    asOfDateIso: string,
+    agingSystem: "day" | "month"
+): PaymentFollowupAgingBucket {
+    if (agingSystem === "day") {
+        return getAgingBucket(daysOverdue);
+    }
+    return getAgingBucketByMonth(
+        daysOverdue,
+        referenceDateIso ? monthsElapsedBetween(referenceDateIso, asOfDateIso) : 0
+    );
+}
+
 /**
  * Shared report builder behind both `getPaymentFollowupForSalesperson` and
  * `getPaymentFollowupForCustomer`. For each of the given (already-canonical,
@@ -3787,7 +3829,8 @@ async function buildPaymentFollowupReport(
     scope: "salesperson" | "customer",
     salesperson: SalespersonOption | null,
     asOfDate: string,
-    dateBasis: "due" | "invoice"
+    dateBasis: "due" | "invoice",
+    agingSystem: "day" | "month"
 ): Promise<PaymentFollowupReport> {
     const todayStr = asOfDate;
     const todayMs = new Date(`${todayStr}T00:00:00Z`).getTime();
@@ -3798,6 +3841,7 @@ async function buildPaymentFollowupReport(
             salesperson,
             asOfDate: todayStr,
             dateBasis,
+            agingSystem,
             currencyCode: TARGET_CURRENCY_CODE,
             pdcModuleDetected: false,
             pdcDebug: null,
@@ -4083,6 +4127,12 @@ async function buildPaymentFollowupReport(
     // scope knows how — used by the FIFO unapplied-credit netting below to
     // find the true oldest still-outstanding invoice.
     const invoiceHomeResidualById = new Map<number, number>();
+    // Which aging-matrix bucket each invoice's net amount should land in,
+    // per the selected `agingSystem` — kept separate from the invoice's own
+    // `agingBucket` field (always day-based; feeds the per-invoice line
+    // badge only, which stays exact-days regardless of this toggle) since
+    // the two can disagree once `agingSystem === "month"`.
+    const invoiceMatrixBucketById = new Map<number, PaymentFollowupAgingBucket>();
 
     for (const invoice of invoices) {
         const customerId = getRelationalId(invoice.commercial_partner_id);
@@ -4102,6 +4152,7 @@ async function buildPaymentFollowupReport(
         const agingMs = agingReferenceDate ? new Date(`${agingReferenceDate}T00:00:00Z`).getTime() : todayMs;
         const daysOverdue = Math.round((todayMs - agingMs) / 86400000);
         const bucket = getAgingBucket(daysOverdue);
+        const matrixBucket = resolveAgingBucket(daysOverdue, agingReferenceDate, todayStr, agingSystem);
 
         const row = ensureRow(customerId);
         row.invoices.push({
@@ -4117,6 +4168,7 @@ async function buildPaymentFollowupReport(
             daysOverdue,
             agingBucket: bucket,
         });
+        invoiceMatrixBucketById.set(Number(invoice.id), matrixBucket);
 
         if (moveType === "out_refund") {
             // Credit notes aren't touched by the FIFO credit-netting pass
@@ -4126,7 +4178,7 @@ async function buildPaymentFollowupReport(
             // derived from the buckets once everything (this, the FIFO pass,
             // and payables) has been folded in, further down.
             const signedHomeAmount = -toHomeAmount(residual, currencyId);
-            row.agingBuckets[bucket] = Number((row.agingBuckets[bucket] + signedHomeAmount).toFixed(2));
+            row.agingBuckets[matrixBucket] = Number((row.agingBuckets[matrixBucket] + signedHomeAmount).toFixed(2));
         } else if (residual > 0) {
             // Deliberately NOT added to `agingBuckets` here — the FIFO pass
             // below adds each invoice's *net* (post unapplied-credit) amount
@@ -4162,7 +4214,7 @@ async function buildPaymentFollowupReport(
         const billAgingReferenceDate = dateBasis === "invoice" ? billInvoiceDate : billDueDate;
         const billAgingMs = billAgingReferenceDate ? new Date(`${billAgingReferenceDate}T00:00:00Z`).getTime() : todayMs;
         const billDaysOverdue = Math.round((todayMs - billAgingMs) / 86400000);
-        const billBucket = getAgingBucket(billDaysOverdue);
+        const billBucket = resolveAgingBucket(billDaysOverdue, billAgingReferenceDate, todayStr, agingSystem);
 
         row.agingBuckets[billBucket] = Number((row.agingBuckets[billBucket] - signedHomeAmount).toFixed(2));
     }
@@ -4278,15 +4330,16 @@ async function buildPaymentFollowupReport(
             const appliedCredit = Math.min(Math.max(remainingCredit, 0), homeResidual);
             const netHomeAmount = Number((homeResidual - appliedCredit).toFixed(2));
             remainingCredit = Number((remainingCredit - appliedCredit).toFixed(2));
+            const matrixBucket = invoiceMatrixBucketById.get(invoice.invoiceId) ?? invoice.agingBucket;
 
-            row.agingBuckets[invoice.agingBucket] = Number(
-                (row.agingBuckets[invoice.agingBucket] + netHomeAmount).toFixed(2)
+            row.agingBuckets[matrixBucket] = Number(
+                (row.agingBuckets[matrixBucket] + netHomeAmount).toFixed(2)
             );
 
             if (!row.oldestDueDate && netHomeAmount > 0.01) {
                 row.oldestDueDate = invoice.dueDate;
                 row.maxDaysOverdue = invoice.daysOverdue;
-                row.agingBucket = invoice.agingBucket;
+                row.agingBucket = matrixBucket;
             }
         }
 
@@ -4358,6 +4411,7 @@ async function buildPaymentFollowupReport(
         salesperson,
         asOfDate: todayStr,
         dateBasis,
+        agingSystem,
         currencyCode: TARGET_CURRENCY_CODE,
         pdcModuleDetected: Boolean(pdcInfo),
         pdcDebug: pdcInfo ? null : pdcDebug,
@@ -4374,7 +4428,12 @@ async function buildPaymentFollowupReport(
 
 export async function getPaymentFollowupForSalesperson(
     credentials: OdooCredentials,
-    input: { salespersonId: number; asOfDate?: string; dateBasis?: "due" | "invoice" }
+    input: {
+        salespersonId: number;
+        asOfDate?: string;
+        dateBasis?: "due" | "invoice";
+        agingSystem?: "day" | "month";
+    }
 ): Promise<PaymentFollowupReport> {
     const uid = await authenticate(credentials);
     const salespersonId = Number(input.salespersonId);
@@ -4417,13 +4476,19 @@ export async function getPaymentFollowupForSalesperson(
         "salesperson",
         salesperson,
         resolveAsOfDate(input.asOfDate),
-        input.dateBasis === "invoice" ? "invoice" : "due"
+        input.dateBasis === "invoice" ? "invoice" : "due",
+        input.agingSystem === "month" ? "month" : "day"
     );
 }
 
 export async function getPaymentFollowupForCustomer(
     credentials: OdooCredentials,
-    input: { customerId: number; asOfDate?: string; dateBasis?: "due" | "invoice" }
+    input: {
+        customerId: number;
+        asOfDate?: string;
+        dateBasis?: "due" | "invoice";
+        agingSystem?: "day" | "month";
+    }
 ): Promise<PaymentFollowupReport> {
     const uid = await authenticate(credentials);
     const customerId = Number(input.customerId);
@@ -4442,7 +4507,8 @@ export async function getPaymentFollowupForCustomer(
         "customer",
         null,
         resolveAsOfDate(input.asOfDate),
-        input.dateBasis === "invoice" ? "invoice" : "due"
+        input.dateBasis === "invoice" ? "invoice" : "due",
+        input.agingSystem === "month" ? "month" : "day"
     );
 }
 

@@ -6,14 +6,15 @@ export async function POST(request: Request) {
     try {
         const { credentials } = await getOdooCredentialsFromRequest(request);
         const companyIds = await getCompanyIdsFromRequest(request);
-        const { salespersonId, asOfDate, dateBasis } = (await request.json()) as {
+        const { salespersonId, asOfDate, dateBasis, agingSystem } = (await request.json()) as {
             salespersonId: number;
             asOfDate?: string;
             dateBasis?: "due" | "invoice";
+            agingSystem?: "day" | "month";
         };
 
         const report = await runWithCompanyIds(companyIds, () =>
-            getPaymentFollowupForSalesperson(credentials, { salespersonId, asOfDate, dateBasis })
+            getPaymentFollowupForSalesperson(credentials, { salespersonId, asOfDate, dateBasis, agingSystem })
         );
 
         return NextResponse.json(report);

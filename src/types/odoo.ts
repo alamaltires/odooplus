@@ -369,6 +369,7 @@ export type PaymentFollowupReport = {
     salesperson: OdooSalesperson | null;
     asOfDate: string;
     dateBasis: "due" | "invoice";
+    agingSystem: "day" | "month";
     currencyCode: string;
     pdcModuleDetected: boolean;
     pdcDebug: {

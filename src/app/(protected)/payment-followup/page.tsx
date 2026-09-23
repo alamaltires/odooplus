@@ -60,8 +60,13 @@ function sanitizeFileName(value: string) {
         .replace(/^-+|-+$/g, "") || "payment-followup";
 }
 
-// Mirrors Odoo's own Aged Receivable report columns.
-const AGING_COLUMNS: Array<{ key: PaymentFollowupAgingBucket; label: string; tint: string }> = [
+type AgingSystem = "day" | "month";
+
+// Mirrors Odoo's own Aged Receivable report columns. A second, "month"
+// variant is used instead whenever the report's Aging System toggle is set
+// to Month — same 6 bucket keys, just labeled (and, server-side, computed)
+// by calendar months crossed rather than fixed 30-day windows.
+const DAY_AGING_COLUMNS: Array<{ key: PaymentFollowupAgingBucket; label: string; tint: string }> = [
     { key: "notDue", label: "Not Due", tint: "text-emerald-700" },
     { key: "d1_30", label: "1-30", tint: "text-amber-700" },
     { key: "d31_60", label: "31-60", tint: "text-orange-700" },
@@ -70,7 +75,20 @@ const AGING_COLUMNS: Array<{ key: PaymentFollowupAgingBucket; label: string; tin
     { key: "older", label: "Older", tint: "text-rose-900" },
 ];
 
-const AGING_META: Record<
+const MONTH_AGING_COLUMNS: Array<{ key: PaymentFollowupAgingBucket; label: string; tint: string }> = [
+    { key: "notDue", label: "Not Due", tint: "text-emerald-700" },
+    { key: "d1_30", label: "1 Month", tint: "text-amber-700" },
+    { key: "d31_60", label: "2 Months", tint: "text-orange-700" },
+    { key: "d61_90", label: "3 Months", tint: "text-red-700" },
+    { key: "d91_120", label: "4 Months", tint: "text-rose-800" },
+    { key: "older", label: "Older", tint: "text-rose-900" },
+];
+
+function agingColumnsFor(system: AgingSystem) {
+    return system === "month" ? MONTH_AGING_COLUMNS : DAY_AGING_COLUMNS;
+}
+
+const DAY_AGING_META: Record<
     PaymentFollowupAgingBucket,
     { label: string; badge: string; accent: string }
 > = {
@@ -106,6 +124,22 @@ const AGING_META: Record<
     },
 };
 
+const MONTH_AGING_META: Record<
+    PaymentFollowupAgingBucket,
+    { label: string; badge: string; accent: string }
+> = {
+    notDue: DAY_AGING_META.notDue,
+    d1_30: { ...DAY_AGING_META.d1_30, label: "1mo" },
+    d31_60: { ...DAY_AGING_META.d31_60, label: "2mo" },
+    d61_90: { ...DAY_AGING_META.d61_90, label: "3mo" },
+    d91_120: { ...DAY_AGING_META.d91_120, label: "4mo" },
+    older: DAY_AGING_META.older,
+};
+
+function agingMetaFor(bucket: PaymentFollowupAgingBucket, system: AgingSystem) {
+    return (system === "month" ? MONTH_AGING_META : DAY_AGING_META)[bucket];
+}
+
 function daysOverdueLabel(days: number) {
     if (days <= 0) {
         return days === 0 ? "Due today" : `Due in ${Math.abs(days)}d`;
@@ -113,8 +147,20 @@ function daysOverdueLabel(days: number) {
     return `${days}d overdue`;
 }
 
-function AgingBadge({ bucket, days }: { bucket: PaymentFollowupAgingBucket; days: number }) {
-    const meta = AGING_META[bucket];
+// `system` only changes which bucket-label vocabulary is shown (e.g. "1mo"
+// vs "1-30d") — the days-overdue count next to it is always the exact day
+// count regardless of which Aging System is selected, since that's a plain
+// fact about the underlying invoice(s), not a bucket.
+function AgingBadge({
+    bucket,
+    days,
+    system = "day",
+}: {
+    bucket: PaymentFollowupAgingBucket;
+    days: number;
+    system?: AgingSystem;
+}) {
+    const meta = agingMetaFor(bucket, system);
     return (
         <span
             className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-3 py-1 text-xs font-semibold ${meta.badge}`}
@@ -766,12 +812,15 @@ function AgingMatrix({
     totals,
     currencyCode,
     showCustomerColumn,
+    agingSystem,
 }: {
     customers: PaymentFollowupCustomerRow[];
     totals: PaymentFollowupReport["totals"];
     currencyCode: string;
     showCustomerColumn: boolean;
+    agingSystem: AgingSystem;
 }) {
+    const columns = agingColumnsFor(agingSystem);
     const [sortKey, setSortKey] = useState<AgingSortKey>("total");
     const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
 
@@ -807,7 +856,7 @@ function AgingMatrix({
                             {showCustomerColumn ? (
                                 <SortableTh label="Customer" sortKey="customerName" activeKey={sortKey} direction={sortDirection} onSort={handleSort} />
                             ) : null}
-                            {AGING_COLUMNS.map((column) => (
+                            {columns.map((column) => (
                                 <SortableTh
                                     key={column.key}
                                     label={column.label}
@@ -827,7 +876,7 @@ function AgingMatrix({
                                 {showCustomerColumn ? (
                                     <td className="max-w-48 truncate px-3 py-2 font-medium text-(--ink)">{row.customerName}</td>
                                 ) : null}
-                                {AGING_COLUMNS.map((column) => {
+                                {columns.map((column) => {
                                     const amount = row.agingBuckets[column.key];
                                     return (
                                         <td
@@ -847,7 +896,7 @@ function AgingMatrix({
                     <tfoot className="border-t-2 border-(--line) bg-(--chip)/70 font-semibold text-(--ink)">
                         <tr>
                             {showCustomerColumn ? <td className="px-3 py-2.5">Total</td> : null}
-                            {AGING_COLUMNS.map((column) => (
+                            {columns.map((column) => (
                                 <td key={column.key} className="px-3 py-2.5 text-right">
                                     {formatCurrency(totals.agingBuckets[column.key], currencyCode)}
                                 </td>
@@ -866,13 +915,15 @@ function CustomerCard({
     expanded,
     onToggle,
     currencyCode,
+    agingSystem,
 }: {
     row: PaymentFollowupCustomerRow;
     expanded: boolean;
     onToggle: () => void;
     currencyCode: string;
+    agingSystem: AgingSystem;
 }) {
-    const meta = AGING_META[row.agingBucket];
+    const meta = agingMetaFor(row.agingBucket, agingSystem);
 
     return (
         <div className="overflow-hidden rounded-2xl border border-(--line) bg-(--card)">
@@ -885,7 +936,7 @@ function CustomerCard({
                     <span className="min-w-0">
                         <span className="flex flex-wrap items-center gap-2">
                             <span className="truncate font-display text-lg text-(--ink)">{row.customerName}</span>
-                            <AgingBadge bucket={row.agingBucket} days={row.maxDaysOverdue} />
+                            <AgingBadge bucket={row.agingBucket} days={row.maxDaysOverdue} system={agingSystem} />
                         </span>
                         <span className="mt-1 block text-xs text-(--ink-soft)">
                             {row.salespersonName} · {row.phone || "no phone"} · {row.email || "no email"}
@@ -939,6 +990,7 @@ export default function PaymentFollowupPage() {
 
     const [asOfDate, setAsOfDate] = useState(todayISO);
     const [dateBasis, setDateBasis] = useState<"due" | "invoice">("due");
+    const [agingSystem, setAgingSystem] = useState<AgingSystem>("day");
 
     const [selectedSalespersonId, setSelectedSalespersonId] = useState("");
     const [selectedCustomerId, setSelectedCustomerId] = useState("");
@@ -1009,11 +1061,13 @@ export default function PaymentFollowupPage() {
                         salespersonId: Number(selectedSalespersonId),
                         asOfDate,
                         dateBasis,
+                        agingSystem,
                     })
                     : await getPaymentFollowupByCustomer({
                         customerId: Number(selectedCustomerId),
                         asOfDate,
                         dateBasis,
+                        agingSystem,
                     });
 
             setReport(data);
@@ -1138,7 +1192,7 @@ export default function PaymentFollowupPage() {
                     </button>
                 </div>
 
-                <form onSubmit={handleSubmit} className="grid gap-4 md:grid-cols-[2fr_1fr_1fr_auto]">
+                <form onSubmit={handleSubmit} className="grid gap-4 md:grid-cols-[2fr_1fr_1fr_1fr_auto]">
                     {mode === "salesperson" ? (
                         <label className="block">
                             <span className="mb-2 block text-sm font-medium">Salesperson</span>
@@ -1204,6 +1258,28 @@ export default function PaymentFollowupPage() {
                                     }`}
                             >
                                 Invoice Date
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="block">
+                        <span className="mb-2 block text-sm font-medium">Aging System</span>
+                        <div className="inline-flex w-full rounded-xl border border-(--line) bg-white p-1">
+                            <button
+                                type="button"
+                                onClick={() => setAgingSystem("day")}
+                                className={`flex-1 rounded-lg px-3 py-1.5 text-sm font-medium transition ${agingSystem === "day" ? "bg-(--brand) text-white shadow" : "text-(--ink-soft)"
+                                    }`}
+                            >
+                                Day
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setAgingSystem("month")}
+                                className={`flex-1 rounded-lg px-3 py-1.5 text-sm font-medium transition ${agingSystem === "month" ? "bg-(--brand) text-white shadow" : "text-(--ink-soft)"
+                                    }`}
+                            >
+                                Month
                             </button>
                         </div>
                     </div>
@@ -1342,7 +1418,7 @@ export default function PaymentFollowupPage() {
                             <div className="mb-2 flex items-center justify-between">
                                 <h2 className="font-display text-lg">Aged Receivables</h2>
                                 <p className="flex items-center gap-1.5 text-xs text-(--ink-soft)">
-                                    <Calendar className="h-3.5 w-3.5" aria-hidden="true" /> Aged by {report.dateBasis === "invoice" ? "Invoice Date" : "Due Date"} · As of {report.asOfDate}
+                                    <Calendar className="h-3.5 w-3.5" aria-hidden="true" /> Aged by {report.dateBasis === "invoice" ? "Invoice Date" : "Due Date"}, by {report.agingSystem === "month" ? "Month" : "Day"} · As of {report.asOfDate}
                                 </p>
                             </div>
                             <AgingMatrix
@@ -1350,6 +1426,7 @@ export default function PaymentFollowupPage() {
                                 totals={report.totals}
                                 currencyCode={report.currencyCode}
                                 showCustomerColumn={mode === "salesperson"}
+                                agingSystem={report.agingSystem}
                             />
                         </div>
                     ) : null}
@@ -1404,6 +1481,7 @@ export default function PaymentFollowupPage() {
                                     expanded={expandedIds.has(row.customerId)}
                                     onToggle={() => toggleExpanded(row.customerId)}
                                     currencyCode={report.currencyCode}
+                                    agingSystem={report.agingSystem}
                                 />
                             ))}
                         </div>
