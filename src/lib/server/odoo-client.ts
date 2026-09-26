@@ -170,6 +170,7 @@ type ServicedCustomerRow = CustomerSummary & {
     orderCount: number;
     totalSales: number;
     lastSaleDate: string;
+    customerMonthlyTarget: number;
 };
 
 type VisitedCustomerRow = CustomerSummary & {
@@ -179,7 +180,7 @@ type VisitedCustomerRow = CustomerSummary & {
 };
 
 type InactiveCustomerRow = CustomerSummary & {
-    lastVisitDate: string;
+    lastSaleDate: string;
 };
 
 type SalespersonActivityReport = {
@@ -687,6 +688,50 @@ async function getAvailablePartnerFields(
     ];
 }
 
+const CUSTOMER_MONTHLY_TARGET_LABEL = "customer monthly target";
+const CUSTOMER_MONTHLY_TARGET_CANDIDATE_FIELDS = ["customer_target"];
+
+/**
+ * The "Customer Monthly Target" field on the contact's Sales & Purchase tab
+ * is a custom field (this deployment's technical name is `customer_target`).
+ * Tries that known name first, then falls back to matching by label in case
+ * a deployment has it under a different technical name.
+ */
+async function getCustomerMonthlyTargetField(
+    credentials: OdooCredentials,
+    uid: number
+): Promise<string | null> {
+    const candidateFields = await executeKw<Record<string, { string?: string }>>(
+        credentials,
+        uid,
+        "res.partner",
+        "fields_get",
+        [CUSTOMER_MONTHLY_TARGET_CANDIDATE_FIELDS],
+        { attributes: ["string"] }
+    );
+
+    for (const fieldName of CUSTOMER_MONTHLY_TARGET_CANDIDATE_FIELDS) {
+        if (candidateFields[fieldName]) {
+            return fieldName;
+        }
+    }
+
+    const allFields = await executeKw<Record<string, { string?: string }>>(
+        credentials,
+        uid,
+        "res.partner",
+        "fields_get",
+        [],
+        { attributes: ["string"] }
+    );
+
+    const match = Object.entries(allFields).find(
+        ([, meta]) => toDisplayString(meta?.string).trim().toLowerCase() === CUSTOMER_MONTHLY_TARGET_LABEL
+    );
+
+    return match ? match[0] : null;
+}
+
 async function readPartnersByIds(
     credentials: OdooCredentials,
     uid: number,
@@ -712,14 +757,15 @@ async function readPartnersByIds(
 async function getCanonicalCustomerMap(
     credentials: OdooCredentials,
     uid: number,
-    partnerIds: number[]
+    partnerIds: number[],
+    extraFields: string[] = []
 ) {
     const uniquePartnerIds = Array.from(new Set(partnerIds.filter((id) => Number.isFinite(id) && id > 0)));
     if (uniquePartnerIds.length === 0) {
         return new Map<number, Record<string, unknown>>();
     }
 
-    const partnerFields = await getAvailablePartnerFields(credentials, uid);
+    const partnerFields = Array.from(new Set([...(await getAvailablePartnerFields(credentials, uid)), ...extraFields]));
     const directPartners = await readPartnersByIds(credentials, uid, uniquePartnerIds, partnerFields);
     const commercialIds = Array.from(
         new Set(
@@ -2197,8 +2243,9 @@ export async function getSalespersonActivityReport(
     ensureDateRange(startDate, endDate);
     const partnerFields = await getAvailablePartnerFields(credentials, uid);
     const timeZone = await getUserTimezone(credentials, uid);
+    const monthlyTargetField = await getCustomerMonthlyTargetField(credentials, uid);
 
-    const [salespeople, servicedOrders, assignedPartners, crmLeads] = await Promise.all([
+    const [salespeople, servicedOrders, assignedPartners, crmLeads, allSalespersonOrders] = await Promise.all([
         getSalespeople(credentials),
         executeKw<Array<Record<string, unknown>>>(
             credentials,
@@ -2250,6 +2297,24 @@ export async function getSalespersonActivityReport(
                 limit: 20000,
             }
         ),
+        // Unrestricted by date range — used to show how long an assigned but
+        // currently-inactive customer's last sale under this salesperson has been.
+        executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "sale.order",
+            "search_read",
+            [[
+                ["user_id", "=", salespersonId],
+                ["state", "in", ["sale", "done"]],
+                ["partner_id", "!=", false],
+            ]],
+            {
+                fields: ["id", "partner_id", "date_order"],
+                order: "date_order desc",
+                limit: 20000,
+            }
+        ),
     ]);
 
     const salesperson = salespeople.find((item) => item.id === salespersonId);
@@ -2261,9 +2326,15 @@ export async function getSalespersonActivityReport(
         ...servicedOrders.map((order) => getRelationalId(order.partner_id) ?? 0),
         ...assignedPartners.map((partner) => Number(partner.id ?? 0)),
         ...crmLeads.map((lead) => getRelationalId(lead.partner_id) ?? 0),
+        ...allSalespersonOrders.map((order) => getRelationalId(order.partner_id) ?? 0),
     ];
 
-    const canonicalCustomerMap = await getCanonicalCustomerMap(credentials, uid, relevantPartnerIds);
+    const canonicalCustomerMap = await getCanonicalCustomerMap(
+        credentials,
+        uid,
+        relevantPartnerIds,
+        monthlyTargetField ? [monthlyTargetField] : []
+    );
 
     const servicedByCustomerId = new Map<number, ServicedCustomerRow>();
     for (const order of servicedOrders) {
@@ -2282,6 +2353,7 @@ export async function getSalespersonActivityReport(
         const existing = servicedByCustomerId.get(key);
         const orderAmount = Number(order.amount_total ?? 0);
         const lastSaleDate = normalizeOdooDate(order.date_order);
+        const customerMonthlyTarget = monthlyTargetField ? Number(customer[monthlyTargetField] ?? 0) : 0;
 
         if (!existing) {
             servicedByCustomerId.set(key, {
@@ -2289,6 +2361,7 @@ export async function getSalespersonActivityReport(
                 orderCount: 1,
                 totalSales: Number(orderAmount.toFixed(2)),
                 lastSaleDate,
+                customerMonthlyTarget,
             });
             continue;
         }
@@ -2341,10 +2414,9 @@ export async function getSalespersonActivityReport(
     }
 
     const servicedIds = new Set(servicedByCustomerId.keys());
-    const visitedIds = new Set(visitedByCustomerId.keys());
-    const latestVisitByCustomerId = new Map<number, string>();
-    for (const lead of crmLeads) {
-        const partnerId = getRelationalId(lead.partner_id);
+    const lastSaleByCustomerId = new Map<number, string>();
+    for (const order of allSalespersonOrders) {
+        const partnerId = getRelationalId(order.partner_id);
         if (!partnerId) {
             continue;
         }
@@ -2355,18 +2427,14 @@ export async function getSalespersonActivityReport(
         }
 
         const summary = toCustomerSummary(customer, salesperson.name);
-        const activityDate =
-            normalizeOdooDate(lead.date_open) ||
-            normalizeOdooDate(lead.write_date) ||
-            normalizeOdooDate(lead.create_date);
-
-        if (!activityDate) {
+        const saleDate = normalizeOdooDate(order.date_order);
+        if (!saleDate) {
             continue;
         }
 
-        const existing = latestVisitByCustomerId.get(summary.customerId);
-        if (!existing || activityDate > existing) {
-            latestVisitByCustomerId.set(summary.customerId, activityDate);
+        const existing = lastSaleByCustomerId.get(summary.customerId);
+        if (!existing || saleDate > existing) {
+            lastSaleByCustomerId.set(summary.customerId, saleDate);
         }
     }
 
@@ -2376,14 +2444,14 @@ export async function getSalespersonActivityReport(
         const customer = canonicalCustomerMap.get(partnerId) ?? partner;
         const summary = toCustomerSummary(customer, salesperson.name);
 
-        if (servicedIds.has(summary.customerId) || visitedIds.has(summary.customerId)) {
+        if (servicedIds.has(summary.customerId)) {
             continue;
         }
 
         if (!inactiveByCustomerId.has(summary.customerId)) {
             inactiveByCustomerId.set(summary.customerId, {
                 ...summary,
-                lastVisitDate: latestVisitByCustomerId.get(summary.customerId) ?? "",
+                lastSaleDate: lastSaleByCustomerId.get(summary.customerId) ?? "",
             });
         }
     }

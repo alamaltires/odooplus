@@ -150,6 +150,7 @@ export type OdooServicedCustomer = OdooCustomerSummary & {
     orderCount: number;
     totalSales: number;
     lastSaleDate: string;
+    customerMonthlyTarget: number;
 };
 
 export type OdooVisitedCustomer = OdooCustomerSummary & {
@@ -159,7 +160,7 @@ export type OdooVisitedCustomer = OdooCustomerSummary & {
 };
 
 export type OdooInactiveCustomer = OdooCustomerSummary & {
-    lastVisitDate: string;
+    lastSaleDate: string;
 };
 
 export type OdooSalespersonActivityReport = {

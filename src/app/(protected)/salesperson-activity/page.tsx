@@ -15,7 +15,6 @@ import {
     OdooSalesperson,
     OdooSalespersonActivityReport,
     OdooServicedCustomer,
-    OdooVisitedCustomer,
 } from "@/types/odoo";
 
 function todayISO() {
@@ -45,6 +44,34 @@ function formatNumber(value: number) {
 
 function formatCurrency(value: number) {
     return `AED ${formatNumber(value)}`;
+}
+
+function monthlyTargetPercent(row: OdooServicedCustomer) {
+    if (!row.customerMonthlyTarget) {
+        return null;
+    }
+
+    return (row.totalSales / row.customerMonthlyTarget) * 100;
+}
+
+const MONTHLY_TARGET_TONE_CLASSES = {
+    neutral: "bg-(--chip) text-(--ink)",
+    good: "bg-emerald-100 text-emerald-700",
+    warning: "bg-amber-100 text-amber-800",
+    danger: "bg-red-100 text-red-700",
+} as const;
+
+function monthlyTargetTone(percent: number | null): keyof typeof MONTHLY_TARGET_TONE_CLASSES {
+    if (percent === null) {
+        return "neutral";
+    }
+    if (percent >= 100) {
+        return "good";
+    }
+    if (percent >= 75) {
+        return "warning";
+    }
+    return "danger";
 }
 
 function sanitizeFileName(value: string) {
@@ -81,20 +108,23 @@ function ContactCell({ row }: { row: OdooCustomerSummary }) {
     );
 }
 
-function CompactContactCell({ row }: { row: OdooCustomerSummary }) {
-    return (
-        <div className="max-w-44 text-xs leading-5 text-(--ink-soft)">
-            <p className="truncate">{row.email || "-"}</p>
-            <p>{row.phone || "-"}</p>
-            <p className="truncate">{row.city || "-"}</p>
-        </div>
-    );
-}
-
 function MetricPill({ value }: { value: string }) {
     return (
         <span className="inline-flex min-w-16 whitespace-nowrap items-center justify-center rounded-full bg-(--chip) px-3 py-1 text-sm font-medium text-(--ink)">
             {value}
+        </span>
+    );
+}
+
+function MonthlyTargetPill({ row }: { row: OdooServicedCustomer }) {
+    const percent = monthlyTargetPercent(row);
+    const tone = monthlyTargetTone(percent);
+
+    return (
+        <span
+            className={`inline-flex min-w-16 whitespace-nowrap items-center justify-center rounded-full px-3 py-1 text-sm font-medium ${MONTHLY_TARGET_TONE_CLASSES[tone]}`}
+        >
+            {percent === null ? "-" : `${formatNumber(percent)}%`}
         </span>
     );
 }
@@ -203,9 +233,10 @@ function ServicedCustomersTable({ rows }: { rows: OdooServicedCustomer[] }) {
                 <thead className="sticky top-0 z-10 bg-(--chip)">
                     <tr>
                         <th className="px-4 py-3 text-left font-medium">Customer</th>
-                        <th className="w-44 px-4 py-3 text-left font-medium">Contact</th>
                         <th className="px-4 py-3 text-right font-medium">Orders</th>
                         <th className="px-4 py-3 text-right font-medium">Total Sales</th>
+                        <th className="px-4 py-3 text-right font-medium">Customer Monthly Target</th>
+                        <th className="px-4 py-3 text-right font-medium">Target Percentage</th>
                         <th className="px-4 py-3 text-left font-medium">Last Sale</th>
                         <th className="px-4 py-3 text-right font-medium">Action</th>
                     </tr>
@@ -214,12 +245,17 @@ function ServicedCustomersTable({ rows }: { rows: OdooServicedCustomer[] }) {
                     {rows.map((row) => (
                         <tr key={row.customerId}>
                             <td className="px-4 py-3 align-top"><CustomerCell row={row} /></td>
-                            <td className="w-44 px-4 py-3 align-top"><CompactContactCell row={row} /></td>
                             <td className="px-4 py-3 text-right align-top">
                                 <MetricPill value={formatNumber(row.orderCount)} />
                             </td>
                             <td className="px-4 py-3 text-right align-top">
                                 <MetricPill value={formatCurrency(row.totalSales)} />
+                            </td>
+                            <td className="px-4 py-3 text-right align-top">
+                                <MetricPill value={formatCurrency(row.customerMonthlyTarget)} />
+                            </td>
+                            <td className="px-4 py-3 text-right align-top">
+                                <MonthlyTargetPill row={row} />
                             </td>
                             <td className="px-4 py-3 align-top">{formatDateTime(row.lastSaleDate)}</td>
                             <td className="px-4 py-3 text-right align-top"><CustomerReportButton customerId={row.customerId} /></td>
@@ -231,46 +267,9 @@ function ServicedCustomersTable({ rows }: { rows: OdooServicedCustomer[] }) {
     );
 }
 
-function VisitedCustomersTable({ rows }: { rows: OdooVisitedCustomer[] }) {
-    if (rows.length === 0) {
-        return <EmptyState message="No CRM visits were found for this salesperson in the selected period." />;
-    }
-
-    return (
-        <ScrollableTable>
-            <table className="min-w-full divide-y divide-(--line) text-sm">
-                <thead className="sticky top-0 z-10 bg-(--chip)">
-                    <tr>
-                        <th className="px-4 py-3 text-left font-medium">Customer</th>
-                        <th className="px-4 py-3 text-left font-medium">Contact</th>
-                        <th className="px-4 py-3 text-right font-medium">Visits</th>
-                        <th className="px-4 py-3 text-left font-medium">Last Visit</th>
-                        <th className="px-4 py-3 text-left font-medium">CRM Reference</th>
-                        <th className="px-4 py-3 text-right font-medium">Action</th>
-                    </tr>
-                </thead>
-                <tbody className="divide-y divide-(--line) bg-white">
-                    {rows.map((row) => (
-                        <tr key={row.customerId}>
-                            <td className="px-4 py-3 align-top"><CustomerCell row={row} /></td>
-                            <td className="px-4 py-3 align-top"><ContactCell row={row} /></td>
-                            <td className="px-4 py-3 text-right align-top">
-                                <MetricPill value={formatNumber(row.visitCount)} />
-                            </td>
-                            <td className="px-4 py-3 align-top">{formatDateTime(row.lastVisitDate)}</td>
-                            <td className="px-4 py-3 align-top">{row.crmReference || "-"}</td>
-                            <td className="px-4 py-3 text-right align-top"><CustomerReportButton customerId={row.customerId} /></td>
-                        </tr>
-                    ))}
-                </tbody>
-            </table>
-        </ScrollableTable>
-    );
-}
-
 function InactiveCustomersTable({ rows }: { rows: OdooInactiveCustomer[] }) {
     if (rows.length === 0) {
-        return <EmptyState message="Every assigned customer had either a sale or a CRM visit in the selected period." />;
+        return <EmptyState message="Every assigned customer had a sale in the selected period." />;
     }
 
     return (
@@ -280,7 +279,7 @@ function InactiveCustomersTable({ rows }: { rows: OdooInactiveCustomer[] }) {
                     <tr>
                         <th className="px-4 py-3 text-left font-medium">Customer</th>
                         <th className="px-4 py-3 text-left font-medium">Contact</th>
-                        <th className="px-4 py-3 text-left font-medium">Last Visit</th>
+                        <th className="px-4 py-3 text-left font-medium">Last Sale</th>
                         <th className="px-4 py-3 text-right font-medium">Action</th>
                     </tr>
                 </thead>
@@ -289,7 +288,7 @@ function InactiveCustomersTable({ rows }: { rows: OdooInactiveCustomer[] }) {
                         <tr key={row.customerId}>
                             <td className="px-4 py-3 align-top"><CustomerCell row={row} /></td>
                             <td className="px-4 py-3 align-top"><ContactCell row={row} /></td>
-                            <td className="px-4 py-3 align-top">{formatDateTime(row.lastVisitDate)}</td>
+                            <td className="px-4 py-3 align-top">{formatDateTime(row.lastSaleDate)}</td>
                             <td className="px-4 py-3 text-right align-top"><CustomerReportButton customerId={row.customerId} /></td>
                         </tr>
                     ))}
@@ -340,9 +339,8 @@ export default function SalespersonActivityPage() {
     const [report, setReport] = useState<OdooSalespersonActivityReport | null>(null);
     const [reportLoading, setReportLoading] = useState(false);
     const [reportError, setReportError] = useState<string | null>(null);
-    const [exportingTable, setExportingTable] = useState<"serviced" | "visited" | "inactive" | null>(null);
+    const [exportingTable, setExportingTable] = useState<"serviced" | "inactive" | null>(null);
     const [servicedSearch, setServicedSearch] = useState("");
-    const [visitedSearch, setVisitedSearch] = useState("");
     const [inactiveSearch, setInactiveSearch] = useState("");
 
     useEffect(() => {
@@ -388,7 +386,6 @@ export default function SalespersonActivityPage() {
         setReportError(null);
         setReport(null);
         setServicedSearch("");
-        setVisitedSearch("");
         setInactiveSearch("");
 
         try {
@@ -423,14 +420,6 @@ export default function SalespersonActivityPage() {
         return report.servicedCustomers.filter((row) => matchesCustomerSearch(row, servicedSearch));
     }, [report, servicedSearch]);
 
-    const filteredVisitedCustomers = useMemo(() => {
-        if (!report) {
-            return [] as OdooVisitedCustomer[];
-        }
-
-        return report.visitedCustomers.filter((row) => matchesCustomerSearch(row, visitedSearch));
-    }, [report, visitedSearch]);
-
     const filteredInactiveCustomers = useMemo(() => {
         if (!report) {
             return [] as OdooInactiveCustomer[];
@@ -444,14 +433,9 @@ export default function SalespersonActivityPage() {
         [filteredServicedCustomers]
     );
 
-    const visitedCountTotal = useMemo(
-        () => filteredVisitedCustomers.reduce((sum, row) => sum + row.visitCount, 0),
-        [filteredVisitedCustomers]
-    );
-
     async function exportTable(
-        table: "serviced" | "visited" | "inactive",
-        rows: OdooServicedCustomer[] | OdooVisitedCustomer[] | OdooInactiveCustomer[]
+        table: "serviced" | "inactive",
+        rows: OdooServicedCustomer[] | OdooInactiveCustomer[]
     ) {
         if (!report || rows.length === 0) {
             return;
@@ -464,7 +448,6 @@ export default function SalespersonActivityPage() {
             const XLSX = await import("xlsx");
             const tableNameByKey = {
                 serviced: "serviced-customers",
-                visited: "visited-customers",
                 inactive: "inactive-customers",
             } as const;
 
@@ -479,29 +462,19 @@ export default function SalespersonActivityPage() {
                         City: row.city,
                         Orders: row.orderCount,
                         "Total Sales": row.totalSales,
+                        "Customer Monthly Target": row.customerMonthlyTarget,
+                        "Target Percentage": monthlyTargetPercent(row) ?? "",
                         "Last Sale": row.lastSaleDate,
                     }))
-                    : table === "visited"
-                        ? (rows as OdooVisitedCustomer[]).map((row) => ({
-                            "Customer Name": row.customerName,
-                            Salesperson: row.salespersonName,
-                            Email: row.email,
-                            Phone: row.phone,
-                            Address: row.street,
-                            City: row.city,
-                            Visits: row.visitCount,
-                            "Last Visit": row.lastVisitDate,
-                            "CRM Reference": row.crmReference,
-                        }))
-                        : (rows as OdooInactiveCustomer[]).map((row) => ({
-                            "Customer Name": row.customerName,
-                            Salesperson: row.salespersonName,
-                            Email: row.email,
-                            Phone: row.phone,
-                            Address: row.street,
-                            City: row.city,
-                            "Last Visit": row.lastVisitDate,
-                        }));
+                    : (rows as OdooInactiveCustomer[]).map((row) => ({
+                        "Customer Name": row.customerName,
+                        Salesperson: row.salespersonName,
+                        Email: row.email,
+                        Phone: row.phone,
+                        Address: row.street,
+                        City: row.city,
+                        "Last Sale": row.lastSaleDate,
+                    }));
 
             const worksheet = XLSX.utils.json_to_sheet(exportRows);
             const workbook = XLSX.utils.book_new();
@@ -525,7 +498,7 @@ export default function SalespersonActivityPage() {
                 <div>
                     <h1 className="font-display text-3xl">Salesperson Activity Report</h1>
                     <p className="mt-1 text-sm text-(--ink-soft)">
-                        Compare serviced customers, CRM visits, and assigned inactive customers for a selected salesperson.
+                        Compare serviced customers and assigned inactive customers for a selected salesperson.
                     </p>
                 </div>
                 <BarChart3 className="h-8 w-8 text-(--brand)" aria-hidden="true" />
@@ -626,31 +599,8 @@ export default function SalespersonActivityPage() {
                     </TableCard>
 
                     <TableCard
-                        title="Visited Customers From CRM"
-                        description="Customers linked to CRM activity for the selected salesperson during the selected date range."
-                        exportDisabled={filteredVisitedCustomers.length === 0}
-                        exportLoading={exportingTable === "visited"}
-                        onExport={() => void exportTable("visited", filteredVisitedCustomers)}
-                    >
-                        <div className="space-y-3">
-                            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                                <TableSearchInput
-                                    value={visitedSearch}
-                                    onChange={setVisitedSearch}
-                                    placeholder="Search visited customers"
-                                />
-                                <div className="flex flex-wrap items-center gap-3 text-sm text-(--ink-soft)">
-                                    <span>{filteredVisitedCustomers.length} customers</span>
-                                    <MetricPill value={formatNumber(visitedCountTotal)} />
-                                </div>
-                            </div>
-                            <VisitedCustomersTable rows={filteredVisitedCustomers} />
-                        </div>
-                    </TableCard>
-
-                    <TableCard
                         title="Assigned But Inactive Customers"
-                        description="Customers assigned to the salesperson that had neither a sale nor a CRM visit during the selected date range."
+                        description="Customers assigned to the salesperson that had no sale during the selected date range."
                         exportDisabled={filteredInactiveCustomers.length === 0}
                         exportLoading={exportingTable === "inactive"}
                         onExport={() => void exportTable("inactive", filteredInactiveCustomers)}
