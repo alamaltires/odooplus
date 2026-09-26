@@ -3104,7 +3104,7 @@ function emptyAgingTotals(): PaymentFollowupAgingTotals {
 export type PaymentFollowupInvoiceRow = {
     invoiceId: number;
     invoiceNumber: string;
-    moveType: "out_invoice" | "out_refund";
+    moveType: "out_invoice" | "out_refund" | "miscEntry";
     invoiceDate: string;
     dueDate: string;
     paymentTermsName: string;
@@ -3924,6 +3924,17 @@ async function buildPaymentFollowupReport(
     const pdcInfo = pdcLookup.info;
     const pdcDebug = pdcLookup.debug;
 
+    // Every unreconciled receivable-account line on a plain journal entry
+    // (not an invoice/bill/payment — move_type "entry" covers manual
+    // journals like "MISC" or "PDC"), regardless of debit/credit direction:
+    // a negative balance is a credit not yet applied to an invoice (money
+    // already received); a positive balance is a debit not backed by any
+    // invoice at all (e.g. a carried-forward opening balance, or a bounced
+    // cheque re-debited to the customer) — previously excluded entirely by
+    // a `balance < 0` filter here, which silently dropped genuine debt that
+    // only ever existed as a manual journal entry. Split by sign below:
+    // credits keep netting against invoices as unapplied payments; debits
+    // are folded in as invoice-like charges of their own.
     const unappliedLines = await searchReadAll(
         credentials,
         uid,
@@ -3934,7 +3945,7 @@ async function buildPaymentFollowupReport(
             ["move_id.move_type", "=", "entry"],
             receivableTriple,
             ["reconciled", "=", false],
-            ["balance", "<", 0],
+            ["balance", "!=", 0],
         ],
         ["id", "move_id", "date", "balance", "amount_currency", "currency_id"]
     );
@@ -4227,18 +4238,56 @@ async function buildPaymentFollowupReport(
         const currencyId = getRelationalId(line.currency_id);
         const currencyCode = currencyId ? getRelationalName(line.currency_id) || TARGET_CURRENCY_CODE : TARGET_CURRENCY_CODE;
         const amount = Math.abs(Number((currencyId ? line.amount_currency : line.balance) ?? line.balance ?? 0));
-
+        const balance = Number(line.balance ?? 0);
         const row = ensureRow(customerId);
-        row.unappliedPayments.push({
-            id: Number(line.id),
-            date: normalizeOdooDate(line.date),
-            journalName: getRelationalName(move?.journal_id) || "-",
-            reference: toDisplayString(move?.ref) || toDisplayString(move?.name) || "-",
-            amount: Number(amount.toFixed(2)),
-            currencyCode,
-        });
 
-        row.totalUnapplied = Number((row.totalUnapplied + toHomeAmount(amount, currencyId)).toFixed(2));
+        if (balance < 0) {
+            // Credit not yet applied to an invoice (money already received)
+            // — unchanged: shown as an unapplied payment and FIFO-netted
+            // against open invoices/journal-entry charges below.
+            row.unappliedPayments.push({
+                id: Number(line.id),
+                date: normalizeOdooDate(line.date),
+                journalName: getRelationalName(move?.journal_id) || "-",
+                reference: toDisplayString(move?.ref) || toDisplayString(move?.name) || "-",
+                amount: Number(amount.toFixed(2)),
+                currencyCode,
+            });
+            row.totalUnapplied = Number((row.totalUnapplied + toHomeAmount(amount, currencyId)).toFixed(2));
+            continue;
+        }
+
+        // Debit not backed by any invoice (e.g. a carried-forward opening
+        // balance, or a bounced cheque re-debited to the customer) — folded
+        // in as an invoice-like charge (`moveType: "miscEntry"`) so it
+        // ages, buckets, and FIFO-nets exactly like a real invoice instead
+        // of being invisible to the report, as it was before this branch
+        // existed. Aged from the entry's own posting date — a plain
+        // journal entry has no separate due date the way an invoice does.
+        // Its id is negated so it can't collide with a real invoice's id
+        // (a different Odoo table's own sequence) in the maps/keys below.
+        const entryDate = normalizeOdooDate(line.date);
+        const agingMs = entryDate ? new Date(`${entryDate}T00:00:00Z`).getTime() : todayMs;
+        const daysOverdue = Math.round((todayMs - agingMs) / 86400000);
+        const bucket = getAgingBucket(daysOverdue);
+        const matrixBucket = resolveAgingBucket(daysOverdue, entryDate, todayStr, agingSystem);
+        const invoiceId = -Number(line.id);
+
+        row.invoices.push({
+            invoiceId,
+            invoiceNumber: toDisplayString(move?.name) || "-",
+            moveType: "miscEntry",
+            invoiceDate: entryDate,
+            dueDate: entryDate,
+            paymentTermsName: toDisplayString(move?.ref) || "-",
+            amountTotal: Number(amount.toFixed(2)),
+            amountResidual: Number(amount.toFixed(2)),
+            currencyCode,
+            daysOverdue,
+            agingBucket: bucket,
+        });
+        invoiceMatrixBucketById.set(invoiceId, matrixBucket);
+        invoiceHomeResidualById.set(invoiceId, toHomeAmount(amount, currencyId));
     }
 
     if (pdcInfo) {
@@ -4317,7 +4366,11 @@ async function buildPaymentFollowupReport(
         // e.g. all of it comes off "Older" before touching "1-30" if that's
         // where the oldest debt actually is.
         const openInvoicesOldestFirst = row.invoices
-            .filter((invoice) => invoice.moveType === "out_invoice" && invoice.amountResidual > 0)
+            .filter(
+                (invoice) =>
+                    (invoice.moveType === "out_invoice" || invoice.moveType === "miscEntry") &&
+                    invoice.amountResidual > 0
+            )
             .slice()
             .sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : 0));
 

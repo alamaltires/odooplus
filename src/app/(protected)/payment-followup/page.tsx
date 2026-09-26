@@ -531,10 +531,16 @@ function InvoicesTable({ rows, currencyCode }: { rows: PaymentFollowupCustomerRo
                                                 <span
                                                     className={`mt-0.5 inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${row.moveType === "out_refund"
                                                         ? "bg-emerald-100 text-emerald-800"
-                                                        : "bg-(--chip) text-(--ink-soft)"
+                                                        : row.moveType === "miscEntry"
+                                                            ? "bg-sky-100 text-sky-800"
+                                                            : "bg-(--chip) text-(--ink-soft)"
                                                         }`}
                                                 >
-                                                    {row.moveType === "out_refund" ? "Credit Note" : "Invoice"}
+                                                    {row.moveType === "out_refund"
+                                                        ? "Credit Note"
+                                                        : row.moveType === "miscEntry"
+                                                            ? "Journal Entry"
+                                                            : "Invoice"}
                                                 </span>
                                             </td>
                                             <td className="px-3 py-2 align-top text-(--ink-soft)">{formatDate(row.invoiceDate)}</td>
@@ -1122,7 +1128,7 @@ export default function PaymentFollowupPage() {
                         Phone: customer.phone,
                         Email: customer.email,
                         Document: invoice.invoiceNumber,
-                        Type: invoice.moveType === "out_refund" ? "Credit Note" : "Invoice",
+                        Type: invoice.moveType === "out_refund" ? "Credit Note" : invoice.moveType === "miscEntry" ? "Journal Entry" : "Invoice",
                         "Invoice Date": invoice.invoiceDate,
                         "Due Date": invoice.dueDate,
                         "Payment Terms": invoice.paymentTermsName,
@@ -1192,7 +1198,8 @@ export default function PaymentFollowupPage() {
                     </button>
                 </div>
 
-                <form onSubmit={handleSubmit} className="grid gap-4 md:grid-cols-[2fr_1fr_1fr_1fr_auto]">
+                <form onSubmit={handleSubmit} className="space-y-4">
+                    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                     {mode === "salesperson" ? (
                         <label className="block">
                             <span className="mb-2 block text-sm font-medium">Salesperson</span>
@@ -1283,8 +1290,9 @@ export default function PaymentFollowupPage() {
                             </button>
                         </div>
                     </div>
+                    </div>
 
-                    <div className="flex items-end">
+                    <div className="flex justify-end">
                         <button
                             type="submit"
                             disabled={
@@ -1293,7 +1301,7 @@ export default function PaymentFollowupPage() {
                                 !asOfDate ||
                                 (mode === "salesperson" ? !selectedSalespersonId : !selectedCustomerId)
                             }
-                            className="w-full rounded-xl bg-(--brand) px-5 py-2.5 font-medium text-white disabled:cursor-not-allowed disabled:opacity-70 md:w-auto"
+                            className="w-full rounded-xl bg-(--brand) px-5 py-2.5 font-medium text-white disabled:cursor-not-allowed disabled:opacity-70 sm:w-auto"
                         >
                             {reportLoading ? "Checking..." : "Check Payments"}
                         </button>

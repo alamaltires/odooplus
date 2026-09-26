@@ -308,7 +308,12 @@ export type PaymentFollowupAgingTotals = {
 export type PaymentFollowupInvoiceRow = {
     invoiceId: number;
     invoiceNumber: string;
-    moveType: "out_invoice" | "out_refund";
+    // `miscEntry` is a plain journal entry (not an invoice/bill/payment —
+    // e.g. a carried-forward opening balance, or a bounced-cheque re-debit)
+    // whose unreconciled receivable-account debit isn't backed by any
+    // invoice — folded in here so it still ages, buckets, and nets FIFO
+    // exactly like a real invoice instead of being invisible to the report.
+    moveType: "out_invoice" | "out_refund" | "miscEntry";
     invoiceDate: string;
     dueDate: string;
     paymentTermsName: string;
