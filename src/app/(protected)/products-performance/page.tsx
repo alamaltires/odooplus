@@ -4,6 +4,7 @@ import { Fragment, FormEvent, UIEvent, useEffect, useMemo, useRef, useState } fr
 import { ChevronDown, ChevronRight, Download, Search, TrendingUp } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { Select2 } from "@/components/select2";
+import { resolveExactNameMatch } from "@/lib/combobox-match";
 import {
     getProductBrands,
     getProductCategories,
@@ -359,7 +360,19 @@ export default function ProductsPerformancePage() {
         return brands.filter((brand) => brand.name.toLowerCase().includes(query));
     }, [brandQuery, brands]);
 
-    const hasAnyScanner = Boolean(selectedPurchaseOrder || selectedProduct || selectedBrand || selectedCategory);
+    // Typed-but-unclicked text still counts as intent to filter — it gets
+    // resolved to a match (or dropped) inside handleGenerate, so the button
+    // shouldn't be disabled just because the user never clicked a dropdown row.
+    const hasAnyScanner = Boolean(
+        selectedPurchaseOrder ||
+        selectedProduct ||
+        selectedBrand ||
+        selectedCategory ||
+        poQuery.trim() ||
+        productQuery.trim() ||
+        brandQuery.trim() ||
+        categoryQuery.trim()
+    );
 
     const filteredSortedRows = useMemo(() => {
         if (!report) {
@@ -398,10 +411,110 @@ export default function ProductsPerformancePage() {
         return `products-performance-${sanitizeFileName(scope)}-${startDate}-to-${endDate}`;
     }, [endDate, selectedBrand?.name, selectedCategory?.name, selectedProduct?.name, selectedPurchaseOrder?.name, startDate]);
 
+    // Resolves a scanner field that was typed but never clicked: an exact
+    // (case/whitespace-insensitive) name match against whatever's already
+    // fetched, falling back to one fresh direct search for the async fields
+    // (results can still be mid-debounce the moment Generate is clicked).
+    async function resolvePurchaseOrderSelection(): Promise<PurchaseOrderOption | null> {
+        if (selectedPurchaseOrder) {
+            return selectedPurchaseOrder;
+        }
+        const trimmed = poQuery.trim();
+        if (!trimmed) {
+            return null;
+        }
+
+        const localMatch = resolveExactNameMatch(trimmed, poResults);
+        if (localMatch) {
+            return localMatch;
+        }
+
+        try {
+            const data = await searchPurchaseOrders({ query: trimmed, limit: SEARCH_PAGE_SIZE, offset: 0 });
+            return resolveExactNameMatch(trimmed, data.purchaseOrders);
+        } catch {
+            return null;
+        }
+    }
+
+    async function resolveProductSelection(): Promise<ProductOption | null> {
+        if (selectedProduct) {
+            return selectedProduct;
+        }
+        const trimmed = productQuery.trim();
+        if (!trimmed) {
+            return null;
+        }
+
+        const localMatch = resolveExactNameMatch(trimmed, productResults);
+        if (localMatch) {
+            return localMatch;
+        }
+
+        try {
+            const data = await getProducts({ query: trimmed, limit: SEARCH_PAGE_SIZE, offset: 0 });
+            return resolveExactNameMatch(trimmed, data.products);
+        } catch {
+            return null;
+        }
+    }
+
+    function resolveBrandSelection(): Brand | null {
+        return selectedBrand ?? resolveExactNameMatch(brandQuery, brands);
+    }
+
+    function resolveCategorySelection(): Category | null {
+        return selectedCategory ?? resolveExactNameMatch(categoryQuery, categories);
+    }
+
     async function handleGenerate(event: FormEvent) {
         event.preventDefault();
-        if (!hasAnyScanner) {
+
+        const [resolvedPurchaseOrder, resolvedProduct] = await Promise.all([
+            resolvePurchaseOrderSelection(),
+            resolveProductSelection(),
+        ]);
+        const resolvedBrand = resolveBrandSelection();
+        const resolvedCategory = resolveCategorySelection();
+
+        if (!resolvedPurchaseOrder && !resolvedProduct && !resolvedBrand && !resolvedCategory) {
             return;
+        }
+
+        // Reflect the resolution back into the visible fields/state — same
+        // as if the user had clicked the matching row themselves.
+        let effectiveStartDate = startDate;
+        let effectiveEndDate = endDate;
+        if (resolvedPurchaseOrder !== selectedPurchaseOrder) {
+            setSelectedPurchaseOrder(resolvedPurchaseOrder);
+            if (resolvedPurchaseOrder) {
+                setPoQuery(resolvedPurchaseOrder.name);
+                if (resolvedPurchaseOrder.dateOrder.length >= 10) {
+                    const poDate = resolvedPurchaseOrder.dateOrder.slice(0, 10);
+                    effectiveStartDate = poDate;
+                    effectiveEndDate = endDate < poDate ? todayISO() : endDate;
+                    setStartDate(effectiveStartDate);
+                    setEndDate(effectiveEndDate);
+                }
+            }
+        }
+        if (resolvedProduct !== selectedProduct) {
+            setSelectedProduct(resolvedProduct);
+            if (resolvedProduct) {
+                setProductQuery(resolvedProduct.name);
+            }
+        }
+        if (resolvedBrand !== selectedBrand) {
+            setSelectedBrand(resolvedBrand);
+            if (resolvedBrand) {
+                setBrandQuery(resolvedBrand.name);
+            }
+        }
+        if (resolvedCategory !== selectedCategory) {
+            setSelectedCategory(resolvedCategory);
+            if (resolvedCategory) {
+                setCategoryQuery(resolvedCategory.name);
+            }
         }
 
         setReportLoading(true);
@@ -411,12 +524,12 @@ export default function ProductsPerformancePage() {
 
         try {
             const data = await getProductsPerformanceReport({
-                purchaseOrderId: selectedPurchaseOrder?.id,
-                productId: selectedProduct?.id,
-                brandId: selectedBrand?.id,
-                categoryId: selectedCategory?.id,
-                startDate,
-                endDate,
+                purchaseOrderId: resolvedPurchaseOrder?.id,
+                productId: resolvedProduct?.id,
+                brandId: resolvedBrand?.id,
+                categoryId: resolvedCategory?.id,
+                startDate: effectiveStartDate,
+                endDate: effectiveEndDate,
                 dateBasis,
             });
 

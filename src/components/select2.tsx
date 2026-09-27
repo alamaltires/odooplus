@@ -110,6 +110,21 @@ export function Select2({
         setOpen(false);
     }
 
+    // A pasted (or typed-down-to-unique) value that narrows the list to
+    // exactly one match locks in that option immediately — without this, a
+    // pasted SKU/lot/reference left the field showing the right single match
+    // but still unselected until the user clicked it, which is needless
+    // friction for what is, for the user, already an unambiguous choice.
+    useEffect(() => {
+        if (!open || !query.trim() || filteredOptions.length !== 1) return;
+
+        const [onlyMatch] = filteredOptions;
+        if (onlyMatch.disabled || onlyMatch.value === value) return;
+
+        selectOption(onlyMatch);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [query, filteredOptions, value]);
+
     function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
         if (event.key === "ArrowDown") {
             event.preventDefault();

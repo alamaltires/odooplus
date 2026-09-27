@@ -289,6 +289,18 @@ export function getRimDiameters() {
     }>("/api/odoo/rim-diameters", {});
 }
 
+export function getPurchaseOrderTypes() {
+    return post<{
+        options: Array<{ value: string; label: string }>;
+    }>("/api/odoo/purchase-order-types", {});
+}
+
+export function getSaleOrderTypes() {
+    return post<{
+        options: Array<{ value: string; label: string }>;
+    }>("/api/odoo/sale-order-types", {});
+}
+
 export function searchUnifiedLots(input: { query: string; limit?: number; offset?: number }) {
     return post<{
         unifiedLots: Array<{
@@ -309,6 +321,10 @@ export function getMarginAnalyticsReport(input: {
     rimDiameterIds?: number[] | null;
     unifiedLotIds?: number[] | null;
     productId?: number | null;
+    excludePurchaseTypeValues?: string[] | null;
+    excludeSaleTypeValue?: string | null;
+    excludeCustomerIds?: number[] | null;
+    excludeDropshipPurchases?: boolean | null;
     startDate: string;
     endDate: string;
     dateBasis?: "order" | "transaction" | null;
@@ -399,6 +415,10 @@ export type MarginBreakdown = {
 export function getMarginAnalyticsBreakdown(input: {
     productId: number;
     unifiedLotIds?: number[] | null;
+    excludePurchaseTypeValues?: string[] | null;
+    excludeSaleTypeValue?: string | null;
+    excludeCustomerIds?: number[] | null;
+    excludeDropshipPurchases?: boolean | null;
     startDate: string;
     endDate: string;
     dateBasis?: "order" | "transaction" | null;

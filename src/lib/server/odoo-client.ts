@@ -732,6 +732,173 @@ async function getCustomerMonthlyTargetField(
     return match ? match[0] : null;
 }
 
+type DiscoveredTypeField =
+    | { kind: "selection"; fieldName: string; options: Array<{ value: string; label: string }> }
+    // Covers both Many2one and Many2many — a plain id list "in" domain leaf
+    // and an id-based options fetch work identically for either shape.
+    | { kind: "relational"; fieldName: string; relation: string };
+
+type TypeFieldSpec = {
+    /** Known technical field name(s) to try first, e.g. `["type_ids"]`. */
+    candidateFieldNames: string[];
+    /** Label(s) to fall back to matching against `fields_get`'s `string`
+     * attribute, for a deployment where the technical name differs. */
+    labels: string[];
+};
+
+// `type_ids` (Many2many — multiple purchase types can apply to one PO).
+const PURCHASE_TYPE_FIELD_SPEC: TypeFieldSpec = {
+    candidateFieldNames: ["type_ids"],
+    labels: ["Purchase Type"],
+};
+
+// `type_id` (Many2one — a sale order has exactly one sale type).
+const SALE_TYPE_FIELD_SPEC: TypeFieldSpec = {
+    candidateFieldNames: ["type_id"],
+    labels: ["Sale Type", "Sales Type"],
+};
+
+function toDiscoveredTypeField(
+    fieldName: string,
+    meta: { string?: string; selection?: Array<[string, string]>; type?: string; relation?: string }
+): DiscoveredTypeField {
+    if ((meta.type === "many2one" || meta.type === "many2many") && meta.relation) {
+        return { kind: "relational", fieldName, relation: meta.relation };
+    }
+
+    const options = Array.isArray(meta.selection)
+        ? meta.selection.map(([value, label]) => ({ value: String(value), label: toDisplayString(label) || String(value) }))
+        : [];
+    return { kind: "selection", fieldName, options };
+}
+
+/**
+ * Finds a model's own classification field ("Purchase Type", "Sale Type",
+ * etc.) — a per-deployment custom field (Selection, Many2one, or Many2many
+ * to a small "type" model). Tries the known technical name(s) first, then
+ * falls back to matching by label for a deployment that named it differently.
+ */
+async function discoverTypeField(
+    credentials: OdooCredentials,
+    uid: number,
+    model: string,
+    spec: TypeFieldSpec
+): Promise<DiscoveredTypeField | null> {
+    if (spec.candidateFieldNames.length > 0) {
+        const candidateFields = await executeKw<
+            Record<string, { string?: string; selection?: Array<[string, string]>; type?: string; relation?: string }>
+        >(credentials, uid, model, "fields_get", [spec.candidateFieldNames], {
+            attributes: ["string", "selection", "type", "relation"],
+        });
+
+        for (const fieldName of spec.candidateFieldNames) {
+            if (candidateFields[fieldName]) {
+                return toDiscoveredTypeField(fieldName, candidateFields[fieldName]);
+            }
+        }
+    }
+
+    if (spec.labels.length === 0) {
+        return null;
+    }
+
+    const fields = await executeKw<
+        Record<string, { string?: string; selection?: Array<[string, string]>; type?: string; relation?: string }>
+    >(credentials, uid, model, "fields_get", [], { attributes: ["string", "selection", "type", "relation"] });
+
+    const normalizedLabels = spec.labels.map((label) => label.trim().toLowerCase());
+    const match = Object.entries(fields).find(([, meta]) =>
+        normalizedLabels.includes(toDisplayString(meta?.string).trim().toLowerCase())
+    );
+    return match ? toDiscoveredTypeField(match[0], match[1]) : null;
+}
+
+async function getTypeFieldOptions(
+    credentials: OdooCredentials,
+    uid: number,
+    model: string,
+    spec: TypeFieldSpec
+): Promise<Array<{ value: string; label: string }>> {
+    const field = await discoverTypeField(credentials, uid, model, spec);
+    if (!field) {
+        return [];
+    }
+    if (field.kind === "selection") {
+        return field.options;
+    }
+
+    const records = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        field.relation,
+        "search_read",
+        [[]],
+        { fields: ["id", "name"], order: "name asc", limit: 1000 }
+    );
+    return records.map((record) => ({
+        value: String(record.id ?? ""),
+        label: toDisplayString(record.name) || `#${String(record.id ?? "")}`,
+    }));
+}
+
+/**
+ * Resolves a chosen set of type-field values into the concrete order ids
+ * that match them — a plain id list is unambiguous and reusable across every
+ * domain that needs to exclude those orders, whether reached directly or
+ * through a one2many hop (e.g. an invoice line's linked sale order), and
+ * "in" behaves the same whether the field itself is Many2one or Many2many.
+ */
+async function findOrderIdsMatchingTypeField(
+    credentials: OdooCredentials,
+    uid: number,
+    model: string,
+    spec: TypeFieldSpec,
+    values: string[]
+): Promise<number[] | null> {
+    if (values.length === 0) {
+        return null;
+    }
+
+    const field = await discoverTypeField(credentials, uid, model, spec);
+    if (!field) {
+        return null;
+    }
+
+    const domainValue = field.kind === "relational" ? values.map(Number).filter((id) => Number.isFinite(id) && id > 0) : values;
+    if (domainValue.length === 0) {
+        return null;
+    }
+
+    return executeKw<number[]>(credentials, uid, model, "search", [[[field.fieldName, "in", domainValue]]]);
+}
+
+/**
+ * Purchase orders whose Deliver To (`picking_type_id`) is a Dropship
+ * operation type — the stock_dropshipping module sets `code = "dropship"` on
+ * that picking type, which is stable across deployments; a name-based
+ * fallback covers instances that renamed or don't set that code.
+ */
+async function findDropshipPickingTypeIds(credentials: OdooCredentials, uid: number): Promise<number[]> {
+    const byCode = await executeKw<number[]>(
+        credentials,
+        uid,
+        "stock.picking.type",
+        "search",
+        [[["code", "=", "dropship"]]]
+    );
+    if (byCode.length > 0) {
+        return byCode;
+    }
+
+    return executeKw<number[]>(
+        credentials,
+        uid,
+        "stock.picking.type",
+        "search",
+        [[["name", "ilike", "dropship"]]]
+    );
+}
+
 async function readPartnersByIds(
     credentials: OdooCredentials,
     uid: number,
@@ -5914,6 +6081,17 @@ export async function getMarginAnalyticsReport(
         rimDiameterIds?: number[] | null;
         unifiedLotIds?: number[] | null;
         productId?: number | null;
+        /** Purchase orders of these types (Odoo's own "Purchase Type" field
+         * values) are excluded from the purchase-side figures entirely. */
+        excludePurchaseTypeValues?: string[] | null;
+        /** Sale orders of this type (Odoo's own "Sale Type"/"Sales Type"
+         * field) are excluded from the sales-side figures entirely. */
+        excludeSaleTypeValue?: string | null;
+        /** Sales to these customers are excluded from the sales-side figures. */
+        excludeCustomerIds?: number[] | null;
+        /** Purchase orders whose Deliver To is a Dropship operation type are
+         * excluded from the purchase-side figures entirely. */
+        excludeDropshipPurchases?: boolean | null;
         startDate: string;
         endDate: string;
         /**
@@ -5955,6 +6133,15 @@ export async function getMarginAnalyticsReport(
     if (!hasCategory && !hasBrand && !hasOrigin && !hasRimDiameter && !hasUnifiedLot && !hasProduct) {
         throw new Error("Select at least one filter: category, brand, origin, rim diameter, unified lot, or product.");
     }
+
+    const excludePurchaseTypeValues = Array.isArray(input.excludePurchaseTypeValues)
+        ? Array.from(new Set(input.excludePurchaseTypeValues.map((value) => String(value)).filter(Boolean)))
+        : [];
+    const excludeSaleTypeValue = toDisplayString(input.excludeSaleTypeValue).trim() || null;
+    const excludeCustomerIds = Array.isArray(input.excludeCustomerIds)
+        ? Array.from(new Set(input.excludeCustomerIds.map(Number).filter((id) => Number.isFinite(id) && id > 0)))
+        : [];
+    const excludeDropshipPurchases = Boolean(input.excludeDropshipPurchases);
 
     const startDate = input.startDate;
     const endDate = input.endDate;
@@ -6320,6 +6507,19 @@ export async function getMarginAnalyticsReport(
     // product's entire purchase history.
     const unifiedLotOrderIdsArray = unifiedLotOrderIds ? Array.from(unifiedLotOrderIds) : null;
 
+    // Exclusion filters resolve to plain id lists up front — unambiguous
+    // whether a domain later reaches the order directly (purchase.order.line
+    // -> order_id) or through a one2many hop (an invoice line's own
+    // sale_line_ids -> order_id), unlike a dotted field-value comparison
+    // which behaves differently across those two shapes.
+    const [excludedPurchaseOrderIds, excludedSaleOrderIds, dropshipPickingTypeIds] = await Promise.all([
+        findOrderIdsMatchingTypeField(credentials, uid, "purchase.order", PURCHASE_TYPE_FIELD_SPEC, excludePurchaseTypeValues),
+        excludeSaleTypeValue
+            ? findOrderIdsMatchingTypeField(credentials, uid, "sale.order", SALE_TYPE_FIELD_SPEC, [excludeSaleTypeValue])
+            : Promise.resolve(null),
+        excludeDropshipPurchases ? findDropshipPickingTypeIds(credentials, uid) : Promise.resolve([]),
+    ]);
+
     if (dateBasis === "transaction") {
         // Step 1 (transaction basis): purchase price scoped by the actual
         // goods-receipt date — `stock.move.date`, which Odoo docs as
@@ -6342,6 +6542,12 @@ export async function getMarginAnalyticsReport(
         ];
         if (unifiedLotOrderIdsArray) {
             receiptMoveDomain.push(["purchase_line_id.order_id", "in", unifiedLotOrderIdsArray]);
+        }
+        if (excludedPurchaseOrderIds && excludedPurchaseOrderIds.length > 0) {
+            receiptMoveDomain.push(["purchase_line_id.order_id", "not in", excludedPurchaseOrderIds]);
+        }
+        if (excludeDropshipPurchases && dropshipPickingTypeIds.length > 0) {
+            receiptMoveDomain.push(["purchase_line_id.order_id.picking_type_id", "not in", dropshipPickingTypeIds]);
         }
         const receiptMoves = await executeKw<Array<Record<string, unknown>>>(
             credentials,
@@ -6433,6 +6639,12 @@ export async function getMarginAnalyticsReport(
         ];
         if (unifiedLotOrderIdsArray) {
             purchaseLineDomain.push(["order_id", "in", unifiedLotOrderIdsArray]);
+        }
+        if (excludedPurchaseOrderIds && excludedPurchaseOrderIds.length > 0) {
+            purchaseLineDomain.push(["order_id", "not in", excludedPurchaseOrderIds]);
+        }
+        if (excludeDropshipPurchases && dropshipPickingTypeIds.length > 0) {
+            purchaseLineDomain.push(["order_id.picking_type_id", "not in", dropshipPickingTypeIds]);
         }
         const purchaseLines = await executeKw<Array<Record<string, unknown>>>(
             credentials,
@@ -6808,6 +7020,12 @@ export async function getMarginAnalyticsReport(
         if (unifiedLotSaleLineIds) {
             invoiceLineDomain.push(["sale_line_ids", "in", Array.from(unifiedLotSaleLineIds)]);
         }
+        if (excludedSaleOrderIds && excludedSaleOrderIds.length > 0) {
+            invoiceLineDomain.push(["sale_line_ids.order_id", "not in", excludedSaleOrderIds]);
+        }
+        if (excludeCustomerIds.length > 0) {
+            invoiceLineDomain.push(["partner_id", "not in", excludeCustomerIds]);
+        }
         const invoiceLines = await executeKw<Array<Record<string, unknown>>>(
             credentials,
             uid,
@@ -6855,6 +7073,12 @@ export async function getMarginAnalyticsReport(
         ];
         if (unifiedLotSaleLineIds) {
             saleLineDomain.push(["id", "in", Array.from(unifiedLotSaleLineIds)]);
+        }
+        if (excludedSaleOrderIds && excludedSaleOrderIds.length > 0) {
+            saleLineDomain.push(["order_id", "not in", excludedSaleOrderIds]);
+        }
+        if (excludeCustomerIds.length > 0) {
+            saleLineDomain.push(["order_id.partner_id", "not in", excludeCustomerIds]);
         }
         const saleLines = await executeKw<Array<Record<string, unknown>>>(
             credentials,
@@ -7113,6 +7337,10 @@ export async function getMarginAnalyticsBreakdown(
     input: {
         productId: number;
         unifiedLotIds?: number[] | null;
+        excludePurchaseTypeValues?: string[] | null;
+        excludeSaleTypeValue?: string | null;
+        excludeCustomerIds?: number[] | null;
+        excludeDropshipPurchases?: boolean | null;
         startDate: string;
         endDate: string;
         dateBasis?: "order" | "transaction" | null;
@@ -7133,6 +7361,23 @@ export async function getMarginAnalyticsBreakdown(
         ? Array.from(new Set(input.unifiedLotIds.map(Number).filter((id) => Number.isFinite(id) && id > 0)))
         : [];
     const hasUnifiedLot = unifiedLotIds.length > 0;
+
+    const excludePurchaseTypeValues = Array.isArray(input.excludePurchaseTypeValues)
+        ? Array.from(new Set(input.excludePurchaseTypeValues.map((value) => String(value)).filter(Boolean)))
+        : [];
+    const excludeSaleTypeValue = toDisplayString(input.excludeSaleTypeValue).trim() || null;
+    const excludeCustomerIds = Array.isArray(input.excludeCustomerIds)
+        ? Array.from(new Set(input.excludeCustomerIds.map(Number).filter((id) => Number.isFinite(id) && id > 0)))
+        : [];
+    const excludeDropshipPurchases = Boolean(input.excludeDropshipPurchases);
+
+    const [excludedPurchaseOrderIds, excludedSaleOrderIds, dropshipPickingTypeIds] = await Promise.all([
+        findOrderIdsMatchingTypeField(credentials, uid, "purchase.order", PURCHASE_TYPE_FIELD_SPEC, excludePurchaseTypeValues),
+        excludeSaleTypeValue
+            ? findOrderIdsMatchingTypeField(credentials, uid, "sale.order", SALE_TYPE_FIELD_SPEC, [excludeSaleTypeValue])
+            : Promise.resolve(null),
+        excludeDropshipPurchases ? findDropshipPickingTypeIds(credentials, uid) : Promise.resolve([]),
+    ]);
 
     const productRows = await executeKw<Array<Record<string, unknown>>>(
         credentials,
@@ -7331,6 +7576,12 @@ export async function getMarginAnalyticsBreakdown(
         if (unifiedLotOrderIds) {
             receiptDomain.push(["purchase_line_id.order_id", "in", unifiedLotOrderIds]);
         }
+        if (excludedPurchaseOrderIds && excludedPurchaseOrderIds.length > 0) {
+            receiptDomain.push(["purchase_line_id.order_id", "not in", excludedPurchaseOrderIds]);
+        }
+        if (excludeDropshipPurchases && dropshipPickingTypeIds.length > 0) {
+            receiptDomain.push(["purchase_line_id.order_id.picking_type_id", "not in", dropshipPickingTypeIds]);
+        }
         const receiptMoves = await searchReadAll(
             credentials,
             uid,
@@ -7414,6 +7665,12 @@ export async function getMarginAnalyticsBreakdown(
         ];
         if (unifiedLotOrderIds) {
             purchaseDomain.push(["order_id", "in", unifiedLotOrderIds]);
+        }
+        if (excludedPurchaseOrderIds && excludedPurchaseOrderIds.length > 0) {
+            purchaseDomain.push(["order_id", "not in", excludedPurchaseOrderIds]);
+        }
+        if (excludeDropshipPurchases && dropshipPickingTypeIds.length > 0) {
+            purchaseDomain.push(["order_id.picking_type_id", "not in", dropshipPickingTypeIds]);
         }
         const poLines = await searchReadAll(
             credentials,
@@ -7723,6 +7980,12 @@ export async function getMarginAnalyticsBreakdown(
         if (unifiedLotSaleLineIds) {
             invoiceDomain.push(["sale_line_ids", "in", unifiedLotSaleLineIds]);
         }
+        if (excludedSaleOrderIds && excludedSaleOrderIds.length > 0) {
+            invoiceDomain.push(["sale_line_ids.order_id", "not in", excludedSaleOrderIds]);
+        }
+        if (excludeCustomerIds.length > 0) {
+            invoiceDomain.push(["partner_id", "not in", excludeCustomerIds]);
+        }
         const invoiceLines = await searchReadAll(
             credentials,
             uid,
@@ -7763,6 +8026,12 @@ export async function getMarginAnalyticsBreakdown(
         ];
         if (unifiedLotSaleLineIds) {
             saleDomain.push(["id", "in", unifiedLotSaleLineIds]);
+        }
+        if (excludedSaleOrderIds && excludedSaleOrderIds.length > 0) {
+            saleDomain.push(["order_id", "not in", excludedSaleOrderIds]);
+        }
+        if (excludeCustomerIds.length > 0) {
+            saleDomain.push(["order_id.partner_id", "not in", excludeCustomerIds]);
         }
         const saleLines = await searchReadAll(
             credentials,
@@ -7959,6 +8228,22 @@ export async function getRimDiameters(credentials: OdooCredentials): Promise<Arr
     return rimDiameters
         .map((rimDiameter) => ({ id: Number(rimDiameter.id), name: String(rimDiameter.name ?? "") }))
         .filter((rimDiameter) => rimDiameter.id > 0 && rimDiameter.name);
+}
+
+export async function getPurchaseOrderTypes(
+    credentials: OdooCredentials
+): Promise<{ options: Array<{ value: string; label: string }> }> {
+    const uid = await authenticate(credentials);
+    const options = await getTypeFieldOptions(credentials, uid, "purchase.order", PURCHASE_TYPE_FIELD_SPEC);
+    return { options };
+}
+
+export async function getSaleOrderTypes(
+    credentials: OdooCredentials
+): Promise<{ options: Array<{ value: string; label: string }> }> {
+    const uid = await authenticate(credentials);
+    const options = await getTypeFieldOptions(credentials, uid, "sale.order", SALE_TYPE_FIELD_SPEC);
+    return { options };
 }
 
 export async function getUnifiedLots(

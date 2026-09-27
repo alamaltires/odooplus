@@ -13,6 +13,10 @@ export async function POST(request: Request) {
             rimDiameterIds?: number[] | null;
             unifiedLotIds?: number[] | null;
             productId?: number | null;
+            excludePurchaseTypeValues?: string[] | null;
+            excludeSaleTypeValue?: string | null;
+            excludeCustomerIds?: number[] | null;
+            excludeDropshipPurchases?: boolean | null;
             startDate: string;
             endDate: string;
             dateBasis?: "order" | "transaction" | null;

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Download, FileSpreadsheet, Search } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { Select2 } from "@/components/select2";
+import { resolveExactNameMatch } from "@/lib/combobox-match";
 import { getProductBrands, getProductCategories, getPurchaseOrderReport } from "@/lib/client-odoo";
 
 type Category = {
@@ -239,8 +240,26 @@ export default function PurchaseOrderPage() {
 
     async function handleGenerateReport(event: FormEvent) {
         event.preventDefault();
-        if (!user || (!selectedCategory && !selectedBrand)) {
+        if (!user) {
             return;
+        }
+
+        // Typed-but-unclicked text is resolved to an exact name match here,
+        // so the user isn't forced to click the dropdown row for it to count.
+        const resolvedCategory = selectedCategory ?? resolveExactNameMatch(categoryQuery, categories);
+        const resolvedBrand = selectedBrand ?? resolveExactNameMatch(brandQuery, brands);
+
+        if (!resolvedCategory && !resolvedBrand) {
+            return;
+        }
+
+        if (resolvedCategory !== selectedCategory) {
+            setSelectedCategory(resolvedCategory);
+            if (resolvedCategory) setCategoryQuery(resolvedCategory.name);
+        }
+        if (resolvedBrand !== selectedBrand) {
+            setSelectedBrand(resolvedBrand);
+            if (resolvedBrand) setBrandQuery(resolvedBrand.name);
         }
 
         setReportLoading(true);
@@ -250,9 +269,9 @@ export default function PurchaseOrderPage() {
 
         try {
             const data = await getPurchaseOrderReport({
-                categoryId: selectedCategory?.id,
-                categoryModel: selectedCategory?.model,
-                brandId: selectedBrand?.id,
+                categoryId: resolvedCategory?.id,
+                categoryModel: resolvedCategory?.model,
+                brandId: resolvedBrand?.id,
                 startDate,
                 endDate,
                 stockDurationMonths,
@@ -509,7 +528,7 @@ export default function PurchaseOrderPage() {
                             reportLoading ||
                             categoriesLoading ||
                             brandsLoading ||
-                            (!selectedCategory && !selectedBrand)
+                            (!selectedCategory && !selectedBrand && !categoryQuery.trim() && !brandQuery.trim())
                         }
                         className="rounded-xl bg-(--brand) px-5 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
                     >
@@ -523,7 +542,7 @@ export default function PurchaseOrderPage() {
                     ) : null}
                 </div>
 
-                {!selectedCategory && !selectedBrand ? (
+                {!selectedCategory && !selectedBrand && !categoryQuery.trim() && !brandQuery.trim() ? (
                     <p className="mt-4 text-xs text-(--ink-soft)">
                         Select a category, a brand, or both to generate a report.
                     </p>

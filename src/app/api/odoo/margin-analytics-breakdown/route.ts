@@ -9,6 +9,10 @@ export async function POST(request: Request) {
         const body = (await request.json()) as {
             productId: number;
             unifiedLotIds?: number[] | null;
+            excludePurchaseTypeValues?: string[] | null;
+            excludeSaleTypeValue?: string | null;
+            excludeCustomerIds?: number[] | null;
+            excludeDropshipPurchases?: boolean | null;
             startDate: string;
             endDate: string;
             dateBasis?: "order" | "transaction" | null;

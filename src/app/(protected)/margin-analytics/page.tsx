@@ -4,14 +4,18 @@ import { Fragment, FormEvent, UIEvent, useEffect, useMemo, useRef, useState } fr
 import { ChevronDown, ChevronRight, Coins, Download, ListTree, PiggyBank, Search, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { Select2 } from "@/components/select2";
+import { resolveExactNameMatch } from "@/lib/combobox-match";
 import {
+    getCustomers,
     getMarginAnalyticsBreakdown,
     getMarginAnalyticsReport,
     getProductBrands,
     getProductCategories,
     getProductOrigins,
     getProducts,
+    getPurchaseOrderTypes,
     getRimDiameters,
+    getSaleOrderTypes,
     searchUnifiedLots,
     type MarginBreakdown,
     type MarginBreakdownRow,
@@ -190,7 +194,7 @@ function SearchableSelect({
     );
 }
 
-function MultiSearchableSelect({
+function MultiSearchableSelect<TId extends string | number = number>({
     label,
     placeholder,
     query,
@@ -214,10 +218,10 @@ function MultiSearchableSelect({
     placeholder: string;
     query: string;
     onQueryChange: (value: string) => void;
-    options: Option[];
-    selected: Option[];
-    onToggle: (option: Option) => void;
-    onRemove: (id: number) => void;
+    options: Array<{ id: TId; name: string }>;
+    selected: Array<{ id: TId; name: string }>;
+    onToggle: (option: { id: TId; name: string }) => void;
+    onRemove: (id: TId) => void;
     loading: boolean;
     loadingMore?: boolean;
     error?: string | null;
@@ -325,6 +329,9 @@ export default function MarginAnalyticsPage() {
     const hasLoadedBrandsRef = useRef(false);
     const hasLoadedOriginsRef = useRef(false);
     const hasLoadedRimDiametersRef = useRef(false);
+    const hasLoadedPurchaseTypesRef = useRef(false);
+    const hasLoadedSaleTypesRef = useRef(false);
+    const hasLoadedCustomersRef = useRef(false);
 
     const [categories, setCategories] = useState<Category[]>([]);
     const [categoriesLoading, setCategoriesLoading] = useState(true);
@@ -374,6 +381,29 @@ export default function MarginAnalyticsPage() {
     const [unifiedLotHasMore, setUnifiedLotHasMore] = useState(false);
     const [selectedUnifiedLots, setSelectedUnifiedLots] = useState<Option[]>([]);
 
+    // ---- Exclusion filters — everything picked here is REMOVED from the
+    // result, unlike every filter above which narrows what's INCLUDED. ----
+    const [purchaseTypeOptions, setPurchaseTypeOptions] = useState<Array<{ id: string; name: string }>>([]);
+    const [purchaseTypeOptionsLoading, setPurchaseTypeOptionsLoading] = useState(true);
+    const [purchaseTypeOptionsError, setPurchaseTypeOptionsError] = useState<string | null>(null);
+    const [purchaseTypeQuery, setPurchaseTypeQuery] = useState("");
+    const [purchaseTypeMenuOpen, setPurchaseTypeMenuOpen] = useState(false);
+    const [excludedPurchaseTypes, setExcludedPurchaseTypes] = useState<Array<{ id: string; name: string }>>([]);
+
+    const [saleTypeOptions, setSaleTypeOptions] = useState<Array<{ id: string; name: string }>>([]);
+    const [saleTypeOptionsLoading, setSaleTypeOptionsLoading] = useState(true);
+    const [saleTypeOptionsError, setSaleTypeOptionsError] = useState<string | null>(null);
+    const [excludedSaleTypeValue, setExcludedSaleTypeValue] = useState("");
+
+    const [customers, setCustomers] = useState<Option[]>([]);
+    const [customersLoading, setCustomersLoading] = useState(true);
+    const [customersError, setCustomersError] = useState<string | null>(null);
+    const [customerQuery, setCustomerQuery] = useState("");
+    const [customerMenuOpen, setCustomerMenuOpen] = useState(false);
+    const [excludedCustomers, setExcludedCustomers] = useState<Option[]>([]);
+
+    const [excludeDropshipPurchases, setExcludeDropshipPurchases] = useState(false);
+
     const [startDate, setStartDate] = useState(() => {
         const now = new Date();
         now.setMonth(now.getMonth() - 1);
@@ -393,6 +423,10 @@ export default function MarginAnalyticsPage() {
     const [exportLoading, setExportLoading] = useState<"csv" | "xlsx" | null>(null);
     const [appliedParams, setAppliedParams] = useState<{
         unifiedLotIds: number[];
+        excludePurchaseTypeValues: string[];
+        excludeSaleTypeValue: string | null;
+        excludeCustomerIds: number[];
+        excludeDropshipPurchases: boolean;
         startDate: string;
         endDate: string;
         dateBasis: "order" | "transaction";
@@ -496,6 +530,78 @@ export default function MarginAnalyticsPage() {
             }
         }
         void loadRimDiameters();
+    }, [user]);
+
+    useEffect(() => {
+        async function loadPurchaseTypes() {
+            if (!user) {
+                hasLoadedPurchaseTypesRef.current = false;
+                setPurchaseTypeOptionsLoading(false);
+                return;
+            }
+            if (hasLoadedPurchaseTypesRef.current) {
+                setPurchaseTypeOptionsLoading(false);
+                return;
+            }
+            hasLoadedPurchaseTypesRef.current = true;
+            try {
+                const data = await getPurchaseOrderTypes();
+                setPurchaseTypeOptions(data.options.map((option) => ({ id: option.value, name: option.label })));
+            } catch (loadError) {
+                setPurchaseTypeOptionsError(loadError instanceof Error ? loadError.message : "Failed to load purchase types.");
+            } finally {
+                setPurchaseTypeOptionsLoading(false);
+            }
+        }
+        void loadPurchaseTypes();
+    }, [user]);
+
+    useEffect(() => {
+        async function loadSaleTypes() {
+            if (!user) {
+                hasLoadedSaleTypesRef.current = false;
+                setSaleTypeOptionsLoading(false);
+                return;
+            }
+            if (hasLoadedSaleTypesRef.current) {
+                setSaleTypeOptionsLoading(false);
+                return;
+            }
+            hasLoadedSaleTypesRef.current = true;
+            try {
+                const data = await getSaleOrderTypes();
+                setSaleTypeOptions(data.options.map((option) => ({ id: option.value, name: option.label })));
+            } catch (loadError) {
+                setSaleTypeOptionsError(loadError instanceof Error ? loadError.message : "Failed to load sale types.");
+            } finally {
+                setSaleTypeOptionsLoading(false);
+            }
+        }
+        void loadSaleTypes();
+    }, [user]);
+
+    useEffect(() => {
+        async function loadCustomers() {
+            if (!user) {
+                hasLoadedCustomersRef.current = false;
+                setCustomersLoading(false);
+                return;
+            }
+            if (hasLoadedCustomersRef.current) {
+                setCustomersLoading(false);
+                return;
+            }
+            hasLoadedCustomersRef.current = true;
+            try {
+                const data = await getCustomers();
+                setCustomers(data.customers);
+            } catch (loadError) {
+                setCustomersError(loadError instanceof Error ? loadError.message : "Failed to load customers.");
+            } finally {
+                setCustomersLoading(false);
+            }
+        }
+        void loadCustomers();
     }, [user]);
 
     useEffect(() => {
@@ -610,13 +716,36 @@ export default function MarginAnalyticsPage() {
         return rimDiameters.filter((rim) => rim.name.toLowerCase().includes(q));
     }, [rimDiameterQuery, rimDiameters]);
 
+    const filteredPurchaseTypeOptions = useMemo(() => {
+        if (!purchaseTypeQuery.trim()) return purchaseTypeOptions;
+        const q = purchaseTypeQuery.toLowerCase();
+        return purchaseTypeOptions.filter((option) => option.name.toLowerCase().includes(q));
+    }, [purchaseTypeQuery, purchaseTypeOptions]);
+
+    // Customer list can run into the thousands — cap what's rendered so
+    // opening the menu (or typing a common substring) doesn't stall the page.
+    const filteredCustomers = useMemo(() => {
+        const q = customerQuery.trim().toLowerCase();
+        const matches = q ? customers.filter((customer) => customer.name.toLowerCase().includes(q)) : customers;
+        return matches.slice(0, 200);
+    }, [customerQuery, customers]);
+
+    // Typed-but-unclicked text still counts as intent to filter — it gets
+    // resolved to a match (or dropped) inside handleGenerate, so the button
+    // shouldn't be disabled just because the user never clicked a dropdown row.
     const hasAnyFilter = Boolean(
         selectedCategory ||
             selectedBrand ||
             selectedOrigin ||
             selectedRimDiameters.length > 0 ||
             selectedUnifiedLots.length > 0 ||
-            selectedProduct
+            selectedProduct ||
+            categoryQuery.trim() ||
+            brandQuery.trim() ||
+            originQuery.trim() ||
+            rimDiameterQuery.trim() ||
+            unifiedLotQuery.trim() ||
+            productQuery.trim()
     );
 
     const filteredSortedRows = useMemo(() => {
@@ -669,10 +798,123 @@ export default function MarginAnalyticsPage() {
         startDate,
     ]);
 
+    // Resolves a field that was typed but never clicked: an exact
+    // (case/whitespace-insensitive) name match against whatever's already
+    // fetched/loaded, falling back to one fresh direct search for the async
+    // fields (results can still be mid-debounce the moment Generate is clicked).
+    function resolveCategorySelection(): Category | null {
+        return selectedCategory ?? resolveExactNameMatch(categoryQuery, categories);
+    }
+
+    function resolveBrandSelection(): Option | null {
+        return selectedBrand ?? resolveExactNameMatch(brandQuery, brands);
+    }
+
+    function resolveOriginSelection(): Option | null {
+        return selectedOrigin ?? resolveExactNameMatch(originQuery, origins);
+    }
+
+    function resolveRimDiameterSelection(): Option[] {
+        const match = resolveExactNameMatch(rimDiameterQuery, rimDiameters);
+        if (!match || selectedRimDiameters.some((item) => item.id === match.id)) {
+            return selectedRimDiameters;
+        }
+        return [...selectedRimDiameters, match];
+    }
+
+    async function resolveUnifiedLotSelection(): Promise<Option[]> {
+        const trimmed = unifiedLotQuery.trim();
+        if (!trimmed) {
+            return selectedUnifiedLots;
+        }
+
+        let match = resolveExactNameMatch(trimmed, unifiedLotResults);
+        if (!match) {
+            try {
+                const data = await searchUnifiedLots({ query: trimmed, limit: SEARCH_PAGE_SIZE, offset: 0 });
+                match = resolveExactNameMatch(trimmed, data.unifiedLots);
+            } catch {
+                match = null;
+            }
+        }
+
+        if (!match || selectedUnifiedLots.some((item) => item.id === match.id)) {
+            return selectedUnifiedLots;
+        }
+        return [...selectedUnifiedLots, match];
+    }
+
+    async function resolveProductSelection(): Promise<Option | null> {
+        if (selectedProduct) {
+            return selectedProduct;
+        }
+        const trimmed = productQuery.trim();
+        if (!trimmed) {
+            return null;
+        }
+
+        const localMatch = resolveExactNameMatch(trimmed, productResults);
+        if (localMatch) {
+            return localMatch;
+        }
+
+        try {
+            const data = await getProducts({ query: trimmed, limit: SEARCH_PAGE_SIZE, offset: 0 });
+            return resolveExactNameMatch(trimmed, data.products);
+        } catch {
+            return null;
+        }
+    }
+
     async function handleGenerate(event: FormEvent) {
         event.preventDefault();
-        if (!hasAnyFilter) {
+
+        const resolvedCategory = resolveCategorySelection();
+        const resolvedBrand = resolveBrandSelection();
+        const resolvedOrigin = resolveOriginSelection();
+        const resolvedRimDiameters = resolveRimDiameterSelection();
+        const [resolvedUnifiedLots, resolvedProduct] = await Promise.all([
+            resolveUnifiedLotSelection(),
+            resolveProductSelection(),
+        ]);
+
+        const hasAnyResolvedFilter = Boolean(
+            resolvedCategory ||
+                resolvedBrand ||
+                resolvedOrigin ||
+                resolvedRimDiameters.length > 0 ||
+                resolvedUnifiedLots.length > 0 ||
+                resolvedProduct
+        );
+        if (!hasAnyResolvedFilter) {
             return;
+        }
+
+        // Reflect the resolution back into the visible fields/state — same
+        // as if the user had clicked the matching row themselves.
+        if (resolvedCategory !== selectedCategory) {
+            setSelectedCategory(resolvedCategory);
+            if (resolvedCategory) setCategoryQuery(resolvedCategory.name);
+        }
+        if (resolvedBrand !== selectedBrand) {
+            setSelectedBrand(resolvedBrand);
+            if (resolvedBrand) setBrandQuery(resolvedBrand.name);
+        }
+        if (resolvedOrigin !== selectedOrigin) {
+            setSelectedOrigin(resolvedOrigin);
+            if (resolvedOrigin) setOriginQuery(resolvedOrigin.name);
+        }
+        if (resolvedRimDiameters !== selectedRimDiameters) {
+            setSelectedRimDiameters(resolvedRimDiameters);
+            setRimDiameterQuery("");
+        }
+        if (resolvedUnifiedLots !== selectedUnifiedLots) {
+            setSelectedUnifiedLots(resolvedUnifiedLots);
+            setUnifiedLotQuery("");
+        }
+        if (resolvedProduct !== selectedProduct) {
+            setSelectedProduct(resolvedProduct);
+            if (resolvedProduct) setProductQuery(resolvedProduct.name);
         }
 
         setReportLoading(true);
@@ -680,14 +922,22 @@ export default function MarginAnalyticsPage() {
         setTableSearch("");
         setExpandedProductIds(new Set());
 
+        const excludePurchaseTypeValues = excludedPurchaseTypes.map((option) => option.id);
+        const excludeSaleTypeValue = excludedSaleTypeValue || null;
+        const excludeCustomerIds = excludedCustomers.map((option) => option.id);
+
         try {
             const data = await getMarginAnalyticsReport({
-                categoryId: selectedCategory?.id,
-                brandId: selectedBrand?.id,
-                originId: selectedOrigin?.id,
-                rimDiameterIds: selectedRimDiameters.map((option) => option.id),
-                unifiedLotIds: selectedUnifiedLots.map((option) => option.id),
-                productId: selectedProduct?.id,
+                categoryId: resolvedCategory?.id,
+                brandId: resolvedBrand?.id,
+                originId: resolvedOrigin?.id,
+                rimDiameterIds: resolvedRimDiameters.map((option) => option.id),
+                unifiedLotIds: resolvedUnifiedLots.map((option) => option.id),
+                productId: resolvedProduct?.id,
+                excludePurchaseTypeValues,
+                excludeSaleTypeValue,
+                excludeCustomerIds,
+                excludeDropshipPurchases,
                 startDate,
                 endDate,
                 dateBasis,
@@ -697,7 +947,11 @@ export default function MarginAnalyticsPage() {
             // breakdown opened later reflects the numbers on screen even if
             // the form has since been edited without regenerating.
             setAppliedParams({
-                unifiedLotIds: selectedUnifiedLots.map((option) => option.id),
+                unifiedLotIds: resolvedUnifiedLots.map((option) => option.id),
+                excludePurchaseTypeValues,
+                excludeSaleTypeValue,
+                excludeCustomerIds,
+                excludeDropshipPurchases,
                 startDate,
                 endDate,
                 dateBasis,
@@ -723,6 +977,10 @@ export default function MarginAnalyticsPage() {
             const data = await getMarginAnalyticsBreakdown({
                 productId: row.productId,
                 unifiedLotIds: appliedParams.unifiedLotIds,
+                excludePurchaseTypeValues: appliedParams.excludePurchaseTypeValues,
+                excludeSaleTypeValue: appliedParams.excludeSaleTypeValue,
+                excludeCustomerIds: appliedParams.excludeCustomerIds,
+                excludeDropshipPurchases: appliedParams.excludeDropshipPurchases,
                 startDate: appliedParams.startDate,
                 endDate: appliedParams.endDate,
                 dateBasis: appliedParams.dateBasis,
@@ -1042,6 +1300,97 @@ export default function MarginAnalyticsPage() {
                             }
                         }}
                     />
+
+                    <div className="sm:col-span-2">
+                        <p className="text-sm font-medium">Exclude from result</p>
+                        <p className="text-xs text-(--ink-soft)">
+                            Anything picked in these fields is removed from the report, not scoped to it.
+                        </p>
+                    </div>
+
+                    <MultiSearchableSelect<string>
+                        label="Purchase Type"
+                        placeholder={purchaseTypeOptionsLoading ? "Loading..." : "Search purchase types"}
+                        query={purchaseTypeQuery}
+                        onQueryChange={(value) => {
+                            setPurchaseTypeQuery(value);
+                            setPurchaseTypeMenuOpen(true);
+                        }}
+                        options={filteredPurchaseTypeOptions}
+                        selected={excludedPurchaseTypes}
+                        onToggle={(option) => {
+                            setExcludedPurchaseTypes((current) =>
+                                current.some((item) => item.id === option.id)
+                                    ? current.filter((item) => item.id !== option.id)
+                                    : [...current, option]
+                            );
+                            setPurchaseTypeQuery("");
+                        }}
+                        onRemove={(id) => setExcludedPurchaseTypes((current) => current.filter((item) => item.id !== id))}
+                        loading={purchaseTypeOptionsLoading}
+                        error={purchaseTypeOptionsError}
+                        emptyText="No purchase types found."
+                        menuOpen={purchaseTypeMenuOpen}
+                        onFocus={() => setPurchaseTypeMenuOpen(true)}
+                        onBlur={() => setPurchaseTypeMenuOpen(false)}
+                    />
+
+                    <label className="block">
+                        <span className="mb-2 block text-sm font-medium">Sale Type</span>
+                        <Select2
+                            value={excludedSaleTypeValue}
+                            onChange={setExcludedSaleTypeValue}
+                            loading={saleTypeOptionsLoading}
+                            loadingText="Loading sale types..."
+                            emptyText="No sale types found"
+                            disabled={Boolean(saleTypeOptionsError)}
+                            placeholder="None excluded"
+                            options={saleTypeOptions.map((option) => ({ value: option.id, label: option.name }))}
+                        />
+                        {saleTypeOptionsError ? <p className="mt-1 text-xs text-red-600">{saleTypeOptionsError}</p> : null}
+                    </label>
+
+                    <MultiSearchableSelect
+                        label="Customer"
+                        placeholder={customersLoading ? "Loading..." : "Search customers"}
+                        query={customerQuery}
+                        onQueryChange={(value) => {
+                            setCustomerQuery(value);
+                            setCustomerMenuOpen(true);
+                        }}
+                        options={filteredCustomers}
+                        selected={excludedCustomers}
+                        onToggle={(option) => {
+                            setExcludedCustomers((current) =>
+                                current.some((item) => item.id === option.id)
+                                    ? current.filter((item) => item.id !== option.id)
+                                    : [...current, option]
+                            );
+                            setCustomerQuery("");
+                        }}
+                        onRemove={(id) => setExcludedCustomers((current) => current.filter((item) => item.id !== id))}
+                        loading={customersLoading}
+                        error={customersError}
+                        emptyText="No customers found."
+                        menuOpen={customerMenuOpen}
+                        onFocus={() => setCustomerMenuOpen(true)}
+                        onBlur={() => setCustomerMenuOpen(false)}
+                    />
+
+                    <label className="flex items-center gap-3 rounded-xl border border-(--line) bg-white px-4 py-2.5">
+                        <input
+                            type="checkbox"
+                            checked={excludeDropshipPurchases}
+                            onChange={(event) => setExcludeDropshipPurchases(event.target.checked)}
+                            className="h-4 w-4 rounded border-(--line)"
+                        />
+                        <span className="text-sm">
+                            Exclude Dropship purchase orders
+                            <span className="block text-xs text-(--ink-soft)">
+                                Off: dropship POs count like any other. On: purchase orders whose Deliver To is Dropship are left out.
+                            </span>
+                        </span>
+                    </label>
 
                     <div className="grid gap-4 sm:grid-cols-2">
                         <label className="block">
