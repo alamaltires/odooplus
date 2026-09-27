@@ -6095,17 +6095,15 @@ export async function getMarginAnalyticsReport(
         startDate: string;
         endDate: string;
         /**
-         * "order" (default): scope everything by the purchase/sales order's
-         * own Order Date — a PO or SO counts toward whichever period it was
-         * placed in, regardless of when goods actually moved or got
-         * invoiced.
-         * "transaction": scope purchases by the date each receipt was
-         * actually validated (stock.move's own date — "Scheduled date until
-         * move is done, then date of actual move processing") and sales by
-         * the customer invoice's own Invoice Date, instead of the order
-         * date — a PO raised in January but received in March counts
-         * toward March; an SO confirmed in January but invoiced in March
-         * counts toward March.
+         * Both modes scope the PURCHASE side by the order's own Order Date —
+         * they differ only in which of Odoo's own PO-line quantity fields is
+         * counted: "order" (default) counts `qty_received` (what's actually
+         * come in, not just what was ordered); "transaction" ("Receiving")
+         * counts `qty_invoiced` (what's actually been billed by the vendor).
+         * The SALES side still differs by date: "order" scopes by the sale
+         * order's own Order Date, "transaction" by the customer invoice's
+         * own Invoice Date — an SO confirmed in January but invoiced in
+         * March counts toward March.
          */
         dateBasis?: "order" | "transaction" | null;
     }
@@ -6495,10 +6493,8 @@ export async function getMarginAnalyticsReport(
     const purchasedQtyByProductId = new Map<number, number>();
     const purchaseValueByProductId = new Map<number, number>();
     const orderIdSet = new Set<number>();
-    // The stock moves landed cost gets pulled from in Step 1a — sourced
-    // differently per `dateBasis` below (either every done move tied to an
-    // in-range PO, or specifically the moves whose own validation date fell
-    // in range).
+    // The stock moves landed cost gets pulled from in Step 1a — every done
+    // move tied to a purchase line matched below, regardless of `dateBasis`.
     let landedCostMoveIds: number[] = [];
 
     // When a Unified Lot filter is active, every purchase-side query below
@@ -6520,196 +6516,118 @@ export async function getMarginAnalyticsReport(
         excludeDropshipPurchases ? findDropshipPickingTypeIds(credentials, uid) : Promise.resolve([]),
     ]);
 
-    if (dateBasis === "transaction") {
-        // Step 1 (transaction basis): purchase price scoped by the actual
-        // goods-receipt date — `stock.move.date`, which Odoo docs as
-        // "Scheduled date until move is done, then date of actual move
-        // processing" (verified live: reflects the real receiving
-        // timestamp, not the PO's order date). A PO raised in January but
-        // only received in March counts toward March here.
-        const receiptMoveDomain: unknown[] = [
-            ["product_id", "in", finalProductIds],
-            ["state", "=", "done"],
-            ["purchase_line_id", "!=", false],
-            // Only count receipts against confirmed, fully-billed purchase
-            // orders — draft/cancelled POs and ones still awaiting a bill
-            // don't belong in a cost report (verified live: unbilled/cancelled
-            // POs were inflating Avg Total Cost).
-            ["purchase_line_id.order_id.state", "in", ["purchase", "done"]],
-            ["purchase_line_id.order_id.invoice_status", "=", "invoiced"],
-            ["date", ">=", from],
-            ["date", "<=", to],
-        ];
-        if (unifiedLotOrderIdsArray) {
-            receiptMoveDomain.push(["purchase_line_id.order_id", "in", unifiedLotOrderIdsArray]);
+    // Step 1: purchase order lines for matched products, scoped by the
+    // ORDER's own date range in both modes — they differ only in which of
+    // Odoo's own PO-line quantity fields gets counted:
+    //   - "order" (default): `qty_received` — what's actually come in, not
+    //     just what was ordered.
+    //   - "transaction" ("Receiving"): `qty_invoiced` — what's actually been
+    //     billed by the vendor, not just received.
+    // Per-unit price always comes from the line's own average
+    // (price_subtotal / product_qty, the ORDERED qty) so a partial
+    // receipt/bill is still priced at the line's real rate.
+    const purchaseLineDomain: unknown[] = [
+        ["product_id", "in", finalProductIds],
+        // Confirmed only — draft/cancelled POs don't belong in a cost report.
+        // Deliberately NOT gated on `invoice_status` here: that would only
+        // keep orders that are fully billed end-to-end, and since you can't
+        // reach that state without also having received everything on the
+        // order, it collapses `qty_received` and `qty_invoiced` down to
+        // (almost) the same number for whatever's left — silently erasing
+        // the exact distinction this report exists to show (received but
+        // not yet billed, verified live).
+        ["order_id.state", "in", ["purchase", "done"]],
+        ["order_id.date_order", ">=", from],
+        ["order_id.date_order", "<=", to],
+    ];
+    if (unifiedLotOrderIdsArray) {
+        purchaseLineDomain.push(["order_id", "in", unifiedLotOrderIdsArray]);
+    }
+    if (excludedPurchaseOrderIds && excludedPurchaseOrderIds.length > 0) {
+        purchaseLineDomain.push(["order_id", "not in", excludedPurchaseOrderIds]);
+    }
+    if (excludeDropshipPurchases && dropshipPickingTypeIds.length > 0) {
+        purchaseLineDomain.push(["order_id.picking_type_id", "not in", dropshipPickingTypeIds]);
+    }
+    const purchaseLines = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "purchase.order.line",
+        "search_read",
+        [purchaseLineDomain],
+        {
+            fields: [
+                "id",
+                "product_id",
+                "product_qty",
+                "qty_received",
+                "qty_invoiced",
+                "price_subtotal",
+                "currency_id",
+                "order_id",
+            ],
+            limit: 50000,
         }
-        if (excludedPurchaseOrderIds && excludedPurchaseOrderIds.length > 0) {
-            receiptMoveDomain.push(["purchase_line_id.order_id", "not in", excludedPurchaseOrderIds]);
+    );
+
+    await ensureCurrencyMultipliers(purchaseLines.map((line) => getRelationalId(line.currency_id)));
+
+    const purchaseLineIds: number[] = [];
+
+    for (const line of purchaseLines) {
+        const id = getRelationalId(line.product_id);
+        if (!id) {
+            continue;
         }
-        if (excludeDropshipPurchases && dropshipPickingTypeIds.length > 0) {
-            receiptMoveDomain.push(["purchase_line_id.order_id.picking_type_id", "not in", dropshipPickingTypeIds]);
+
+        const lineId = Number(line.id ?? 0);
+        if (lineId > 0) {
+            purchaseLineIds.push(lineId);
         }
-        const receiptMoves = await executeKw<Array<Record<string, unknown>>>(
+        const orderId = getRelationalId(line.order_id);
+        if (orderId) {
+            orderIdSet.add(orderId);
+        }
+
+        const orderedQty = Number(line.product_qty ?? 0);
+        const lineSubtotal = Number(line.price_subtotal ?? 0);
+        const unitPrice = orderedQty > 0 ? lineSubtotal / orderedQty : 0;
+        const qty = dateBasis === "transaction" ? Number(line.qty_invoiced ?? 0) : Number(line.qty_received ?? 0);
+        if (qty <= 0) {
+            continue;
+        }
+
+        purchasedQtyByProductId.set(id, (purchasedQtyByProductId.get(id) ?? 0) + qty);
+
+        const currencyId = getRelationalId(line.currency_id);
+        const currencyCode = getRelationalName(line.currency_id) || "?";
+        recordSourceCurrency(id, currencyId, currencyCode);
+        const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
+        if (multiplier === undefined) {
+            if (currencyId) {
+                unconvertedCurrencyCodes.add(currencyCode);
+            }
+            continue;
+        }
+
+        const value = unitPrice * qty * multiplier;
+        purchaseValueByProductId.set(id, (purchaseValueByProductId.get(id) ?? 0) + value);
+    }
+
+    if (purchaseLineIds.length > 0) {
+        const moves = await executeKw<Array<Record<string, unknown>>>(
             credentials,
             uid,
             "stock.move",
             "search_read",
-            [receiptMoveDomain],
-            { fields: ["id", "product_id", "product_qty", "purchase_line_id"], limit: 50000 }
+            [[
+                ["purchase_line_id", "in", purchaseLineIds],
+                ["state", "=", "done"],
+            ]],
+            { fields: ["id"], limit: 50000 }
         );
 
-        landedCostMoveIds = receiptMoves.map((move) => Number(move.id ?? 0)).filter((id) => id > 0);
-
-        const purchaseLineIds = Array.from(
-            new Set(
-                receiptMoves
-                    .map((move) => getRelationalId(move.purchase_line_id))
-                    .filter((id): id is number => typeof id === "number" && id > 0)
-            )
-        );
-
-        const purchaseLinesRaw = purchaseLineIds.length > 0
-            ? await executeKw<Array<Record<string, unknown>>>(
-                credentials,
-                uid,
-                "purchase.order.line",
-                "read",
-                [purchaseLineIds],
-                { fields: ["id", "product_qty", "price_subtotal", "currency_id", "order_id"] }
-            )
-            : [];
-        const lineInfoById = new Map(purchaseLinesRaw.map((line) => [Number(line.id ?? 0), line]));
-
-        await ensureCurrencyMultipliers(purchaseLinesRaw.map((line) => getRelationalId(line.currency_id)));
-
-        for (const move of receiptMoves) {
-            const id = getRelationalId(move.product_id);
-            if (!id) {
-                continue;
-            }
-
-            const lineId = getRelationalId(move.purchase_line_id);
-            const lineInfo = lineId ? lineInfoById.get(lineId) : undefined;
-            if (!lineInfo) {
-                continue;
-            }
-
-            const orderId = getRelationalId(lineInfo.order_id);
-            if (orderId) {
-                orderIdSet.add(orderId);
-            }
-
-            // The move only tells us the quantity actually received on this
-            // date; the per-unit price comes from the PO line's own average
-            // (price_subtotal / product_qty, so line-level discounts are
-            // respected the same way the order-basis mode already handles
-            // them).
-            const lineQty = Number(lineInfo.product_qty ?? 0);
-            const lineSubtotal = Number(lineInfo.price_subtotal ?? 0);
-            const unitPrice = lineQty > 0 ? lineSubtotal / lineQty : 0;
-            const moveQty = Number(move.product_qty ?? 0);
-            purchasedQtyByProductId.set(id, (purchasedQtyByProductId.get(id) ?? 0) + moveQty);
-
-            const currencyId = getRelationalId(lineInfo.currency_id);
-            const currencyCode = getRelationalName(lineInfo.currency_id) || "?";
-            recordSourceCurrency(id, currencyId, currencyCode);
-            const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
-            if (multiplier === undefined) {
-                if (currencyId) {
-                    unconvertedCurrencyCodes.add(currencyCode);
-                }
-                continue;
-            }
-
-            const value = unitPrice * moveQty * multiplier;
-            purchaseValueByProductId.set(id, (purchaseValueByProductId.get(id) ?? 0) + value);
-        }
-    } else {
-        // Step 1 (order basis, default): purchase order lines for matched
-        // products in range — the base purchase price. Currency-converted
-        // the same way as products performance, since a PO raised in USD
-        // must not be blended unconverted with one raised in AED.
-        const purchaseLineDomain: unknown[] = [
-            ["product_id", "in", finalProductIds],
-            ["order_id.state", "in", ["purchase", "done"]],
-            // Fully-billed only (see the transaction-basis branch above for why).
-            ["order_id.invoice_status", "=", "invoiced"],
-            ["order_id.date_order", ">=", from],
-            ["order_id.date_order", "<=", to],
-        ];
-        if (unifiedLotOrderIdsArray) {
-            purchaseLineDomain.push(["order_id", "in", unifiedLotOrderIdsArray]);
-        }
-        if (excludedPurchaseOrderIds && excludedPurchaseOrderIds.length > 0) {
-            purchaseLineDomain.push(["order_id", "not in", excludedPurchaseOrderIds]);
-        }
-        if (excludeDropshipPurchases && dropshipPickingTypeIds.length > 0) {
-            purchaseLineDomain.push(["order_id.picking_type_id", "not in", dropshipPickingTypeIds]);
-        }
-        const purchaseLines = await executeKw<Array<Record<string, unknown>>>(
-            credentials,
-            uid,
-            "purchase.order.line",
-            "search_read",
-            [purchaseLineDomain],
-            {
-                fields: ["id", "product_id", "product_qty", "price_subtotal", "currency_id", "order_id"],
-                limit: 50000,
-            }
-        );
-
-        await ensureCurrencyMultipliers(purchaseLines.map((line) => getRelationalId(line.currency_id)));
-
-        const purchaseLineIds: number[] = [];
-
-        for (const line of purchaseLines) {
-            const id = getRelationalId(line.product_id);
-            if (!id) {
-                continue;
-            }
-
-            const lineId = Number(line.id ?? 0);
-            if (lineId > 0) {
-                purchaseLineIds.push(lineId);
-            }
-            const orderId = getRelationalId(line.order_id);
-            if (orderId) {
-                orderIdSet.add(orderId);
-            }
-
-            const qty = Number(line.product_qty ?? 0);
-            purchasedQtyByProductId.set(id, (purchasedQtyByProductId.get(id) ?? 0) + qty);
-
-            const currencyId = getRelationalId(line.currency_id);
-            const currencyCode = getRelationalName(line.currency_id) || "?";
-            recordSourceCurrency(id, currencyId, currencyCode);
-            const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
-            if (multiplier === undefined) {
-                if (currencyId) {
-                    unconvertedCurrencyCodes.add(currencyCode);
-                }
-                continue;
-            }
-
-            const value = Number(line.price_subtotal ?? 0) * multiplier;
-            purchaseValueByProductId.set(id, (purchaseValueByProductId.get(id) ?? 0) + value);
-        }
-
-        if (purchaseLineIds.length > 0) {
-            const moves = await executeKw<Array<Record<string, unknown>>>(
-                credentials,
-                uid,
-                "stock.move",
-                "search_read",
-                [[
-                    ["purchase_line_id", "in", purchaseLineIds],
-                    ["state", "=", "done"],
-                ]],
-                { fields: ["id"], limit: 50000 }
-            );
-
-            landedCostMoveIds = moves.map((move) => Number(move.id ?? 0)).filter((id) => id > 0);
-        }
+        landedCostMoveIds = moves.map((move) => Number(move.id ?? 0)).filter((id) => id > 0);
     }
 
     // Step 1a: landed cost already allocated per product by Odoo's own
@@ -7562,179 +7480,94 @@ export async function getMarginAnalyticsBreakdown(
     const orderIdSet = new Set<number>();
     let landedCostMoveIds: number[] = [];
 
-    if (dateBasis === "transaction") {
-        const receiptDomain: unknown[] = [
-            ["product_id", "=", productId],
-            ["state", "=", "done"],
-            ["purchase_line_id", "!=", false],
-            // Mirrors the report: confirmed, fully-billed POs only.
-            ["purchase_line_id.order_id.state", "in", ["purchase", "done"]],
-            ["purchase_line_id.order_id.invoice_status", "=", "invoiced"],
-            ["date", ">=", from],
-            ["date", "<=", to],
-        ];
-        if (unifiedLotOrderIds) {
-            receiptDomain.push(["purchase_line_id.order_id", "in", unifiedLotOrderIds]);
+    // Mirrors the report: scoped by the ORDER's own date range in both
+    // modes, differing only in which quantity field is read off the line —
+    // `qty_received` for "order" (default), `qty_invoiced` for "transaction"
+    // ("Receiving"). Per-unit price always comes from the line's own average.
+    const purchaseDomain: unknown[] = [
+        ["product_id", "=", productId],
+        // See the report's identical domain for why `invoice_status` is
+        // deliberately not gated here.
+        ["order_id.state", "in", ["purchase", "done"]],
+        ["order_id.date_order", ">=", from],
+        ["order_id.date_order", "<=", to],
+    ];
+    if (unifiedLotOrderIds) {
+        purchaseDomain.push(["order_id", "in", unifiedLotOrderIds]);
+    }
+    if (excludedPurchaseOrderIds && excludedPurchaseOrderIds.length > 0) {
+        purchaseDomain.push(["order_id", "not in", excludedPurchaseOrderIds]);
+    }
+    if (excludeDropshipPurchases && dropshipPickingTypeIds.length > 0) {
+        purchaseDomain.push(["order_id.picking_type_id", "not in", dropshipPickingTypeIds]);
+    }
+    const poLines = await searchReadAll(
+        credentials,
+        uid,
+        "purchase.order.line",
+        purchaseDomain,
+        ["id", "product_qty", "qty_received", "qty_invoiced", "price_subtotal", "currency_id", "order_id"]
+    );
+    await ensureCurrencyMultipliers(poLines.map((line) => getRelationalId(line.currency_id)));
+
+    const orderIds = Array.from(
+        new Set(
+            poLines
+                .map((line) => getRelationalId(line.order_id))
+                .filter((id): id is number => typeof id === "number" && id > 0)
+        )
+    );
+    const orders = orderIds.length
+        ? await readInBatches(credentials, uid, "purchase.order", orderIds, ["id", "name", "partner_id", "date_order"])
+        : [];
+    const orderById = new Map(orders.map((order) => [Number(order.id ?? 0), order]));
+
+    const poLineIds: number[] = [];
+    for (const line of poLines) {
+        const lineId = Number(line.id ?? 0);
+        if (lineId > 0) {
+            poLineIds.push(lineId);
         }
-        if (excludedPurchaseOrderIds && excludedPurchaseOrderIds.length > 0) {
-            receiptDomain.push(["purchase_line_id.order_id", "not in", excludedPurchaseOrderIds]);
+        const orderId = getRelationalId(line.order_id);
+        if (orderId) {
+            orderIdSet.add(orderId);
         }
-        if (excludeDropshipPurchases && dropshipPickingTypeIds.length > 0) {
-            receiptDomain.push(["purchase_line_id.order_id.picking_type_id", "not in", dropshipPickingTypeIds]);
+        const order = orderId ? orderById.get(orderId) : undefined;
+        const orderedQty = Number(line.product_qty ?? 0);
+        const subtotal = Number(line.price_subtotal ?? 0);
+        const unitPrice = orderedQty > 0 ? subtotal / orderedQty : 0;
+        const qty = dateBasis === "transaction" ? Number(line.qty_invoiced ?? 0) : Number(line.qty_received ?? 0);
+        if (qty <= 0) {
+            continue;
         }
-        const receiptMoves = await searchReadAll(
+        const currencyId = getRelationalId(line.currency_id);
+        const multiplier = rateFor(currencyId);
+        if (multiplier === undefined) {
+            continue;
+        }
+
+        purchases.push({
+            reference: toDisplayString(order?.name) || `PO #${orderId ?? "?"}`,
+            date: normalizeOdooDate(order?.date_order),
+            partnerName: getRelationalName(order?.partner_id) || "",
+            lots: [],
+            quantity: qty,
+            unitPrice: unitPrice * multiplier,
+            currencyCode: getRelationalName(line.currency_id) || TARGET_CURRENCY_CODE,
+            amount: unitPrice * qty * multiplier,
+            note: dateBasis === "transaction" ? "Purchase order line (qty billed)" : "Purchase order line (qty received)",
+        });
+    }
+
+    if (poLineIds.length > 0) {
+        const moves = await searchReadAll(
             credentials,
             uid,
             "stock.move",
-            receiptDomain,
-            ["id", "product_qty", "purchase_line_id", "date"]
+            [["purchase_line_id", "in", poLineIds], ["state", "=", "done"]],
+            ["id"]
         );
-        landedCostMoveIds = receiptMoves.map((move) => Number(move.id ?? 0)).filter((id) => id > 0);
-
-        const lineIds = Array.from(
-            new Set(
-                receiptMoves
-                    .map((move) => getRelationalId(move.purchase_line_id))
-                    .filter((id): id is number => typeof id === "number" && id > 0)
-            )
-        );
-        const poLines = lineIds.length
-            ? await readInBatches(credentials, uid, "purchase.order.line", lineIds, [
-                "id",
-                "product_qty",
-                "price_subtotal",
-                "currency_id",
-                "order_id",
-            ])
-            : [];
-        const poLineById = new Map(poLines.map((line) => [Number(line.id ?? 0), line]));
-        await ensureCurrencyMultipliers(poLines.map((line) => getRelationalId(line.currency_id)));
-
-        const orderIds = Array.from(
-            new Set(
-                poLines
-                    .map((line) => getRelationalId(line.order_id))
-                    .filter((id): id is number => typeof id === "number" && id > 0)
-            )
-        );
-        const orders = orderIds.length
-            ? await readInBatches(credentials, uid, "purchase.order", orderIds, ["id", "name", "partner_id"])
-            : [];
-        const orderById = new Map(orders.map((order) => [Number(order.id ?? 0), order]));
-
-        for (const move of receiptMoves) {
-            const lineId = getRelationalId(move.purchase_line_id);
-            const line = lineId ? poLineById.get(lineId) : undefined;
-            if (!line) {
-                continue;
-            }
-            const orderId = getRelationalId(line.order_id);
-            if (orderId) {
-                orderIdSet.add(orderId);
-            }
-            const order = orderId ? orderById.get(orderId) : undefined;
-            const lineQty = Number(line.product_qty ?? 0);
-            const unitPrice = lineQty > 0 ? Number(line.price_subtotal ?? 0) / lineQty : 0;
-            const moveQty = Number(move.product_qty ?? 0);
-            const currencyId = getRelationalId(line.currency_id);
-            const multiplier = rateFor(currencyId);
-            if (multiplier === undefined) {
-                continue;
-            }
-
-            purchases.push({
-                reference: toDisplayString(order?.name) || `PO #${orderId ?? "?"}`,
-                date: normalizeOdooDate(move.date),
-                partnerName: getRelationalName(order?.partner_id) || "",
-                lots: [],
-                quantity: moveQty,
-                unitPrice: unitPrice * multiplier,
-                currencyCode: getRelationalName(line.currency_id) || TARGET_CURRENCY_CODE,
-                amount: unitPrice * moveQty * multiplier,
-                note: "Goods receipt",
-            });
-        }
-    } else {
-        const purchaseDomain: unknown[] = [
-            ["product_id", "=", productId],
-            ["order_id.state", "in", ["purchase", "done"]],
-            // Mirrors the report: fully-billed POs only.
-            ["order_id.invoice_status", "=", "invoiced"],
-            ["order_id.date_order", ">=", from],
-            ["order_id.date_order", "<=", to],
-        ];
-        if (unifiedLotOrderIds) {
-            purchaseDomain.push(["order_id", "in", unifiedLotOrderIds]);
-        }
-        if (excludedPurchaseOrderIds && excludedPurchaseOrderIds.length > 0) {
-            purchaseDomain.push(["order_id", "not in", excludedPurchaseOrderIds]);
-        }
-        if (excludeDropshipPurchases && dropshipPickingTypeIds.length > 0) {
-            purchaseDomain.push(["order_id.picking_type_id", "not in", dropshipPickingTypeIds]);
-        }
-        const poLines = await searchReadAll(
-            credentials,
-            uid,
-            "purchase.order.line",
-            purchaseDomain,
-            ["id", "product_qty", "price_subtotal", "currency_id", "order_id"]
-        );
-        await ensureCurrencyMultipliers(poLines.map((line) => getRelationalId(line.currency_id)));
-
-        const orderIds = Array.from(
-            new Set(
-                poLines
-                    .map((line) => getRelationalId(line.order_id))
-                    .filter((id): id is number => typeof id === "number" && id > 0)
-            )
-        );
-        const orders = orderIds.length
-            ? await readInBatches(credentials, uid, "purchase.order", orderIds, ["id", "name", "partner_id", "date_order"])
-            : [];
-        const orderById = new Map(orders.map((order) => [Number(order.id ?? 0), order]));
-
-        const poLineIds: number[] = [];
-        for (const line of poLines) {
-            const lineId = Number(line.id ?? 0);
-            if (lineId > 0) {
-                poLineIds.push(lineId);
-            }
-            const orderId = getRelationalId(line.order_id);
-            if (orderId) {
-                orderIdSet.add(orderId);
-            }
-            const order = orderId ? orderById.get(orderId) : undefined;
-            const qty = Number(line.product_qty ?? 0);
-            const subtotal = Number(line.price_subtotal ?? 0);
-            const currencyId = getRelationalId(line.currency_id);
-            const multiplier = rateFor(currencyId);
-            if (multiplier === undefined) {
-                continue;
-            }
-
-            purchases.push({
-                reference: toDisplayString(order?.name) || `PO #${orderId ?? "?"}`,
-                date: normalizeOdooDate(order?.date_order),
-                partnerName: getRelationalName(order?.partner_id) || "",
-                lots: [],
-                quantity: qty,
-                unitPrice: qty > 0 ? (subtotal / qty) * multiplier : 0,
-                currencyCode: getRelationalName(line.currency_id) || TARGET_CURRENCY_CODE,
-                amount: subtotal * multiplier,
-                note: "Purchase order line",
-            });
-        }
-
-        if (poLineIds.length > 0) {
-            const moves = await searchReadAll(
-                credentials,
-                uid,
-                "stock.move",
-                [["purchase_line_id", "in", poLineIds], ["state", "=", "done"]],
-                ["id"]
-            );
-            landedCostMoveIds = moves.map((move) => Number(move.id ?? 0)).filter((id) => id > 0);
-        }
+        landedCostMoveIds = moves.map((move) => Number(move.id ?? 0)).filter((id) => id > 0);
     }
 
     // Which lots each receipt actually brought in, so a purchase row can say

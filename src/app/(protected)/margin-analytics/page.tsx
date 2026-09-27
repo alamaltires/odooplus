@@ -213,6 +213,7 @@ function MultiSearchableSelect<TId extends string | number = number>({
     onBlur,
     onScroll,
     emptyText,
+    disableWhileLoading = true,
 }: {
     label: string;
     placeholder: string;
@@ -232,6 +233,15 @@ function MultiSearchableSelect<TId extends string | number = number>({
     onBlur: () => void;
     onScroll?: (event: UIEvent<HTMLUListElement>) => void;
     emptyText?: string;
+    /**
+     * Disabling a focused input blurs it immediately (browser default) — a
+     * search-as-you-type field's `loading` flips true/false on every
+     * keystroke while its debounced request is in flight, which was kicking
+     * the field out of focus mid-typing. Only a field whose `loading` means
+     * "the master list hasn't loaded yet" (nothing to search until it does)
+     * should keep the default disabling behavior.
+     */
+    disableWhileLoading?: boolean;
 }) {
     const selectedIds = useMemo(() => new Set(selected.map((option) => option.id)), [selected]);
     const belowMinLength = minQueryLength != null && query.trim().length < minQueryLength;
@@ -249,9 +259,9 @@ function MultiSearchableSelect<TId extends string | number = number>({
                     onChange={(event) => onQueryChange(event.target.value)}
                     onFocus={onFocus}
                     onBlur={() => window.setTimeout(onBlur, 120)}
-                    placeholder={loading ? "Loading..." : placeholder}
+                    placeholder={loading && options.length === 0 ? "Loading..." : placeholder}
                     className="w-full rounded-xl border border-(--line) bg-white py-2 pl-10 pr-3"
-                    disabled={loading && options.length === 0}
+                    disabled={disableWhileLoading && loading && options.length === 0}
                 />
             </div>
 
@@ -301,9 +311,8 @@ function MultiSearchableSelect<TId extends string | number = number>({
                                         <button
                                             type="button"
                                             onMouseDown={() => onToggle(option)}
-                                            className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm hover:bg-(--chip) ${
-                                                isSelected ? "bg-(--chip)" : ""
-                                            }`}
+                                            className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm hover:bg-(--chip) ${isSelected ? "bg-(--chip)" : ""
+                                                }`}
                                         >
                                             <span>{option.name}</span>
                                             {isSelected ? <span className="text-(--brand)">✓</span> : null}
@@ -735,17 +744,17 @@ export default function MarginAnalyticsPage() {
     // shouldn't be disabled just because the user never clicked a dropdown row.
     const hasAnyFilter = Boolean(
         selectedCategory ||
-            selectedBrand ||
-            selectedOrigin ||
-            selectedRimDiameters.length > 0 ||
-            selectedUnifiedLots.length > 0 ||
-            selectedProduct ||
-            categoryQuery.trim() ||
-            brandQuery.trim() ||
-            originQuery.trim() ||
-            rimDiameterQuery.trim() ||
-            unifiedLotQuery.trim() ||
-            productQuery.trim()
+        selectedBrand ||
+        selectedOrigin ||
+        selectedRimDiameters.length > 0 ||
+        selectedUnifiedLots.length > 0 ||
+        selectedProduct ||
+        categoryQuery.trim() ||
+        brandQuery.trim() ||
+        originQuery.trim() ||
+        rimDiameterQuery.trim() ||
+        unifiedLotQuery.trim() ||
+        productQuery.trim()
     );
 
     const filteredSortedRows = useMemo(() => {
@@ -753,12 +762,12 @@ export default function MarginAnalyticsPage() {
         const query = tableSearch.trim().toLowerCase();
         const filtered = query
             ? report.rows.filter(
-                  (row) =>
-                      row.productName.toLowerCase().includes(query) ||
-                      row.brandName.toLowerCase().includes(query) ||
-                      row.categoryName.toLowerCase().includes(query) ||
-                      row.originName.toLowerCase().includes(query)
-              )
+                (row) =>
+                    row.productName.toLowerCase().includes(query) ||
+                    row.brandName.toLowerCase().includes(query) ||
+                    row.categoryName.toLowerCase().includes(query) ||
+                    row.originName.toLowerCase().includes(query)
+            )
             : report.rows;
 
         const sorted = [...filtered].sort((a, b) => {
@@ -880,11 +889,11 @@ export default function MarginAnalyticsPage() {
 
         const hasAnyResolvedFilter = Boolean(
             resolvedCategory ||
-                resolvedBrand ||
-                resolvedOrigin ||
-                resolvedRimDiameters.length > 0 ||
-                resolvedUnifiedLots.length > 0 ||
-                resolvedProduct
+            resolvedBrand ||
+            resolvedOrigin ||
+            resolvedRimDiameters.length > 0 ||
+            resolvedUnifiedLots.length > 0 ||
+            resolvedProduct
         );
         if (!hasAnyResolvedFilter) {
             return;
@@ -1285,6 +1294,7 @@ export default function MarginAnalyticsPage() {
                         onRemove={(id) => setSelectedUnifiedLots((current) => current.filter((item) => item.id !== id))}
                         loading={unifiedLotLoading}
                         loadingMore={unifiedLotLoadingMore}
+                        disableWhileLoading={false}
                         minQueryLength={MIN_SEARCH_QUERY_LENGTH}
                         emptyText="No unified lots found."
                         menuOpen={unifiedLotMenuOpen}
@@ -1302,9 +1312,9 @@ export default function MarginAnalyticsPage() {
                     />
 
                     <div className="sm:col-span-2">
-                        <p className="text-sm font-medium">Exclude from result</p>
+                        <p className="text-md font-medium">Exclude from result</p>
+
                         <p className="text-xs text-(--ink-soft)">
-                            Anything picked in these fields is removed from the report, not scoped to it.
                         </p>
                     </div>
 
@@ -1386,9 +1396,6 @@ export default function MarginAnalyticsPage() {
                         />
                         <span className="text-sm">
                             Exclude Dropship purchase orders
-                            <span className="block text-xs text-(--ink-soft)">
-                                Off: dropship POs count like any other. On: purchase orders whose Deliver To is Dropship are left out.
-                            </span>
                         </span>
                     </label>
 
@@ -1469,9 +1476,8 @@ export default function MarginAnalyticsPage() {
                                 <div className="rounded-lg bg-(--chip) px-2.5 py-1.5">
                                     <p className="text-[10px] text-(--ink-soft)">Operation</p>
                                     <p
-                                        className={`text-xs font-semibold ${
-                                            report.highlights.avgOperationCostPerUnit < 0 ? "text-red-600" : ""
-                                        }`}
+                                        className={`text-xs font-semibold ${report.highlights.avgOperationCostPerUnit < 0 ? "text-red-600" : ""
+                                            }`}
                                     >
                                         {formatCurrency(report.highlights.avgOperationCostPerUnit, report.currencyCode)}
                                     </p>
@@ -1496,9 +1502,8 @@ export default function MarginAnalyticsPage() {
                         <article className="flex flex-col items-center justify-center rounded-2xl border border-(--line) bg-(--card) p-5 text-center shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
                             <p className="text-sm text-(--ink-soft)">Avg Margin %</p>
                             <p
-                                className={`mt-2 font-display text-3xl ${
-                                    report.highlights.avgMarginPercent < 0 ? "text-red-600" : ""
-                                }`}
+                                className={`mt-2 font-display text-3xl ${report.highlights.avgMarginPercent < 0 ? "text-red-600" : ""
+                                    }`}
                             >
                                 {formatNumber(report.highlights.avgMarginPercent)}%
                             </p>
@@ -1506,9 +1511,8 @@ export default function MarginAnalyticsPage() {
                         <article className="flex flex-col items-center justify-center rounded-2xl border border-(--line) bg-(--card) p-5 text-center shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
                             <p className="text-sm text-(--ink-soft)">Est. Profit / Loss</p>
                             <p
-                                className={`mt-2 font-display text-3xl ${
-                                    report.highlights.totalEstimatedProfitLoss < 0 ? "text-red-600" : ""
-                                }`}
+                                className={`mt-2 font-display text-3xl ${report.highlights.totalEstimatedProfitLoss < 0 ? "text-red-600" : ""
+                                    }`}
                             >
                                 {formatCurrency(report.highlights.totalEstimatedProfitLoss, report.currencyCode)}
                             </p>
@@ -1771,9 +1775,8 @@ export default function MarginAnalyticsPage() {
                                                                     <div className="rounded-xl border border-(--line) bg-(--card) px-3.5 py-2.5">
                                                                         <p className="text-[11px] text-(--ink-soft)">Operation cost</p>
                                                                         <p
-                                                                            className={`mt-1 text-sm font-semibold ${
-                                                                                row.avgOperationCostPerUnit < 0 ? "text-red-600" : ""
-                                                                            }`}
+                                                                            className={`mt-1 text-sm font-semibold ${row.avgOperationCostPerUnit < 0 ? "text-red-600" : ""
+                                                                                }`}
                                                                         >
                                                                             {formatCurrency(row.avgOperationCostPerUnit, report.currencyCode)}
                                                                         </p>
