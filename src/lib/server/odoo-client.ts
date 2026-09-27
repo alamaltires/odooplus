@@ -6331,6 +6331,12 @@ export async function getMarginAnalyticsReport(
             ["product_id", "in", finalProductIds],
             ["state", "=", "done"],
             ["purchase_line_id", "!=", false],
+            // Only count receipts against confirmed, fully-billed purchase
+            // orders — draft/cancelled POs and ones still awaiting a bill
+            // don't belong in a cost report (verified live: unbilled/cancelled
+            // POs were inflating Avg Total Cost).
+            ["purchase_line_id.order_id.state", "in", ["purchase", "done"]],
+            ["purchase_line_id.order_id.invoice_status", "=", "invoiced"],
             ["date", ">=", from],
             ["date", "<=", to],
         ];
@@ -6420,6 +6426,8 @@ export async function getMarginAnalyticsReport(
         const purchaseLineDomain: unknown[] = [
             ["product_id", "in", finalProductIds],
             ["order_id.state", "in", ["purchase", "done"]],
+            // Fully-billed only (see the transaction-basis branch above for why).
+            ["order_id.invoice_status", "=", "invoiced"],
             ["order_id.date_order", ">=", from],
             ["order_id.date_order", "<=", to],
         ];
@@ -7314,6 +7322,9 @@ export async function getMarginAnalyticsBreakdown(
             ["product_id", "=", productId],
             ["state", "=", "done"],
             ["purchase_line_id", "!=", false],
+            // Mirrors the report: confirmed, fully-billed POs only.
+            ["purchase_line_id.order_id.state", "in", ["purchase", "done"]],
+            ["purchase_line_id.order_id.invoice_status", "=", "invoiced"],
             ["date", ">=", from],
             ["date", "<=", to],
         ];
@@ -7396,6 +7407,8 @@ export async function getMarginAnalyticsBreakdown(
         const purchaseDomain: unknown[] = [
             ["product_id", "=", productId],
             ["order_id.state", "in", ["purchase", "done"]],
+            // Mirrors the report: fully-billed POs only.
+            ["order_id.invoice_status", "=", "invoiced"],
             ["order_id.date_order", ">=", from],
             ["order_id.date_order", "<=", to],
         ];
