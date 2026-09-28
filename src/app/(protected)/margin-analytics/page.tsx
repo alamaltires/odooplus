@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, FormEvent, UIEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Coins, Download, ListTree, PiggyBank, Search, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Coins, Download, ListTree, Percent, Search, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { Select2 } from "@/components/select2";
 import { resolveExactNameMatch } from "@/lib/combobox-match";
@@ -63,7 +63,7 @@ const FLAG_STYLES: Record<RowFlag, string> = {
     "sold-without-purchase": "bg-(--chip) text-(--ink-soft)",
     "no-landed-cost": "bg-amber-100 text-amber-800",
     "negative-margin": "bg-red-100 text-red-700",
-    "has-cost-correction": "bg-[rgba(32,98,176,0.12)] text-(--brand)",
+    "has-cost-correction": "bg-[rgba(229,26,39,0.12)] text-(--brand)",
 };
 
 type Highlights = {
@@ -1106,7 +1106,7 @@ export default function MarginAnalyticsPage() {
                 <div>
                     <h1 className="font-display text-3xl">Margin Analytics</h1>
                 </div>
-                <PiggyBank className="h-8 w-8 text-(--brand)" aria-hidden="true" />
+                <Percent className="h-8 w-8 text-(--brand)" aria-hidden="true" />
             </div>
 
             <form onSubmit={handleGenerate} className="mt-6 rounded-2xl border border-(--line) bg-(--card) p-5">
@@ -1482,7 +1482,7 @@ export default function MarginAnalyticsPage() {
                                         {formatCurrency(report.highlights.avgOperationCostPerUnit, report.currencyCode)}
                                     </p>
                                 </div>
-                                <div className="rounded-lg bg-[rgba(32,98,176,0.08)] px-2.5 py-1.5">
+                                <div className="rounded-lg bg-[rgba(229,26,39,0.08)] px-2.5 py-1.5">
                                     <p className="text-[10px] text-(--ink-soft)">Final Landed</p>
                                     <p className="text-xs font-semibold text-(--brand)">
                                         {formatCurrency(report.highlights.avgFinalLandedCostPerUnit, report.currencyCode)}
@@ -1781,7 +1781,7 @@ export default function MarginAnalyticsPage() {
                                                                             {formatCurrency(row.avgOperationCostPerUnit, report.currencyCode)}
                                                                         </p>
                                                                     </div>
-                                                                    <div className="rounded-xl border border-(--brand)/30 bg-[rgba(32,98,176,0.06)] px-3.5 py-2.5">
+                                                                    <div className="rounded-xl border border-(--brand)/30 bg-[rgba(229,26,39,0.06)] px-3.5 py-2.5">
                                                                         <p className="text-[11px] text-(--ink-soft)">Final landed cost</p>
                                                                         <p className="mt-1 text-sm font-semibold text-(--brand)">
                                                                             {formatCurrency(row.avgFinalLandedCostPerUnit, report.currencyCode)}

@@ -58,7 +58,7 @@ const REQUEST_TYPE_LABELS: Record<ProductRequestType, string> = {
 };
 
 const REQUEST_TYPE_STYLES: Record<ProductRequestType, string> = {
-    new_product: "bg-[rgba(32,98,176,0.12)] text-(--brand)",
+    new_product: "bg-[rgba(229,26,39,0.12)] text-(--brand)",
     missing_size: "bg-amber-100 text-amber-800",
     missing_pattern: "bg-[rgba(109,40,217,0.1)] text-purple-700",
 };
@@ -439,7 +439,7 @@ export default function ProductRequestsPage() {
 
                             <form onSubmit={handleSubmitRequest} className="mt-4 space-y-4">
                                 {referenceProduct ? (
-                                    <div className="flex items-center gap-2 rounded-xl border border-(--brand) bg-[rgba(32,98,176,0.06)] px-3 py-2 text-sm">
+                                    <div className="flex items-center gap-2 rounded-xl border border-(--brand) bg-[rgba(229,26,39,0.06)] px-3 py-2 text-sm">
                                         <Link2 className="h-4 w-4 shrink-0 text-(--brand)" aria-hidden="true" />
                                         <span className="min-w-0 flex-1 truncate">
                                             Reference: <span className="font-medium">{referenceProduct.name}</span>
@@ -462,7 +462,7 @@ export default function ProductRequestsPage() {
                                             onClick={() => setRequestType(option.value)}
                                             className={`rounded-xl border px-4 py-2.5 text-left text-sm font-medium transition ${
                                                 requestType === option.value
-                                                    ? "border-(--brand) bg-[rgba(32,98,176,0.08)] text-(--brand)"
+                                                    ? "border-(--brand) bg-[rgba(229,26,39,0.08)] text-(--brand)"
                                                     : "border-(--line) bg-white text-(--ink) hover:bg-(--chip)"
                                             }`}
                                         >

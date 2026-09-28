@@ -4,7 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useCallback, useState } from "react";
-import { ClipboardList, HandCoins, LayoutDashboard, LogOut, Menu, PackageSearch, PiggyBank, ScanSearch, Settings, ShoppingBasket, Target, TrendingUp, Users, X, type LucideIcon } from "lucide-react";
+import { ClipboardList, HandCoins, LayoutDashboard, LogOut, Menu, PackageSearch, Percent, ScanSearch, Settings, ShoppingBasket, Target, TrendingUp, Users, X, type LucideIcon } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { CompanySelector } from "@/components/company-selector";
 import { APP_DEFINITIONS, defaultAppHrefsForRole } from "@/lib/app-permissions";
@@ -19,7 +19,7 @@ const ICONS: Record<string, LucideIcon> = {
     "/product-requests": PackageSearch,
     "/purchase-order": ShoppingBasket,
     "/products-performance": TrendingUp,
-    "/margin-analytics": PiggyBank,
+    "/margin-analytics": Percent,
     "/salesperson-activity": Users,
     "/sales-targets": Target,
     "/payment-followup": HandCoins,
@@ -81,7 +81,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
     const brandBlock = (
         <div className="flex items-center gap-3 px-5 pt-6 pb-5">
-            <div className="shrink-0 overflow-hidden rounded-2xl shadow-[0_10px_24px_rgba(109,40,217,0.18)]">
+            <div className="shrink-0 overflow-hidden rounded-2xl shadow-[0_10px_24px_rgba(229,26,39,0.18)]">
                 <Image src="/logo.png" alt="Al Amal Odoo++ logo" width={40} height={40} className="h-10 w-10" priority unoptimized />
             </div>
             <div className="min-w-0">
@@ -109,7 +109,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                             }
                         }}
                         className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${active
-                            ? "bg-(--brand) text-white shadow-[0_8px_20px_rgba(32,98,176,0.24)]"
+                            ? "bg-(--brand) text-white shadow-[0_8px_20px_rgba(229,26,39,0.24)]"
                             : "text-(--ink) hover:bg-(--chip)"
                             }`}
                     >
@@ -130,7 +130,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <button
                 type="button"
                 onClick={() => logout()}
-                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[rgba(32,98,176,0.2)] bg-white text-(--brand) transition hover:bg-(--chip) hover:text-(--ink)"
+                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[rgba(229,26,39,0.2)] bg-white text-(--brand) transition hover:bg-(--chip) hover:text-(--ink)"
                 aria-label="Sign out"
                 title="Sign out"
             >
@@ -150,49 +150,57 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </aside>
 
             {/* Mobile top bar */}
-            <header className="flex items-center justify-between border-b border-(--line) bg-(--card)/90 px-4 py-3 shadow-[0_10px_35px_rgba(32,98,176,0.08)] backdrop-blur lg:hidden">
-                <div className="flex items-center gap-2.5">
-                    <div className="overflow-hidden rounded-xl shadow-[0_6px_16px_rgba(109,40,217,0.18)]">
-                        <Image src="/logo.png" alt="Al Amal Odoo++ logo" width={32} height={32} className="h-8 w-8" priority unoptimized />
-                    </div>
-                    <p className="font-display text-base tracking-tight text-(--brand)">Al Amal Tyres</p>
-                </div>
+            <header className="flex items-center gap-2.5 border-b border-(--line) bg-(--card)/90 px-4 py-3 shadow-[0_10px_35px_rgba(229,26,39,0.08)] backdrop-blur lg:hidden">
                 <button
                     type="button"
                     onClick={() => setMobileNavOpen(true)}
-                    className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[rgba(32,98,176,0.2)] bg-white text-(--brand)"
+                    className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[rgba(229,26,39,0.2)] bg-white text-(--brand)"
                     aria-label="Open navigation"
                 >
                     <Menu className="h-4 w-4" aria-hidden="true" />
                 </button>
+                <div className="flex items-center gap-2.5">
+                    <div className="overflow-hidden rounded-xl shadow-[0_6px_16px_rgba(229,26,39,0.18)]">
+                        <Image src="/logo.png" alt="Al Amal Odoo++ logo" width={32} height={32} className="h-8 w-8" priority unoptimized />
+                    </div>
+                    <p className="font-display text-base tracking-tight text-(--brand)">Al Amal Tyres</p>
+                </div>
             </header>
 
-            {/* Mobile slide-over sidebar */}
-            {mobileNavOpen ? (
-                <div className="fixed inset-0 z-50 lg:hidden">
-                    <div
-                        className="absolute inset-0 bg-black/40 backdrop-blur-sm"
-                        onClick={() => setMobileNavOpen(false)}
-                        aria-hidden="true"
-                    />
-                    <aside className="absolute inset-y-0 left-0 flex w-72 max-w-[85vw] flex-col bg-(--card) shadow-2xl">
-                        <div className="flex items-center justify-between px-2">
-                            {brandBlock}
-                            <button
-                                type="button"
-                                onClick={() => setMobileNavOpen(false)}
-                                className="mr-4 inline-flex h-9 w-9 items-center justify-center rounded-full border border-(--line) bg-white text-(--ink)"
-                                aria-label="Close navigation"
-                            >
-                                <X className="h-4 w-4" aria-hidden="true" />
-                            </button>
-                        </div>
-                        <CompanySelector />
-                        {navList}
-                        {userBlock}
-                    </aside>
-                </div>
-            ) : null}
+            {/* Mobile slide-over sidebar — kept mounted (not conditionally
+                rendered) so the transform/opacity transitions below can
+                animate both the open AND the close, instead of just
+                popping in and vanishing instantly. */}
+            <div
+                className={`fixed inset-0 z-50 lg:hidden ${mobileNavOpen ? "" : "pointer-events-none"}`}
+                aria-hidden={!mobileNavOpen}
+            >
+                <div
+                    className={`absolute inset-0 bg-black/40 backdrop-blur-sm transition-opacity duration-300 ease-out ${mobileNavOpen ? "opacity-100" : "opacity-0"
+                        }`}
+                    onClick={() => setMobileNavOpen(false)}
+                    aria-hidden="true"
+                />
+                <aside
+                    className={`absolute inset-y-0 left-0 flex w-72 max-w-[85vw] flex-col bg-(--card) shadow-2xl transition-transform duration-300 ease-out ${mobileNavOpen ? "translate-x-0" : "-translate-x-full"
+                        }`}
+                >
+                    <div className="flex items-center justify-between px-2">
+                        {brandBlock}
+                        <button
+                            type="button"
+                            onClick={() => setMobileNavOpen(false)}
+                            className="mr-4 inline-flex h-9 w-9 items-center justify-center rounded-full border border-(--line) bg-white text-(--ink)"
+                            aria-label="Close navigation"
+                        >
+                            <X className="h-4 w-4" aria-hidden="true" />
+                        </button>
+                    </div>
+                    <CompanySelector />
+                    {navList}
+                    {userBlock}
+                </aside>
+            </div>
 
             <main className="min-w-0 flex-1 px-4 py-8 sm:px-6 lg:px-8">{children}</main>
         </div>

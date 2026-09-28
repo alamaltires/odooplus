@@ -152,7 +152,7 @@ function SavedBackorderCard({ backorder }: { backorder: SavedBackorder }) {
                     <span className="rounded-full bg-(--chip) px-3 py-1 text-xs font-medium text-(--ink-soft)">
                         {summary.totalItems} items
                     </span>
-                    <span className="rounded-full bg-[rgba(32,98,176,0.08)] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-(--brand)">
+                    <span className="rounded-full bg-[rgba(229,26,39,0.08)] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-(--brand)">
                         {sourceLabel}
                     </span>
                 </div>

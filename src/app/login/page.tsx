@@ -33,7 +33,7 @@ export default function LoginPage() {
         <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-(--bg) p-6">
             <div className="pointer-events-none absolute -left-20 top-10 h-64 w-64 rounded-full bg-(--brand-soft) blur-3xl" />
             <div className="pointer-events-none absolute -right-16 bottom-0 h-72 w-72 rounded-full bg-(--mint-soft) blur-3xl" />
-            <div className="pointer-events-none absolute inset-x-0 top-0 h-56 bg-linear-to-b from-[rgba(32,98,176,0.08)] to-transparent" />
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-56 bg-linear-to-b from-[rgba(229,26,39,0.08)] to-transparent" />
 
             <form
                 onSubmit={handleSubmit}
@@ -47,8 +47,8 @@ export default function LoginPage() {
                         <p className="mt-4 font-display text-3xl text-(--brand)">Welcome back</p>
                         <p className="mt-2 text-sm text-(--ink-soft)">Sign in to continue to your Odoo operations workspace.</p>
                     </div>
-                    <div className="overflow-hidden rounded-2xl shadow-[0_10px_24px_rgba(109,40,217,0.18)]">
-                        <Image src="/logo-odoopp.svg" alt="Odoo++ logo" width={44} height={44} className="h-11 w-11" priority unoptimized />
+                    <div className="overflow-hidden rounded-2xl shadow-[0_10px_24px_rgba(229,26,39,0.18)]">
+                        <Image src="/logo.png" alt="Al Amal Odoo++ logo" width={44} height={44} className="h-11 w-11" priority unoptimized />
                     </div>
                 </div>
 
