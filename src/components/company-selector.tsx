@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { useRouter } from "next/navigation";
 import { Building2, ChevronDown } from "lucide-react";
 import { getCompanies } from "@/lib/client-odoo";
 import {
@@ -14,7 +13,6 @@ import {
 type Company = { id: number; name: string };
 
 export function CompanySelector() {
-    const router = useRouter();
     const [companies, setCompanies] = useState<Company[]>([]);
     const [loading, setLoading] = useState(true);
     const [open, setOpen] = useState(false);
@@ -64,7 +62,13 @@ export function CompanySelector() {
             selectedIds.length !== selectionOnOpenRef.current.length ||
             selectedIds.some((id) => !selectionOnOpenRef.current.includes(id));
         if (changed) {
-            router.refresh();
+            // Every page here is a client component that fetches its own
+            // data via manual `fetch` calls (reading the selected company
+            // ids at call time), not React Server Components — so
+            // `router.refresh()` has nothing to re-run and is a no-op.
+            // A real reload is what actually re-fetches every page's data
+            // against the new company selection.
+            window.location.reload();
         }
     }
 
