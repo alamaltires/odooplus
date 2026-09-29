@@ -6097,9 +6097,10 @@ export async function getMarginAnalyticsReport(
         /**
          * Both modes scope the PURCHASE side by the order's own Order Date —
          * they differ only in which of Odoo's own PO-line quantity fields is
-         * counted: "order" (default) counts `qty_received` (what's actually
-         * come in, not just what was ordered); "transaction" ("Receiving")
-         * counts `qty_invoiced` (what's actually been billed by the vendor).
+         * counted: "order" (default) counts `qty_to_invoice + qty_invoiced`
+         * (everything billable off the line — still to be billed, plus what's
+         * already been billed); "transaction" ("Receiving") counts just
+         * `qty_invoiced` (what's actually been billed by the vendor).
          * The SALES side still differs by date: "order" scopes by the sale
          * order's own Order Date, "transaction" by the customer invoice's
          * own Invoice Date — an SO confirmed in January but invoiced in
@@ -6519,8 +6520,10 @@ export async function getMarginAnalyticsReport(
     // Step 1: purchase order lines for matched products, scoped by the
     // ORDER's own date range in both modes — they differ only in which of
     // Odoo's own PO-line quantity fields gets counted:
-    //   - "order" (default): `qty_received` — what's actually come in, not
-    //     just what was ordered.
+    //   - "order" (default): `qty_to_invoice + qty_invoiced` — everything
+    //     that's actually billable off the line (still to be billed, plus
+    //     what's already been billed), which tracks real receiving even
+    //     when `qty_received` itself lags or is stale on this deployment.
     //   - "transaction" ("Receiving"): `qty_invoiced` — what's actually been
     //     billed by the vendor, not just received.
     // Per-unit price always comes from the line's own average
@@ -6562,6 +6565,7 @@ export async function getMarginAnalyticsReport(
                 "product_qty",
                 "qty_received",
                 "qty_invoiced",
+                "qty_to_invoice",
                 "price_subtotal",
                 "currency_id",
                 "order_id",
@@ -6592,7 +6596,10 @@ export async function getMarginAnalyticsReport(
         const orderedQty = Number(line.product_qty ?? 0);
         const lineSubtotal = Number(line.price_subtotal ?? 0);
         const unitPrice = orderedQty > 0 ? lineSubtotal / orderedQty : 0;
-        const qty = dateBasis === "transaction" ? Number(line.qty_invoiced ?? 0) : Number(line.qty_received ?? 0);
+        const qty =
+            dateBasis === "transaction"
+                ? Number(line.qty_invoiced ?? 0)
+                : Number(line.qty_to_invoice ?? 0) + Number(line.qty_invoiced ?? 0);
         if (qty <= 0) {
             continue;
         }
@@ -7214,6 +7221,10 @@ export type MarginAnalyticsBreakdownRow = {
     currencyCode: string;
     amount: number;
     note: string;
+    /** Purchase Orders rows only: the landed cost matched to this specific
+     * PO line (via its receipt move), and the resulting per-unit price. */
+    landedCostAmount?: number;
+    finalUnitPrice?: number;
 };
 
 export type MarginAnalyticsBreakdown = {
@@ -7482,8 +7493,9 @@ export async function getMarginAnalyticsBreakdown(
 
     // Mirrors the report: scoped by the ORDER's own date range in both
     // modes, differing only in which quantity field is read off the line —
-    // `qty_received` for "order" (default), `qty_invoiced` for "transaction"
-    // ("Receiving"). Per-unit price always comes from the line's own average.
+    // `qty_to_invoice + qty_invoiced` for "order" (default), `qty_invoiced`
+    // for "transaction" ("Receiving"). Per-unit price always comes from the
+    // line's own average.
     const purchaseDomain: unknown[] = [
         ["product_id", "=", productId],
         // See the report's identical domain for why `invoice_status` is
@@ -7506,7 +7518,7 @@ export async function getMarginAnalyticsBreakdown(
         uid,
         "purchase.order.line",
         purchaseDomain,
-        ["id", "product_qty", "qty_received", "qty_invoiced", "price_subtotal", "currency_id", "order_id"]
+        ["id", "product_qty", "qty_received", "qty_invoiced", "qty_to_invoice", "price_subtotal", "currency_id", "order_id"]
     );
     await ensureCurrencyMultipliers(poLines.map((line) => getRelationalId(line.currency_id)));
 
@@ -7523,6 +7535,10 @@ export async function getMarginAnalyticsBreakdown(
     const orderById = new Map(orders.map((order) => [Number(order.id ?? 0), order]));
 
     const poLineIds: number[] = [];
+    // Lets the landed-cost pass below (Step 1a) write each PO line's matched
+    // landed cost / final unit price back onto the exact row it belongs to,
+    // instead of only having the aggregate total available.
+    const purchaseRowByLineId = new Map<number, MarginAnalyticsBreakdownRow>();
     for (const line of poLines) {
         const lineId = Number(line.id ?? 0);
         if (lineId > 0) {
@@ -7536,7 +7552,10 @@ export async function getMarginAnalyticsBreakdown(
         const orderedQty = Number(line.product_qty ?? 0);
         const subtotal = Number(line.price_subtotal ?? 0);
         const unitPrice = orderedQty > 0 ? subtotal / orderedQty : 0;
-        const qty = dateBasis === "transaction" ? Number(line.qty_invoiced ?? 0) : Number(line.qty_received ?? 0);
+        const qty =
+            dateBasis === "transaction"
+                ? Number(line.qty_invoiced ?? 0)
+                : Number(line.qty_to_invoice ?? 0) + Number(line.qty_invoiced ?? 0);
         if (qty <= 0) {
             continue;
         }
@@ -7546,7 +7565,7 @@ export async function getMarginAnalyticsBreakdown(
             continue;
         }
 
-        purchases.push({
+        const purchaseRow: MarginAnalyticsBreakdownRow = {
             reference: toDisplayString(order?.name) || `PO #${orderId ?? "?"}`,
             date: normalizeOdooDate(order?.date_order),
             partnerName: getRelationalName(order?.partner_id) || "",
@@ -7555,9 +7574,23 @@ export async function getMarginAnalyticsBreakdown(
             unitPrice: unitPrice * multiplier,
             currencyCode: getRelationalName(line.currency_id) || TARGET_CURRENCY_CODE,
             amount: unitPrice * qty * multiplier,
-            note: dateBasis === "transaction" ? "Purchase order line (qty billed)" : "Purchase order line (qty received)",
-        });
+            note:
+                dateBasis === "transaction"
+                    ? "Purchase order line (qty billed)"
+                    : "Purchase order line (qty to be billed + qty billed)",
+            landedCostAmount: 0,
+            finalUnitPrice: unitPrice * multiplier,
+        };
+        purchases.push(purchaseRow);
+        if (lineId > 0) {
+            purchaseRowByLineId.set(lineId, purchaseRow);
+        }
     }
+
+    // Which purchase line each receipt move came from, so the landed cost
+    // allocated to that move (below) can be matched back to the one PO line
+    // row it actually landed on instead of only the product-wide total.
+    const purchaseLineIdByMoveId = new Map<number, number>();
 
     if (poLineIds.length > 0) {
         const moves = await searchReadAll(
@@ -7565,9 +7598,16 @@ export async function getMarginAnalyticsBreakdown(
             uid,
             "stock.move",
             [["purchase_line_id", "in", poLineIds], ["state", "=", "done"]],
-            ["id"]
+            ["id", "purchase_line_id"]
         );
         landedCostMoveIds = moves.map((move) => Number(move.id ?? 0)).filter((id) => id > 0);
+        for (const move of moves) {
+            const moveId = Number(move.id ?? 0);
+            const purchaseLineId = getRelationalId(move.purchase_line_id);
+            if (moveId > 0 && purchaseLineId) {
+                purchaseLineIdByMoveId.set(moveId, purchaseLineId);
+            }
+        }
     }
 
     // Which lots each receipt actually brought in, so a purchase row can say
@@ -7595,7 +7635,7 @@ export async function getMarginAnalyticsBreakdown(
             uid,
             "stock.valuation.adjustment.lines",
             [["move_id", "in", landedCostMoveIds], ["product_id", "=", productId]],
-            ["cost_id", "additional_landed_cost", "currency_id", "quantity"]
+            ["move_id", "cost_id", "additional_landed_cost", "currency_id", "quantity"]
         );
         await ensureCurrencyMultipliers(valuationLines.map((line) => getRelationalId(line.currency_id)));
 
@@ -7633,6 +7673,23 @@ export async function getMarginAnalyticsBreakdown(
                 amount,
                 note: "Odoo landed-cost allocation",
             });
+
+            // Match this allocation back to the one PO line row it landed
+            // against (via the receipt move it was posted on), so that row
+            // can show its own "Landed Cost" and "Final Unit Price" instead
+            // of only the product-wide total.
+            const moveId = getRelationalId(line.move_id);
+            const purchaseLineId = moveId ? purchaseLineIdByMoveId.get(moveId) : undefined;
+            const purchaseRow = purchaseLineId ? purchaseRowByLineId.get(purchaseLineId) : undefined;
+            if (purchaseRow) {
+                purchaseRow.landedCostAmount = (purchaseRow.landedCostAmount ?? 0) + amount;
+            }
+        }
+
+        for (const row of purchaseRowByLineId.values()) {
+            const landedCostAmount = row.landedCostAmount ?? 0;
+            const perUnitLandedCost = row.quantity > 0 ? landedCostAmount / row.quantity : 0;
+            row.finalUnitPrice = row.unitPrice + perUnitLandedCost;
         }
     }
 

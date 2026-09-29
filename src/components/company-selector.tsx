@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useRouter } from "next/navigation";
 import { Building2, ChevronDown } from "lucide-react";
 import { getCompanies } from "@/lib/client-odoo";
 import {
@@ -13,10 +14,14 @@ import {
 type Company = { id: number; name: string };
 
 export function CompanySelector() {
+    const router = useRouter();
     const [companies, setCompanies] = useState<Company[]>([]);
     const [loading, setLoading] = useState(true);
     const [open, setOpen] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
+    // Snapshot of the selection when the dropdown opened, so closing it can
+    // tell whether anything actually changed and is worth a refresh.
+    const selectionOnOpenRef = useRef<number[]>([]);
 
     const selectedIds = useSyncExternalStore(
         subscribeSelectedCompanyIds,
@@ -53,18 +58,29 @@ export function CompanySelector() {
         };
     }, []);
 
+    function closeDropdown() {
+        setOpen(false);
+        const changed =
+            selectedIds.length !== selectionOnOpenRef.current.length ||
+            selectedIds.some((id) => !selectionOnOpenRef.current.includes(id));
+        if (changed) {
+            router.refresh();
+        }
+    }
+
     useEffect(() => {
         if (!open) return;
 
         function handleClickOutside(event: MouseEvent) {
             if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
-                setOpen(false);
+                closeDropdown();
             }
         }
 
         document.addEventListener("mousedown", handleClickOutside);
         return () => document.removeEventListener("mousedown", handleClickOutside);
-    }, [open]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open, selectedIds]);
 
     if (loading || companies.length <= 1) {
         return null;
@@ -94,7 +110,14 @@ export function CompanySelector() {
         <div ref={containerRef} className="relative px-3 pb-3">
             <button
                 type="button"
-                onClick={() => setOpen((value) => !value)}
+                onClick={() => {
+                    if (open) {
+                        closeDropdown();
+                    } else {
+                        selectionOnOpenRef.current = selectedIds;
+                        setOpen(true);
+                    }
+                }}
                 className="flex w-full items-center gap-2 rounded-xl border border-(--line) bg-white px-3 py-2 text-left text-sm font-medium text-(--ink) shadow-sm transition hover:bg-(--chip)"
             >
                 <Building2 className="h-4 w-4 shrink-0 text-(--brand)" aria-hidden="true" />

@@ -388,6 +388,10 @@ export type MarginBreakdownRow = {
     currencyCode: string;
     amount: number;
     note: string;
+    /** Purchase Orders rows only: the landed cost matched to this specific
+     * PO line, and the resulting per-unit price (unitPrice + landed cost). */
+    landedCostAmount?: number;
+    finalUnitPrice?: number;
 };
 
 export type MarginBreakdown = {

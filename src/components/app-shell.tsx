@@ -56,6 +56,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         if (visibleLinks.some((link) => path.startsWith(link.href))) return true;
         // Allow sub-pages under /orders/ for roles that have access to /orders/pending
         if (visibleLinks.some((link) => link.href === "/orders/pending") && path.startsWith("/orders/")) return true;
+        // Customer report pages are linked from Salesperson Activity and Payment
+        // Followup but aren't a sidebar entry of their own, so allow them for
+        // anyone with access to either of those apps.
+        if (
+            visibleLinks.some((link) => link.href === "/salesperson-activity" || link.href === "/payment-followup") &&
+            path.startsWith("/customers/")
+        ) {
+            return true;
+        }
+        // Sales target details drill-down is linked from Sales Targets but isn't
+        // its own sidebar entry, so allow it for anyone with access to Sales Targets.
+        if (visibleLinks.some((link) => link.href === "/sales-targets") && path.startsWith("/sales-target-details")) {
+            return true;
+        }
         return false;
     }, [role, visibleLinks]);
 

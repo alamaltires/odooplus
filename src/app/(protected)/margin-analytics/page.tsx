@@ -1840,6 +1840,7 @@ function BreakdownSection({
     quantityLabel,
     unitLabel,
     emptyText,
+    showLandedCostColumns,
 }: {
     title: string;
     subtitle: string;
@@ -1848,6 +1849,7 @@ function BreakdownSection({
     quantityLabel: string;
     unitLabel: string;
     emptyText: string;
+    showLandedCostColumns?: boolean;
 }) {
     const totalQty = rows.reduce((sum, row) => sum + row.quantity, 0);
     const totalAmount = rows.reduce((sum, row) => sum + row.amount, 0);
@@ -1877,6 +1879,12 @@ function BreakdownSection({
                                 <th className="px-3 py-2 font-medium">Lot</th>
                                 <th className="px-3 py-2 text-right font-medium">{quantityLabel}</th>
                                 <th className="px-3 py-2 text-right font-medium">{unitLabel}</th>
+                                {showLandedCostColumns ? (
+                                    <>
+                                        <th className="px-3 py-2 text-right font-medium">{`Landed Cost (${currencyCode})`}</th>
+                                        <th className="px-3 py-2 text-right font-medium">{`Final Unit Price (${currencyCode})`}</th>
+                                    </>
+                                ) : null}
                                 <th className="px-3 py-2 text-right font-medium">Amount</th>
                                 <th className="px-3 py-2 font-medium">Note</th>
                             </tr>
@@ -1892,6 +1900,14 @@ function BreakdownSection({
                                     </td>
                                     <td className="px-3 py-2 text-right">{formatNumber(row.quantity)}</td>
                                     <td className="px-3 py-2 text-right">{formatNumber(row.unitPrice)}</td>
+                                    {showLandedCostColumns ? (
+                                        <>
+                                            <td className="px-3 py-2 text-right">{formatNumber(row.landedCostAmount ?? 0)}</td>
+                                            <td className="px-3 py-2 text-right font-medium">
+                                                {formatNumber(row.finalUnitPrice ?? row.unitPrice)}
+                                            </td>
+                                        </>
+                                    ) : null}
                                     <td className={`px-3 py-2 text-right font-medium ${row.amount < 0 ? "text-red-600" : ""}`}>
                                         {formatNumber(row.amount)}
                                     </td>
@@ -1906,6 +1922,12 @@ function BreakdownSection({
                                 </td>
                                 <td className="px-3 py-2 text-right">{formatNumber(totalQty)}</td>
                                 <td className="px-3 py-2" />
+                                {showLandedCostColumns ? (
+                                    <>
+                                        <td className="px-3 py-2" />
+                                        <td className="px-3 py-2" />
+                                    </>
+                                ) : null}
                                 <td className="px-3 py-2 text-right">{formatNumber(totalAmount)}</td>
                                 <td className="px-3 py-2" />
                             </tr>
@@ -1974,7 +1996,13 @@ function BreakdownModal({
             ]);
             XLSX.utils.book_append_sheet(workbook, summarySheet, "Summary");
 
-            function appendSection(rows: MarginBreakdownRow[], sheetName: string, quantityLabel: string, unitLabel: string) {
+            function appendSection(
+                rows: MarginBreakdownRow[],
+                sheetName: string,
+                quantityLabel: string,
+                unitLabel: string,
+                includeLandedCostColumns?: boolean
+            ) {
                 const data = rows.map((row) => ({
                     Reference: row.reference,
                     Date: row.date,
@@ -1982,6 +2010,12 @@ function BreakdownModal({
                     Lot: row.lots.join(", "),
                     [quantityLabel]: row.quantity,
                     [unitLabel]: row.unitPrice,
+                    ...(includeLandedCostColumns
+                        ? {
+                              [`Landed Cost (${currencyCode})`]: row.landedCostAmount ?? 0,
+                              [`Final Unit Price (${currencyCode})`]: row.finalUnitPrice ?? row.unitPrice,
+                          }
+                        : {}),
                     Amount: row.amount,
                     Note: row.note,
                 }));
@@ -1989,7 +2023,7 @@ function BreakdownModal({
                 XLSX.utils.book_append_sheet(workbook, sheet, sheetName.slice(0, 31));
             }
 
-            appendSection(breakdown.purchases, "Purchase Orders", "Qty", `Unit (${currencyCode})`);
+            appendSection(breakdown.purchases, "Purchase Orders", "Qty", `Unit (${currencyCode})`, true);
             appendSection(breakdown.landedCosts, "Landed Cost Records", "Qty", `Per unit (${currencyCode})`);
             appendSection(breakdown.operationCosts, "Accounting Corrections", "Share %", `Entry (${currencyCode})`);
             appendSection(breakdown.sales, "Sales Orders", "Qty", `Unit (${currencyCode})`);
@@ -2135,6 +2169,7 @@ function BreakdownModal({
                                 quantityLabel="Qty"
                                 unitLabel={`Unit (${currencyCode})`}
                                 emptyText="No purchases matched this product in the selected period."
+                                showLandedCostColumns
                             />
 
                             <BreakdownSection
