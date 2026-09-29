@@ -2,10 +2,10 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Package, Users } from "lucide-react";
+import { Fragment, useEffect, useMemo, useState } from "react";
+import { ArrowLeft, ChevronDown, Package, Users } from "lucide-react";
 import { getSalesTargetDetails } from "@/lib/client-odoo";
-import { OdooSalesTargetDetailsReport } from "@/types/odoo";
+import { OdooSalesTargetBrandProduct, OdooSalesTargetDetailsReport } from "@/types/odoo";
 
 const months = [
     { value: 1, label: "January" },
@@ -66,6 +66,19 @@ export default function SalesTargetDetailsPage() {
         field: "totalSales",
         direction: "desc",
     });
+    const [expandedProductCategoryKeys, setExpandedProductCategoryKeys] = useState<Set<string>>(new Set());
+
+    function toggleProductCategory(key: string) {
+        setExpandedProductCategoryKeys((previous) => {
+            const next = new Set(previous);
+            if (next.has(key)) {
+                next.delete(key);
+            } else {
+                next.add(key);
+            }
+            return next;
+        });
+    }
 
     const currencyCode = details?.primaryCurrencyCode || "AED";
 
@@ -102,6 +115,39 @@ export default function SalesTargetDetailsPage() {
 
         return sorted;
     }, [details, productsSearch, productsSort]);
+
+    const productsByCategory = useMemo(() => {
+        const groups = new Map<
+            string,
+            {
+                categoryId: number | null;
+                categoryName: string;
+                products: OdooSalesTargetBrandProduct[];
+                quantitySold: number;
+                orderCount: number;
+                totalSales: number;
+            }
+        >();
+
+        for (const product of filteredSortedProducts) {
+            const key = product.categoryId !== null ? String(product.categoryId) : "none";
+            const group = groups.get(key) ?? {
+                categoryId: product.categoryId,
+                categoryName: product.categoryName,
+                products: [],
+                quantitySold: 0,
+                orderCount: 0,
+                totalSales: 0,
+            };
+            group.products.push(product);
+            group.quantitySold += product.quantitySold;
+            group.orderCount += product.orderCount;
+            group.totalSales += product.totalSales;
+            groups.set(key, group);
+        }
+
+        return Array.from(groups.values());
+    }, [filteredSortedProducts]);
 
     const filteredSortedCustomers = useMemo(() => {
         if (!details) {
@@ -328,14 +374,49 @@ export default function SalesTargetDetailsPage() {
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-(--line) bg-white">
-                                        {filteredSortedProducts.map((product) => (
-                                            <tr key={product.productId}>
-                                                <td className="px-4 py-3">{product.productName}</td>
-                                                <td className="px-4 py-3 text-right">{formatNumber(product.quantitySold)}</td>
-                                                <td className="px-4 py-3 text-right">{product.orderCount}</td>
-                                                <td className="px-4 py-3 text-right">{formatCurrency(product.totalSales, currencyCode)}</td>
-                                            </tr>
-                                        ))}
+                                        {productsByCategory.map((group) => {
+                                            const key = group.categoryId !== null ? String(group.categoryId) : "none";
+                                            const isExpanded = expandedProductCategoryKeys.has(key);
+                                            return (
+                                                <Fragment key={key}>
+                                                    <tr className="bg-(--chip)">
+                                                        <td className="px-4 py-3 font-medium">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => toggleProductCategory(key)}
+                                                                className="flex items-center gap-1.5 text-left hover:text-(--brand)"
+                                                            >
+                                                                <ChevronDown
+                                                                    className={`h-3.5 w-3.5 shrink-0 transition ${isExpanded ? "" : "-rotate-90"}`}
+                                                                    aria-hidden="true"
+                                                                />
+                                                                {group.categoryName}
+                                                                <span className="font-normal text-(--ink-soft)">
+                                                                    ({group.products.length})
+                                                                </span>
+                                                            </button>
+                                                        </td>
+                                                        <td className="px-4 py-3 text-right font-medium">{formatNumber(group.quantitySold)}</td>
+                                                        <td className="px-4 py-3 text-right font-medium">{group.orderCount}</td>
+                                                        <td className="px-4 py-3 text-right font-medium">
+                                                            {formatCurrency(group.totalSales, currencyCode)}
+                                                        </td>
+                                                    </tr>
+                                                    {isExpanded
+                                                        ? group.products.map((product) => (
+                                                            <tr key={product.productId}>
+                                                                <td className="py-3 pl-10 pr-4">{product.productName}</td>
+                                                                <td className="px-4 py-3 text-right">{formatNumber(product.quantitySold)}</td>
+                                                                <td className="px-4 py-3 text-right">{product.orderCount}</td>
+                                                                <td className="px-4 py-3 text-right">
+                                                                    {formatCurrency(product.totalSales, currencyCode)}
+                                                                </td>
+                                                            </tr>
+                                                        ))
+                                                        : null}
+                                                </Fragment>
+                                            );
+                                        })}
                                     </tbody>
                                 </table>
                             </div>

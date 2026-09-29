@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Gauge, ListTree, Mail, Plus, Target, Trash2 } from "lucide-react";
+import { Fragment, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, Gauge, ListTree, Mail, Plus, Target, Trash2 } from "lucide-react";
 import {
     getSalesTarget,
     markSalesTargetBrandMarketingEmailSent,
@@ -109,6 +109,29 @@ function emptyTargetEntry(): TargetEntryInput {
     };
 }
 
+/** Strips anything but digits and a single decimal point, so typed/pasted
+ * text (including an already-formatted "12,000") always reduces to a plain
+ * numeric string — what `targetAmount` is actually stored and parsed as. */
+function sanitizeNumericInput(value: string): string {
+    const cleaned = value.replace(/[^\d.]/g, "");
+    const firstDotIndex = cleaned.indexOf(".");
+    if (firstDotIndex === -1) {
+        return cleaned;
+    }
+    return cleaned.slice(0, firstDotIndex + 1) + cleaned.slice(firstDotIndex + 1).replace(/\./g, "");
+}
+
+/** Adds thousand separators to a plain numeric string for display, keeping
+ * a trailing decimal point/zeros intact while the user is still typing. */
+function formatThousands(rawValue: string): string {
+    if (!rawValue) {
+        return "";
+    }
+    const [integerPart, decimalPart] = rawValue.split(".");
+    const groupedInteger = integerPart.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    return decimalPart !== undefined ? `${groupedInteger}.${decimalPart}` : groupedInteger;
+}
+
 function ProgressBar({
     total,
     target,
@@ -187,7 +210,20 @@ export default function SalesTargetsPage() {
     const [sendingEmail, setSendingEmail] = useState(false);
     const [sendingBrandEmailId, setSendingBrandEmailId] = useState<number | null>(null);
     const [generalBreakdownOpen, setGeneralBreakdownOpen] = useState(false);
+    const [expandedBreakdownBrandIds, setExpandedBreakdownBrandIds] = useState<Set<number>>(new Set());
     const [message, setMessage] = useState<string | null>(null);
+
+    function toggleBreakdownBrand(brandId: number) {
+        setExpandedBreakdownBrandIds((previous) => {
+            const next = new Set(previous);
+            if (next.has(brandId)) {
+                next.delete(brandId);
+            } else {
+                next.add(brandId);
+            }
+            return next;
+        });
+    }
 
     const yearOptions = useMemo(() => {
         const now = currentYear();
@@ -381,6 +417,7 @@ export default function SalesTargetsPage() {
         const creditNoteBrandTotals = creditNotesApplied ? (report.creditNoteBrandTotals ?? []) : [];
 
         const achievedByTargetBrandId = new Map<number, number>();
+        const grossProfitByTargetBrandId = new Map<number, number>();
         for (const item of savedTargets) {
             if (item.isGeneral || typeof item.brandId !== "number") {
                 continue;
@@ -395,6 +432,19 @@ export default function SalesTargetsPage() {
                 .reduce((sum, cnBrandTotal) => sum + Number(cnBrandTotal.totalInvoiced || 0), 0);
 
             achievedByTargetBrandId.set(item.brandId, Number(Math.max(0, achieved - creditNoteDeduction).toFixed(2)));
+
+            // Estimated using Odoo's live product Cost (standard_price), so
+            // — unlike revenue — this can legitimately go negative and isn't
+            // clamped at 0.
+            const grossProfit = report.brandTotals
+                .filter((brandTotal) => brandTotal.brandId === item.brandId)
+                .reduce((sum, brandTotal) => sum + Number(brandTotal.grossProfit || 0), 0);
+
+            const creditNoteGrossProfitDeduction = creditNoteBrandTotals
+                .filter((cnBrandTotal) => cnBrandTotal.brandId === item.brandId)
+                .reduce((sum, cnBrandTotal) => sum + Number(cnBrandTotal.grossProfit || 0), 0);
+
+            grossProfitByTargetBrandId.set(item.brandId, Number((grossProfit - creditNoteGrossProfitDeduction).toFixed(2)));
         }
 
         const targetedAchieved = report.brandTotals.reduce((sum, brandTotal) => {
@@ -422,11 +472,15 @@ export default function SalesTargetsPage() {
             const progress = item.targetAmount > 0
                 ? Math.min((achieved / item.targetAmount) * 100, 100)
                 : 0;
+            const grossProfit = item.isGeneral
+                ? null
+                : grossProfitByTargetBrandId.get(Number(item.brandId)) ?? 0;
 
             return {
                 ...item,
                 achieved: Number(achieved.toFixed(2)),
                 progress,
+                grossProfit,
             };
         });
     }, [creditNotesApplied, effectiveSales, report, savedTargets, targetedBrandIds]);
@@ -442,6 +496,7 @@ export default function SalesTargetsPage() {
         }
 
         const creditNoteByBrandId = new Map<number, number>();
+        const creditNoteGrossProfitByBrandId = new Map<number, number>();
         if (creditNotesApplied) {
             for (const cnBrandTotal of report.creditNoteBrandTotals ?? []) {
                 creditNoteByBrandId.set(
@@ -449,10 +504,16 @@ export default function SalesTargetsPage() {
                     (creditNoteByBrandId.get(cnBrandTotal.brandId) ?? 0) +
                         Number(cnBrandTotal.totalInvoiced || 0)
                 );
+                creditNoteGrossProfitByBrandId.set(
+                    cnBrandTotal.brandId,
+                    (creditNoteGrossProfitByBrandId.get(cnBrandTotal.brandId) ?? 0) +
+                        Number(cnBrandTotal.grossProfit || 0)
+                );
             }
         }
 
         const netByBrandId = new Map<number, number>();
+        const netGrossProfitByBrandId = new Map<number, number>();
         for (const brandTotal of report.brandTotals) {
             if (targetedBrandIds.has(brandTotal.brandId)) {
                 continue;
@@ -462,10 +523,66 @@ export default function SalesTargetsPage() {
                 brandTotal.brandId,
                 (netByBrandId.get(brandTotal.brandId) ?? 0) + Number(brandTotal.totalInvoiced || 0)
             );
+            netGrossProfitByBrandId.set(
+                brandTotal.brandId,
+                (netGrossProfitByBrandId.get(brandTotal.brandId) ?? 0) + Number(brandTotal.grossProfit || 0)
+            );
+        }
+
+        // Same net-of-credit-notes treatment, one level down: each brand's
+        // total further split by product category, for the collapsible
+        // breakdown under each brand row.
+        const creditNoteByBrandCategory = new Map<string, number>();
+        const creditNoteGrossProfitByBrandCategory = new Map<string, number>();
+        if (creditNotesApplied) {
+            for (const cnCategory of report.creditNoteBrandCategoryTotals ?? []) {
+                const key = `${cnCategory.brandId}::${cnCategory.categoryId}`;
+                creditNoteByBrandCategory.set(
+                    key,
+                    (creditNoteByBrandCategory.get(key) ?? 0) + Number(cnCategory.totalInvoiced || 0)
+                );
+                creditNoteGrossProfitByBrandCategory.set(
+                    key,
+                    (creditNoteGrossProfitByBrandCategory.get(key) ?? 0) + Number(cnCategory.grossProfit || 0)
+                );
+            }
+        }
+
+        const categoriesByBrandId = new Map<
+            number,
+            Array<{ categoryId: number; categoryName: string; amount: number; grossProfit: number }>
+        >();
+        for (const bCategory of report.brandCategoryTotals ?? []) {
+            if (targetedBrandIds.has(bCategory.brandId)) {
+                continue;
+            }
+
+            const key = `${bCategory.brandId}::${bCategory.categoryId}`;
+            const amount = Number(
+                (Number(bCategory.totalInvoiced || 0) - (creditNoteByBrandCategory.get(key) ?? 0)).toFixed(2)
+            );
+            if (amount === 0) {
+                continue;
+            }
+
+            const grossProfit = Number(
+                (Number(bCategory.grossProfit || 0) - (creditNoteGrossProfitByBrandCategory.get(key) ?? 0)).toFixed(2)
+            );
+
+            const list = categoriesByBrandId.get(bCategory.brandId) ?? [];
+            list.push({ categoryId: bCategory.categoryId, categoryName: bCategory.categoryName, amount, grossProfit });
+            categoriesByBrandId.set(bCategory.brandId, list);
         }
 
         let categorizedTotal = 0;
-        const rows: Array<{ brandId: number | null; brandName: string; amount: number }> = [];
+        let categorizedGrossProfitTotal = 0;
+        const rows: Array<{
+            brandId: number | null;
+            brandName: string;
+            amount: number;
+            grossProfit: number | null;
+            categories: Array<{ categoryId: number; categoryName: string; amount: number; grossProfit: number }>;
+        }> = [];
 
         for (const [brandId, grossAmount] of netByBrandId) {
             const amount = Number((grossAmount - (creditNoteByBrandId.get(brandId) ?? 0)).toFixed(2));
@@ -473,11 +590,20 @@ export default function SalesTargetsPage() {
                 continue;
             }
 
+            // Estimated using Odoo's live product Cost, same as the brand
+            // target cards — can legitimately go negative.
+            const grossProfit = Number(
+                ((netGrossProfitByBrandId.get(brandId) ?? 0) - (creditNoteGrossProfitByBrandId.get(brandId) ?? 0)).toFixed(2)
+            );
+
             categorizedTotal += amount;
+            categorizedGrossProfitTotal += grossProfit;
             rows.push({
                 brandId,
                 brandName: brandNameById.get(brandId) ?? `Brand #${brandId}`,
                 amount,
+                grossProfit,
+                categories: (categoriesByBrandId.get(brandId) ?? []).sort((a, b) => b.amount - a.amount),
             });
         }
 
@@ -485,10 +611,13 @@ export default function SalesTargetsPage() {
 
         const residual = Number((generalRow.achieved - categorizedTotal).toFixed(2));
         if (Math.abs(residual) >= 0.01) {
-            rows.push({ brandId: null, brandName: "No Brand", amount: residual });
+            // No cost data exists for whatever this residual represents
+            // (sales not attributable to any brand), so its gross profit
+            // can't be estimated.
+            rows.push({ brandId: null, brandName: "No Brand", amount: residual, grossProfit: null, categories: [] });
         }
 
-        return { rows, total: generalRow.achieved };
+        return { rows, total: generalRow.achieved, totalGrossProfit: categorizedGrossProfitTotal };
     }, [brandNameById, creditNotesApplied, report, targetProgressRows, targetedBrandIds]);
 
     async function loadSavedTarget(salespersonId: number, year: number, month: number) {
@@ -1021,6 +1150,24 @@ export default function SalesTargetsPage() {
                                                     {formatCurrency(Math.max(0, item.targetAmount - item.achieved), currencyCode)} remaining
                                                 </span>
                                             </div>
+                                            {!item.isGeneral && item.grossProfit !== null ? (
+                                                <div className="flex items-center justify-between text-xs">
+                                                    <span className="text-(--ink-soft)">Gross Profit (est.)</span>
+                                                    <span className={`font-medium ${item.grossProfit < 0 ? "text-red-600" : "text-(--ink)"}`}>
+                                                        {formatCurrency(item.grossProfit, currencyCode)}
+                                                    </span>
+                                                </div>
+                                            ) : null}
+                                            {item.isGeneral && generalBreakdown ? (
+                                                <div className="flex items-center justify-between text-xs">
+                                                    <span className="text-(--ink-soft)">Gross Profit (est.)</span>
+                                                    <span
+                                                        className={`font-medium ${generalBreakdown.totalGrossProfit < 0 ? "text-red-600" : "text-(--ink)"}`}
+                                                    >
+                                                        {formatCurrency(generalBreakdown.totalGrossProfit, currencyCode)}
+                                                    </span>
+                                                </div>
+                                            ) : null}
                                             {!item.isGeneral && typeof item.brandId === "number" ? (
                                                 <div className="flex flex-wrap items-center gap-2 pt-1">
                                                     <button
@@ -1083,29 +1230,89 @@ export default function SalesTargetsPage() {
                                                                             <tr>
                                                                                 <th className="px-3 py-2 text-left font-medium">Brand</th>
                                                                                 <th className="px-3 py-2 text-right font-medium">Sales</th>
+                                                                                <th className="px-3 py-2 text-right font-medium">Gross Profit (est.)</th>
                                                                                 <th className="px-3 py-2 text-right font-medium">Share</th>
                                                                             </tr>
                                                                         </thead>
                                                                         <tbody className="divide-y divide-(--line)">
-                                                                            {generalBreakdown.rows.map((row) => (
-                                                                                <tr key={row.brandId ?? "no-brand"}>
-                                                                                    <td className="px-3 py-2">{row.brandName}</td>
-                                                                                    <td className="px-3 py-2 text-right">
-                                                                                        {formatCurrency(row.amount, currencyCode)}
-                                                                                    </td>
-                                                                                    <td className="px-3 py-2 text-right text-(--ink-soft)">
-                                                                                        {generalBreakdown.total > 0
-                                                                                            ? `${((row.amount / generalBreakdown.total) * 100).toFixed(1)}%`
-                                                                                            : "-"}
-                                                                                    </td>
-                                                                                </tr>
-                                                                            ))}
+                                                                            {generalBreakdown.rows.map((row) => {
+                                                                                const canExpand = row.brandId !== null && row.categories.length > 0;
+                                                                                const isExpanded = row.brandId !== null && expandedBreakdownBrandIds.has(row.brandId);
+                                                                                return (
+                                                                                    <Fragment key={row.brandId ?? "no-brand"}>
+                                                                                        <tr>
+                                                                                            <td className="px-3 py-2">
+                                                                                                {canExpand ? (
+                                                                                                    <button
+                                                                                                        type="button"
+                                                                                                        onClick={() => toggleBreakdownBrand(row.brandId as number)}
+                                                                                                        className="flex items-center gap-1.5 text-left hover:text-(--brand)"
+                                                                                                    >
+                                                                                                        <ChevronDown
+                                                                                                            className={`h-3.5 w-3.5 shrink-0 transition ${isExpanded ? "" : "-rotate-90"}`}
+                                                                                                            aria-hidden="true"
+                                                                                                        />
+                                                                                                        {row.brandName}
+                                                                                                    </button>
+                                                                                                ) : (
+                                                                                                    <span className="pl-5">{row.brandName}</span>
+                                                                                                )}
+                                                                                            </td>
+                                                                                            <td className="px-3 py-2 text-right">
+                                                                                                {formatCurrency(row.amount, currencyCode)}
+                                                                                            </td>
+                                                                                            <td
+                                                                                                className={`px-3 py-2 text-right ${row.grossProfit !== null && row.grossProfit < 0 ? "text-red-600" : ""}`}
+                                                                                            >
+                                                                                                {row.grossProfit !== null
+                                                                                                    ? formatCurrency(row.grossProfit, currencyCode)
+                                                                                                    : "-"}
+                                                                                            </td>
+                                                                                            <td className="px-3 py-2 text-right text-(--ink-soft)">
+                                                                                                {generalBreakdown.total > 0
+                                                                                                    ? `${((row.amount / generalBreakdown.total) * 100).toFixed(1)}%`
+                                                                                                    : "-"}
+                                                                                            </td>
+                                                                                        </tr>
+                                                                                        {isExpanded
+                                                                                            ? row.categories.map((category) => (
+                                                                                                <tr
+                                                                                                    key={`${row.brandId}-${category.categoryId}`}
+                                                                                                    className="bg-(--chip)/60"
+                                                                                                >
+                                                                                                    <td className="py-1.5 pl-9 pr-3 text-(--ink-soft)">
+                                                                                                        {category.categoryName}
+                                                                                                    </td>
+                                                                                                    <td className="py-1.5 pr-3 text-right text-(--ink-soft)">
+                                                                                                        {formatCurrency(category.amount, currencyCode)}
+                                                                                                    </td>
+                                                                                                    <td
+                                                                                                        className={`py-1.5 pr-3 text-right ${category.grossProfit < 0 ? "text-red-600" : "text-(--ink-soft)"}`}
+                                                                                                    >
+                                                                                                        {formatCurrency(category.grossProfit, currencyCode)}
+                                                                                                    </td>
+                                                                                                    <td className="py-1.5 pr-3 text-right text-(--ink-soft)">
+                                                                                                        {row.amount !== 0
+                                                                                                            ? `${((category.amount / row.amount) * 100).toFixed(1)}%`
+                                                                                                            : "-"}
+                                                                                                    </td>
+                                                                                                </tr>
+                                                                                            ))
+                                                                                            : null}
+                                                                                    </Fragment>
+                                                                                );
+                                                                            })}
                                                                         </tbody>
                                                                         <tfoot>
                                                                             <tr className="border-t border-(--line) font-medium">
                                                                                 <td className="px-3 py-2">Total</td>
                                                                                 <td className="px-3 py-2 text-right">
                                                                                     {formatCurrency(generalBreakdown.total, currencyCode)}
+                                                                                </td>
+                                                                                <td
+                                                                                    className={`px-3 py-2 text-right ${generalBreakdown.totalGrossProfit < 0 ? "text-red-600" : ""}`}
+                                                                                >
+                                                                                    {formatCurrency(generalBreakdown.totalGrossProfit, currencyCode)}
                                                                                 </td>
                                                                                 <td className="px-3 py-2" />
                                                                             </tr>
@@ -1161,12 +1368,13 @@ export default function SalesTargetsPage() {
                                             <label className="block">
                                                 <span className="mb-2 block text-sm font-medium">Sales Target</span>
                                                 <input
-                                                    type="number"
-                                                    min="0"
-                                                    step="0.01"
-                                                    value={entry.targetAmount}
+                                                    type="text"
+                                                    inputMode="decimal"
+                                                    value={formatThousands(entry.targetAmount)}
                                                     onChange={(event) =>
-                                                        updateTargetRow(index, { targetAmount: event.target.value })
+                                                        updateTargetRow(index, {
+                                                            targetAmount: sanitizeNumericInput(event.target.value),
+                                                        })
                                                     }
                                                     placeholder="Enter target amount"
                                                     className="w-full rounded-xl border border-(--line) bg-white px-4 py-2.5"

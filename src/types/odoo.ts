@@ -210,10 +210,30 @@ export type OdooSalespersonMonthlyInvoices = {
     brandTotals: Array<{
         brandId: number;
         totalInvoiced: number;
+        costOfGoodsSold: number;
+        grossProfit: number;
     }>;
     creditNoteBrandTotals: Array<{
         brandId: number;
         totalInvoiced: number;
+        costOfGoodsSold: number;
+        grossProfit: number;
+    }>;
+    brandCategoryTotals: Array<{
+        brandId: number;
+        categoryId: number;
+        categoryName: string;
+        totalInvoiced: number;
+        costOfGoodsSold: number;
+        grossProfit: number;
+    }>;
+    creditNoteBrandCategoryTotals: Array<{
+        brandId: number;
+        categoryId: number;
+        categoryName: string;
+        totalInvoiced: number;
+        costOfGoodsSold: number;
+        grossProfit: number;
     }>;
     debug?: {
         invoiceCountFetched: number;
@@ -271,6 +291,8 @@ export type OdooSalesTargetBrandProduct = {
     quantitySold: number;
     totalSales: number;
     orderCount: number;
+    categoryId: number | null;
+    categoryName: string;
 };
 
 export type OdooSalesTargetBrandCustomer = OdooCustomerSummary & {

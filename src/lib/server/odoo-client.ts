@@ -217,6 +217,15 @@ type CurrencyTotal = {
     includedInTotal: boolean;
 };
 
+type BrandCategoryTotal = {
+    brandId: number;
+    categoryId: number;
+    categoryName: string;
+    totalInvoiced: number;
+    costOfGoodsSold: number;
+    grossProfit: number;
+};
+
 type SalespersonMonthlyInvoices = {
     salesperson: SalespersonOption;
     year: number;
@@ -230,11 +239,21 @@ type SalespersonMonthlyInvoices = {
     brandTotals: Array<{
         brandId: number;
         totalInvoiced: number;
+        /** Live-cost (`product.standard_price`) estimate of what this
+         * brand's invoiced quantity cost, and the resulting gross profit. */
+        costOfGoodsSold: number;
+        grossProfit: number;
     }>;
     creditNoteBrandTotals: Array<{
         brandId: number;
         totalInvoiced: number;
+        costOfGoodsSold: number;
+        grossProfit: number;
     }>;
+    /** Same figures as `brandTotals`, split further by each brand's product
+     * categories — powers the collapsible "Sales by brand" breakdown. */
+    brandCategoryTotals: BrandCategoryTotal[];
+    creditNoteBrandCategoryTotals: BrandCategoryTotal[];
     debug?: {
         invoiceCountFetched: number;
         invoiceCountQualified: number;
@@ -252,6 +271,8 @@ type SalesTargetBrandProduct = {
     quantitySold: number;
     totalSales: number;
     orderCount: number;
+    categoryId: number | null;
+    categoryName: string;
 };
 
 type SalesTargetBrandCustomer = CustomerSummary & {
@@ -2844,6 +2865,56 @@ export async function getCustomerReport(
     };
 }
 
+/**
+ * Splits one brand's share of a line (`amountForBrand`/`costForBrand`,
+ * already computed by the caller) across the distinct categories among just
+ * THAT brand's linked sale lines — evenly, mirroring how the caller already
+ * splits a multi-brand line across brands. Almost always resolves to exactly
+ * one category (one line -> one product in the common case); accumulates
+ * into `target`, keyed by brand+category so the same map can be reused
+ * across every line in the loop.
+ */
+function accumulateBrandCategorySplit(
+    target: Map<string, { brandId: number; categoryId: number; categoryName: string; total: number; cost: number }>,
+    brandId: number,
+    saleLineIdsForLine: number[],
+    amountForBrand: number,
+    costForBrand: number,
+    brandBySaleLineId: Map<number, number>,
+    categoryBySaleLineId: Map<number, { categoryId: number; categoryName: string }>
+): void {
+    const categoriesForBrand = Array.from(
+        new Map(
+            saleLineIdsForLine
+                .filter((saleLineId) => brandBySaleLineId.get(saleLineId) === brandId)
+                .map((saleLineId) => categoryBySaleLineId.get(saleLineId))
+                .filter((category): category is { categoryId: number; categoryName: string } => Boolean(category))
+                .map((category) => [category.categoryId, category] as const)
+        ).values()
+    );
+
+    if (categoriesForBrand.length === 0) {
+        return;
+    }
+
+    const amountShare = amountForBrand / categoriesForBrand.length;
+    const costShare = costForBrand / categoriesForBrand.length;
+
+    for (const category of categoriesForBrand) {
+        const key = `${brandId}::${category.categoryId}`;
+        const existing = target.get(key) ?? {
+            brandId,
+            categoryId: category.categoryId,
+            categoryName: category.categoryName,
+            total: 0,
+            cost: 0,
+        };
+        existing.total += amountShare;
+        existing.cost += costShare;
+        target.set(key, existing);
+    }
+}
+
 export async function getSalespersonMonthlyInvoices(
     credentials: OdooCredentials,
     input: {
@@ -3036,8 +3107,15 @@ export async function getSalespersonMonthlyInvoices(
             });
     }
 
-    let brandTotals: Array<{ brandId: number; totalInvoiced: number }> = [];
+    let brandTotals: Array<{ brandId: number; totalInvoiced: number; costOfGoodsSold: number; grossProfit: number }> = [];
+    let brandCategoryTotals: BrandCategoryTotal[] = [];
     let brandBySaleLineId = new Map<number, number>();
+    // Each sale line's product cost (Odoo's own live `standard_price`), used
+    // to derive the gross profit shown alongside each brand's revenue below.
+    let costBySaleLineId = new Map<number, number>();
+    // Each sale line's product category, used to further split a brand's
+    // total in the "Sales by brand" breakdown.
+    let categoryBySaleLineId = new Map<number, { categoryId: number; categoryName: string }>();
     const qualifiedInvoiceIdSet = new Set<number>(convertibleInvoiceIds);
     let invoiceLineCountFetched = 0;
     let invoiceLineCountQualified = 0;
@@ -3055,7 +3133,7 @@ export async function getSalespersonMonthlyInvoices(
                 ["sale_line_ids", "!=", false],
             ]],
             {
-                fields: ["move_id", "sale_line_ids", "price_total", "display_type"],
+                fields: ["move_id", "sale_line_ids", "price_total", "quantity", "display_type"],
                 limit: 200000,
             }
         );
@@ -3108,7 +3186,11 @@ export async function getSalespersonMonthlyInvoices(
                 "read",
                 [productIds],
                 {
-                    fields: ["id", "product_tmpl_id"],
+                    // `standard_price` is Odoo's own live Cost field, always in
+                    // the company's base currency (AED here — same as
+                    // `TARGET_CURRENCY_CODE`), so it needs no FX conversion
+                    // unlike the invoice amounts below.
+                    fields: ["id", "product_tmpl_id", "standard_price"],
                 }
             )
             : [];
@@ -3132,21 +3214,50 @@ export async function getSalespersonMonthlyInvoices(
                 "read",
                 [templateIds],
                 {
-                    fields: ["id", "tire_brand"],
+                    fields: ["id", "tire_brand", "categ_id"],
                 }
             )
             : [];
 
         const brandByTemplateId = new Map<number, number>();
+        const categoryIdByTemplateId = new Map<number, number>();
         for (const template of templates) {
             const templateId = Number(template.id ?? 0);
             const brandId = getRelationalId(template.tire_brand);
             if (templateId > 0 && typeof brandId === "number" && brandId > 0) {
                 brandByTemplateId.set(templateId, brandId);
             }
+            const categoryId = getRelationalId(template.categ_id);
+            if (templateId > 0 && typeof categoryId === "number" && categoryId > 0) {
+                categoryIdByTemplateId.set(templateId, categoryId);
+            }
+        }
+
+        const categoryIds = Array.from(new Set(categoryIdByTemplateId.values()));
+        const categories = categoryIds.length > 0
+            ? await executeKw<Array<Record<string, unknown>>>(
+                credentials,
+                uid,
+                "product.category",
+                "read",
+                [categoryIds],
+                { fields: ["id", "name"] }
+            )
+            : [];
+        const categoryNameById = new Map<number, string>();
+        for (const category of categories) {
+            const categoryId = Number(category.id ?? 0);
+            const name = toDisplayString(category.name);
+            if (categoryId > 0 && name) {
+                categoryNameById.set(categoryId, name);
+            }
         }
 
         const brandByProductId = new Map<number, number>();
+        // Category the same product-level breakdown is further split by
+        // (Gross Profit is shown per brand-and-category in the "Sales by
+        // brand" breakdown, so both need resolving from the same products).
+        const categoryByProductId = new Map<number, { categoryId: number; categoryName: string }>();
         for (const product of products) {
             const productId = Number(product.id ?? 0);
             const templateId = getRelationalId(product.product_tmpl_id);
@@ -3155,10 +3266,29 @@ export async function getSalespersonMonthlyInvoices(
             if (productId > 0 && typeof brandId === "number" && brandId > 0) {
                 brandByProductId.set(productId, brandId);
             }
+
+            const categoryId = typeof templateId === "number" ? categoryIdByTemplateId.get(templateId) : undefined;
+            if (productId > 0 && typeof categoryId === "number" && categoryId > 0) {
+                categoryByProductId.set(productId, {
+                    categoryId,
+                    categoryName: categoryNameById.get(categoryId) ?? `Category #${categoryId}`,
+                });
+            }
         }
         productCountMappedToBrand = brandByProductId.size;
 
+        const costByProductId = new Map<number, number>();
+        for (const product of products) {
+            const productId = Number(product.id ?? 0);
+            const cost = Number(product.standard_price ?? 0);
+            if (productId > 0 && Number.isFinite(cost)) {
+                costByProductId.set(productId, cost);
+            }
+        }
+
         brandBySaleLineId = new Map<number, number>();
+        costBySaleLineId = new Map<number, number>();
+        categoryBySaleLineId = new Map<number, { categoryId: number; categoryName: string }>();
         for (const saleLine of saleLines) {
             const saleLineId = Number(saleLine.id ?? 0);
             const productId = getRelationalId(saleLine.product_id);
@@ -3170,9 +3300,24 @@ export async function getSalespersonMonthlyInvoices(
             if (typeof brandId === "number" && brandId > 0) {
                 brandBySaleLineId.set(saleLineId, brandId);
             }
+
+            const cost = costByProductId.get(productId);
+            if (typeof cost === "number") {
+                costBySaleLineId.set(saleLineId, cost);
+            }
+
+            const category = categoryByProductId.get(productId);
+            if (category) {
+                categoryBySaleLineId.set(saleLineId, category);
+            }
         }
 
         const totalsByBrand = new Map<number, number>();
+        const costTotalsByBrand = new Map<number, number>();
+        const totalsByBrandCategory = new Map<
+            string,
+            { brandId: number; categoryId: number; categoryName: string; total: number; cost: number }
+        >();
         for (const line of qualifiedInvoiceLines) {
             const linkedSaleLineIds = normalizeRelationalIdList(line.sale_line_ids);
 
@@ -3204,21 +3349,66 @@ export async function getSalespersonMonthlyInvoices(
 
             const splitAmount = lineAmount / linkedBrandIds.length;
 
+            // Cost side of the same line, for Gross Profit: the line's
+            // quantity times the average live Cost across whichever
+            // product(s) it's linked to (almost always exactly one), already
+            // in the home/target currency so it needs no FX multiplier.
+            const linkedCosts = linkedSaleLineIds
+                .map((saleLineId) => costBySaleLineId.get(saleLineId))
+                .filter((cost): cost is number => typeof cost === "number");
+            let costSplitAmount = 0;
+            if (linkedCosts.length > 0) {
+                const avgUnitCost = linkedCosts.reduce((sum, cost) => sum + cost, 0) / linkedCosts.length;
+                const lineQuantity = Number(line.quantity ?? 0);
+                const lineCost = avgUnitCost * lineQuantity;
+                costSplitAmount = Number.isFinite(lineCost) ? lineCost / linkedBrandIds.length : 0;
+            }
+
             for (const brandId of linkedBrandIds) {
                 const current = totalsByBrand.get(brandId) ?? 0;
                 totalsByBrand.set(brandId, current + splitAmount);
+
+                const currentCost = costTotalsByBrand.get(brandId) ?? 0;
+                costTotalsByBrand.set(brandId, currentCost + costSplitAmount);
+
+                accumulateBrandCategorySplit(
+                    totalsByBrandCategory,
+                    brandId,
+                    linkedSaleLineIds,
+                    splitAmount,
+                    costSplitAmount,
+                    brandBySaleLineId,
+                    categoryBySaleLineId
+                );
             }
         }
 
         brandTotals = Array.from(totalsByBrand.entries())
-            .map(([brandId, total]) => ({
-                brandId,
-                totalInvoiced: Number(total.toFixed(2)),
+            .map(([brandId, total]) => {
+                const costOfGoodsSold = costTotalsByBrand.get(brandId) ?? 0;
+                return {
+                    brandId,
+                    totalInvoiced: Number(total.toFixed(2)),
+                    costOfGoodsSold: Number(costOfGoodsSold.toFixed(2)),
+                    grossProfit: Number((total - costOfGoodsSold).toFixed(2)),
+                };
+            })
+            .sort((a, b) => b.totalInvoiced - a.totalInvoiced);
+
+        brandCategoryTotals = Array.from(totalsByBrandCategory.values())
+            .map((entry) => ({
+                brandId: entry.brandId,
+                categoryId: entry.categoryId,
+                categoryName: entry.categoryName,
+                totalInvoiced: Number(entry.total.toFixed(2)),
+                costOfGoodsSold: Number(entry.cost.toFixed(2)),
+                grossProfit: Number((entry.total - entry.cost).toFixed(2)),
             }))
             .sort((a, b) => b.totalInvoiced - a.totalInvoiced);
     }
 
-    let creditNoteBrandTotals: Array<{ brandId: number; totalInvoiced: number }> = [];
+    let creditNoteBrandTotals: Array<{ brandId: number; totalInvoiced: number; costOfGoodsSold: number; grossProfit: number }> = [];
+    let creditNoteBrandCategoryTotals: BrandCategoryTotal[] = [];
 
     if (input.includeCreditNotes && creditNoteIds.length > 0 && brandBySaleLineId.size > 0) {
         const creditNoteLines = await executeKw<Array<Record<string, unknown>>>(
@@ -3231,7 +3421,7 @@ export async function getSalespersonMonthlyInvoices(
                 ["sale_line_ids", "!=", false],
             ]],
             {
-                fields: ["move_id", "sale_line_ids", "price_total", "display_type"],
+                fields: ["move_id", "sale_line_ids", "price_total", "quantity", "display_type"],
                 limit: 200000,
             }
         );
@@ -3247,6 +3437,11 @@ export async function getSalespersonMonthlyInvoices(
         );
 
         const creditNoteTotalsByBrand = new Map<number, number>();
+        const creditNoteCostTotalsByBrand = new Map<number, number>();
+        const creditNoteTotalsByBrandCategory = new Map<
+            string,
+            { brandId: number; categoryId: number; categoryName: string; total: number; cost: number }
+        >();
         for (const line of qualifiedCreditNoteLines) {
             const linkedSaleLineIds = normalizeRelationalIdList(line.sale_line_ids);
 
@@ -3280,16 +3475,58 @@ export async function getSalespersonMonthlyInvoices(
 
             const splitAmount = lineAmount / linkedBrandIds.length;
 
+            // Cost given back with the return, mirroring the invoice-side
+            // calculation above.
+            const linkedCosts = linkedSaleLineIds
+                .map((saleLineId) => costBySaleLineId.get(saleLineId))
+                .filter((cost): cost is number => typeof cost === "number");
+            let costSplitAmount = 0;
+            if (linkedCosts.length > 0) {
+                const avgUnitCost = linkedCosts.reduce((sum, cost) => sum + cost, 0) / linkedCosts.length;
+                const lineQuantity = Math.abs(Number(line.quantity ?? 0));
+                const lineCost = avgUnitCost * lineQuantity;
+                costSplitAmount = Number.isFinite(lineCost) ? lineCost / linkedBrandIds.length : 0;
+            }
+
             for (const brandId of linkedBrandIds) {
                 const current = creditNoteTotalsByBrand.get(brandId) ?? 0;
                 creditNoteTotalsByBrand.set(brandId, current + splitAmount);
+
+                const currentCost = creditNoteCostTotalsByBrand.get(brandId) ?? 0;
+                creditNoteCostTotalsByBrand.set(brandId, currentCost + costSplitAmount);
+
+                accumulateBrandCategorySplit(
+                    creditNoteTotalsByBrandCategory,
+                    brandId,
+                    linkedSaleLineIds,
+                    splitAmount,
+                    costSplitAmount,
+                    brandBySaleLineId,
+                    categoryBySaleLineId
+                );
             }
         }
 
         creditNoteBrandTotals = Array.from(creditNoteTotalsByBrand.entries())
-            .map(([brandId, total]) => ({
-                brandId,
-                totalInvoiced: Number(total.toFixed(2)),
+            .map(([brandId, total]) => {
+                const costOfGoodsSold = creditNoteCostTotalsByBrand.get(brandId) ?? 0;
+                return {
+                    brandId,
+                    totalInvoiced: Number(total.toFixed(2)),
+                    costOfGoodsSold: Number(costOfGoodsSold.toFixed(2)),
+                    grossProfit: Number((total - costOfGoodsSold).toFixed(2)),
+                };
+            })
+            .sort((a, b) => b.totalInvoiced - a.totalInvoiced);
+
+        creditNoteBrandCategoryTotals = Array.from(creditNoteTotalsByBrandCategory.values())
+            .map((entry) => ({
+                brandId: entry.brandId,
+                categoryId: entry.categoryId,
+                categoryName: entry.categoryName,
+                totalInvoiced: Number(entry.total.toFixed(2)),
+                costOfGoodsSold: Number(entry.cost.toFixed(2)),
+                grossProfit: Number((entry.total - entry.cost).toFixed(2)),
             }))
             .sort((a, b) => b.totalInvoiced - a.totalInvoiced);
     }
@@ -3306,6 +3543,8 @@ export async function getSalespersonMonthlyInvoices(
         creditNoteCurrencyTotals,
         brandTotals,
         creditNoteBrandTotals,
+        brandCategoryTotals,
+        creditNoteBrandCategoryTotals,
         debug: {
             invoiceCountFetched: invoices.length,
             invoiceCountQualified: qualifiedInvoiceIdSet.size,
@@ -5001,6 +5240,9 @@ export async function getSalesTargetDetails(
                 quantitySold: Number(quantity.toFixed(2)),
                 totalSales: Number(lineSales.toFixed(2)),
                 orderCount: 0,
+                // Filled in below, once every product in this brand/period is known.
+                categoryId: null,
+                categoryName: "Uncategorized",
             });
         } else {
             existingProduct.quantitySold = Number((existingProduct.quantitySold + quantity).toFixed(2));
@@ -5034,11 +5276,21 @@ export async function getSalesTargetDetails(
         orderIdsByCustomerId.set(summary.customerId, customerOrderSet);
     }
 
+    const categoryByProductId = await getProductCategoriesByProductIds(
+        credentials,
+        Array.from(productsById.keys())
+    );
+
     const products = Array.from(productsById.values())
-        .map((product) => ({
-            ...product,
-            orderCount: orderIdsByProductId.get(product.productId)?.size ?? 0,
-        }))
+        .map((product) => {
+            const category = categoryByProductId.get(product.productId);
+            return {
+                ...product,
+                orderCount: orderIdsByProductId.get(product.productId)?.size ?? 0,
+                categoryId: category?.categoryId ?? null,
+                categoryName: category?.categoryName ?? "Uncategorized",
+            };
+        })
         .sort((a, b) => b.totalSales - a.totalSales || b.quantitySold - a.quantitySold);
 
     const servedCustomers = Array.from(customersById.values())
