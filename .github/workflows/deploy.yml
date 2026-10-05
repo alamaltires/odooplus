@@ -23,6 +23,6 @@ jobs:
             git pull origin main
             npm install
             npm run build
-            pm2 restart "odoo++" || PORT=3020 pm2 start npm --name "odoo++" -- start -- -p 3020
+            pm2 restart "odoo++" || PORT=3050 pm2 start npm --name "odoo++" -- start -- -p 3050
             pm2 save
           EOF
