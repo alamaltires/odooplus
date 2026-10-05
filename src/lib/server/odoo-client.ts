@@ -9073,3 +9073,187 @@ export async function addProductToOrder(
 
     return { lineId };
 }
+
+export type PoTrackingContainer = {
+    index: number;
+    containerNo: string;
+    sealNo: string;
+    blNumber: string;
+    /** Sum of the product quantities listed under this container's section row. */
+    quantity: number;
+    /** The section row exactly as typed in Odoo. */
+    label: string;
+};
+
+export type PoTrackingOrder = {
+    id: number;
+    name: string;
+    vendorName: string;
+    vendorRef: string;
+    orderDate: string;
+    expectedArrival: string;
+    currencyCode: string;
+    types: string[];
+    fullyReceived: boolean;
+    containers: PoTrackingContainer[];
+};
+
+// "Container 1:SEKU4329929  Seal No:J2989174  B/L:QGD3507124" — the spacing,
+// colons and case vary between entries, so each piece is matched on its own.
+function parsePoTrackingSection(label: string): Omit<PoTrackingContainer, "quantity" | "label"> | null {
+    const container = /Container\s*(\d+)?\s*[:\-]?\s*([A-Za-z0-9]+)/i.exec(label);
+    const bl = /B\s*\/\s*L\s*(?:No\.?)?\s*[:\-]?\s*([A-Za-z0-9\-]+)/i.exec(label);
+    if (!container || !bl) {
+        return null;
+    }
+    const seal = /Seal\s*(?:No\.?)?\s*[:\-]?\s*([A-Za-z0-9\-]+)/i.exec(label);
+    return {
+        index: container[1] ? Number(container[1]) : 0,
+        containerNo: container[2].toUpperCase(),
+        sealNo: seal ? seal[1].toUpperCase() : "",
+        blNumber: bl[1].toUpperCase(),
+    };
+}
+
+/**
+ * Confirmed purchase orders whose Purchase Type name contains "Import",
+ * with the container / seal / B/L read from the section rows on their
+ * product lines. By default only orders still awaiting receipt are returned.
+ */
+export async function getImportedPurchaseOrdersForTracking(
+    credentials: OdooCredentials,
+    input?: { includeReceived?: boolean }
+): Promise<{ orders: PoTrackingOrder[]; importedTypeNames: string[] }> {
+    const uid = await authenticate(credentials);
+    const includeReceived = Boolean(input?.includeReceived);
+
+    const typeField = await discoverTypeField(credentials, uid, "purchase.order", PURCHASE_TYPE_FIELD_SPEC);
+    if (!typeField) {
+        throw new Error("Could not find the Purchase Type field on purchase orders.");
+    }
+
+    const typeOptions = await getTypeFieldOptions(credentials, uid, "purchase.order", PURCHASE_TYPE_FIELD_SPEC);
+    const importedTypes = typeOptions.filter((option) => /import/i.test(option.label));
+    if (importedTypes.length === 0) {
+        return { orders: [], importedTypeNames: [] };
+    }
+
+    const typeValues = typeField.kind === "relational"
+        ? importedTypes.map((option) => Number(option.value)).filter((id) => Number.isFinite(id) && id > 0)
+        : importedTypes.map((option) => option.value);
+
+    const orderFields = await executeKw<Record<string, unknown>>(
+        credentials,
+        uid,
+        "purchase.order",
+        "fields_get",
+        [],
+        { attributes: ["type"] }
+    );
+    const hasField = (name: string) => Object.prototype.hasOwnProperty.call(orderFields, name);
+
+    const domain: unknown[] = [
+        ["state", "in", ["purchase", "done"]],
+        [typeField.fieldName, "in", typeValues],
+    ];
+    if (!includeReceived && hasField("receipt_status")) {
+        domain.push(["receipt_status", "!=", "full"]);
+    }
+
+    const readFields = ["name", "partner_id", "partner_ref", "date_order", "date_planned", "currency_id", typeField.fieldName]
+        .filter((name, index, all) => all.indexOf(name) === index && hasField(name));
+
+    const orders = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "purchase.order",
+        "search_read",
+        [domain],
+        { fields: readFields, order: "date_order desc, id desc", limit: 300 }
+    );
+    if (orders.length === 0) {
+        return { orders: [], importedTypeNames: importedTypes.map((option) => option.label) };
+    }
+
+    const orderIds = orders.map((order) => Number(order.id ?? 0)).filter((id) => id > 0);
+    const lines = await searchReadAll(
+        credentials,
+        uid,
+        "purchase.order.line",
+        [["order_id", "in", orderIds]],
+        ["order_id", "sequence", "display_type", "name", "product_qty", "qty_received"]
+    );
+    lines.sort((a, b) => Number(a.sequence ?? 0) - Number(b.sequence ?? 0) || Number(a.id ?? 0) - Number(b.id ?? 0));
+
+    type Section = PoTrackingContainer | null;
+    const containersByOrderId = new Map<number, PoTrackingContainer[]>();
+    const currentSectionByOrderId = new Map<number, Section>();
+    const fullyReceivedByOrderId = new Map<number, boolean>();
+
+    for (const line of lines) {
+        const orderId = getRelationalId(line.order_id);
+        if (!orderId) {
+            continue;
+        }
+
+        if (line.display_type === "line_section") {
+            const label = toDisplayString(line.name).trim();
+            const parsed = parsePoTrackingSection(label);
+            if (parsed) {
+                const container: PoTrackingContainer = { ...parsed, quantity: 0, label };
+                containersByOrderId.set(orderId, [...(containersByOrderId.get(orderId) ?? []), container]);
+                currentSectionByOrderId.set(orderId, container);
+            } else {
+                currentSectionByOrderId.set(orderId, null);
+            }
+            continue;
+        }
+        if (line.display_type) {
+            continue;
+        }
+
+        const qty = Number(line.product_qty ?? 0);
+        const section = currentSectionByOrderId.get(orderId);
+        if (section) {
+            section.quantity += qty;
+        }
+        if (Number(line.qty_received ?? 0) < qty) {
+            fullyReceivedByOrderId.set(orderId, false);
+        } else if (!fullyReceivedByOrderId.has(orderId)) {
+            fullyReceivedByOrderId.set(orderId, true);
+        }
+    }
+
+    const typeLabelByValue = new Map(importedTypes.map((option) => [option.value, option.label]));
+    const result: PoTrackingOrder[] = [];
+    for (const order of orders) {
+        const id = Number(order.id ?? 0);
+        const containers = containersByOrderId.get(id) ?? [];
+        const fullyReceived = fullyReceivedByOrderId.get(id) ?? false;
+        // Without the receipt_status field, awaiting-receipt is judged from the lines.
+        if (!includeReceived && fullyReceived) {
+            continue;
+        }
+
+        const rawTypes = order[typeField.fieldName];
+        const typeKeys = Array.isArray(rawTypes) && typeField.kind === "relational" && typeof rawTypes[0] === "number"
+            ? (rawTypes as number[]).map(String)
+            : typeof rawTypes === "string" ? [rawTypes] : [];
+        const types = typeKeys.map((key) => typeLabelByValue.get(key)).filter((label): label is string => Boolean(label));
+
+        result.push({
+            id,
+            name: toDisplayString(order.name),
+            vendorName: getRelationalName(order.partner_id),
+            vendorRef: toDisplayString(order.partner_ref),
+            orderDate: normalizeOdooDate(order.date_order),
+            expectedArrival: normalizeOdooDate(order.date_planned),
+            currencyCode: getRelationalName(order.currency_id),
+            types,
+            fullyReceived,
+            containers,
+        });
+    }
+
+    return { orders: result, importedTypeNames: importedTypes.map((option) => option.label) };
+}

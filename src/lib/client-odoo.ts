@@ -658,3 +658,77 @@ export function getSalesTargetDetails(input: {
 }) {
     return post<OdooSalesTargetDetailsReport>("/api/odoo/sales-target-details", input);
 }
+
+// ---- PO Tracking ----
+
+export type PoTrackingContainer = {
+    index: number;
+    containerNo: string;
+    sealNo: string;
+    blNumber: string;
+    quantity: number;
+    label: string;
+};
+
+export type PoTrackingOrder = {
+    id: number;
+    name: string;
+    vendorName: string;
+    vendorRef: string;
+    orderDate: string;
+    expectedArrival: string;
+    currencyCode: string;
+    types: string[];
+    fullyReceived: boolean;
+    containers: PoTrackingContainer[];
+};
+
+export type ShipmentEvent = {
+    description: string;
+    datetime: string;
+    isActual: boolean;
+    location: string;
+    transportMode: string;
+    voyage: string;
+};
+
+export type ShipmentTracking = {
+    blNumber: string;
+    carrierName: string;
+    carrierCode: string;
+    status: string;
+    updatedAt: string;
+    vessels: string[];
+    origin: { name: string; departure: string } | null;
+    destination: { name: string; arrival: string } | null;
+    transshipments: Array<{ name: string; arrival: string; departure: string }>;
+    containers: Array<{
+        number: string;
+        size: string;
+        type: string;
+        status: string;
+        lastEvent: ShipmentEvent | null;
+        events: ShipmentEvent[];
+    }>;
+    fetchedAt: string;
+};
+
+export function getPoTrackingOrders(input?: { includeReceived?: boolean }) {
+    return post<{ orders: PoTrackingOrder[]; importedTypeNames: string[] }>("/api/odoo/po-tracking", {
+        includeReceived: Boolean(input?.includeReceived),
+    });
+}
+
+export function trackShipmentByBl(blNumber: string, carrierCode?: string) {
+    return post<ShipmentTracking>("/api/po-tracking/track", { blNumber, carrierCode });
+}
+
+export type TrackingCarrier = { code: string; name: string };
+
+export function getTrackingCarriers() {
+    return post<{ carriers: TrackingCarrier[] }>("/api/po-tracking/carriers", {});
+}
+
+export function getSavedShipmentTracking() {
+    return post<{ tracked: Record<string, ShipmentTracking>; carriers: Record<string, string> }>("/api/po-tracking/saved", {});
+}
