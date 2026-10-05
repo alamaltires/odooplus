@@ -1050,8 +1050,8 @@ export default function MarginAnalyticsPage() {
                 Origin: row.originName,
                 "Rim Diameter": row.rimDiameterName,
                 "Purchased Qty": row.purchasedQty,
-                "Remaining Stock": row.stockByLot.length > 0
-                    ? row.stockByLot.map((entry) => `${entry.lotName} (${formatNumber(entry.quantity)})`).join("\n")
+                "Remaining Stock": (row.stockByLot ?? []).length > 0
+                    ? (row.stockByLot ?? []).map((entry) => `${entry.lotName} (${formatNumber(entry.quantity)})`).join("\n")
                     : row.currentStock,
                 [`Avg Purchase Price (${report.currencyCode})`]: row.avgPurchasePrice,
                 [`Avg Landed Cost (${report.currencyCode})`]: row.avgLandedCostPerUnit,
@@ -1761,8 +1761,8 @@ export default function MarginAnalyticsPage() {
                                                         <td className="border border-(--line) px-4 py-3 text-(--ink-soft)">{row.rimDiameterName}</td>
                                                         <td className="border border-(--line) px-4 py-3">{formatNumber(row.purchasedQty)}</td>
                                                         <td className="border border-(--line) px-4 py-3">
-                                                            {row.stockByLot.length > 0 ? (
-                                                                row.stockByLot.map((entry) => (
+                                                            {(row.stockByLot ?? []).length > 0 ? (
+                                                                (row.stockByLot ?? []).map((entry) => (
                                                                     <div key={entry.lotName} className="whitespace-nowrap">
                                                                         {entry.lotName} ({formatNumber(entry.quantity)})
                                                                     </div>
