@@ -20,6 +20,7 @@ export async function POST(request: Request) {
             startDate: string;
             endDate: string;
             dateBasis?: "order" | "transaction" | null;
+            valuationBasis?: "average" | "odoo" | null;
         };
 
         const report = await runWithCompanyIds(companyIds, () => getMarginAnalyticsReport(credentials, body));

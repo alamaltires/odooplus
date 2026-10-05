@@ -36,7 +36,9 @@ type ReportRow = {
     purchasedQty: number;
     avgPurchasePrice: number;
     avgLandedCostPerUnit: number;
+    avgOdooCostPerUnit: number;
     avgOperationCostPerUnit: number;
+    avgUnlinkedAdjustmentPerUnit: number;
     avgFinalLandedCostPerUnit: number;
     avgTotalCostPerUnit: number;
     soldQty: number;
@@ -46,6 +48,7 @@ type ReportRow = {
     marginPercent: number;
     estimatedProfitLoss: number;
     currentStock: number;
+    stockByLot: Array<{ lotName: string; quantity: number }>;
     flags: RowFlag[];
     originalCurrencies: string[];
 };
@@ -77,6 +80,7 @@ type Highlights = {
     avgPurchasePrice: number;
     avgLandedCostPerUnit: number;
     avgOperationCostPerUnit: number;
+    avgUnlinkedAdjustmentPerUnit: number;
     avgFinalLandedCostPerUnit: number;
     avgTotalCostPerUnit: number;
     avgSalesPrice: number;
@@ -85,6 +89,7 @@ type Highlights = {
 };
 
 type Report = {
+    valuationBasis?: "average" | "odoo";
     startDate: string;
     endDate: string;
     currencyCode: string;
@@ -420,6 +425,7 @@ export default function MarginAnalyticsPage() {
     });
     const [endDate, setEndDate] = useState(todayISO);
     const [dateBasis, setDateBasis] = useState<"order" | "transaction">("order");
+    const [valuationBasis, setValuationBasis] = useState<"average" | "odoo">("average");
 
     const [report, setReport] = useState<Report | null>(null);
     const [reportLoading, setReportLoading] = useState(false);
@@ -950,6 +956,7 @@ export default function MarginAnalyticsPage() {
                 startDate,
                 endDate,
                 dateBasis,
+                valuationBasis,
             });
             setReport(data);
             // Pin the filters this report was actually built from, so a
@@ -1043,10 +1050,16 @@ export default function MarginAnalyticsPage() {
                 Origin: row.originName,
                 "Rim Diameter": row.rimDiameterName,
                 "Purchased Qty": row.purchasedQty,
-                "Remaining Stock": row.currentStock,
+                "Remaining Stock": row.stockByLot.length > 0
+                    ? row.stockByLot.map((entry) => `${entry.lotName} (${formatNumber(entry.quantity)})`).join("\n")
+                    : row.currentStock,
                 [`Avg Purchase Price (${report.currencyCode})`]: row.avgPurchasePrice,
                 [`Avg Landed Cost (${report.currencyCode})`]: row.avgLandedCostPerUnit,
+                ...(report.valuationBasis === "odoo"
+                    ? { [`Odoo Valuation Cost (${report.currencyCode})`]: row.avgOdooCostPerUnit }
+                    : {}),
                 [`Avg Operation Cost (${report.currencyCode})`]: row.avgOperationCostPerUnit,
+                [`Avg Unlinked Adjustments (${report.currencyCode})`]: row.avgUnlinkedAdjustmentPerUnit,
                 [`Final Landed Cost (${report.currencyCode})`]: row.avgFinalLandedCostPerUnit,
                 [`Avg Total Cost (${report.currencyCode})`]: row.avgTotalCostPerUnit,
                 "Sold Qty": row.soldQty,
@@ -1434,6 +1447,18 @@ export default function MarginAnalyticsPage() {
                             ]}
                         />
                     </label>
+
+                    <label className="block">
+                        <span className="mb-2 block text-sm font-medium">Valuation Basis</span>
+                        <Select2
+                            value={valuationBasis}
+                            onChange={(next) => setValuationBasis(next as "average" | "odoo")}
+                            options={[
+                                { value: "average", label: "1 - Averaging (purchase + landed + corrections)" },
+                                { value: "odoo", label: "2 - Odoo Valuation (current cost: stock value / remaining qty)" },
+                            ]}
+                        />
+                    </label>
                 </div>
 
                 <div className="mt-5 flex flex-wrap items-center gap-3">
@@ -1480,6 +1505,15 @@ export default function MarginAnalyticsPage() {
                                             }`}
                                     >
                                         {formatCurrency(report.highlights.avgOperationCostPerUnit, report.currencyCode)}
+                                    </p>
+                                </div>
+                                <div className="rounded-lg bg-(--chip) px-2.5 py-1.5">
+                                    <p className="text-[10px] text-(--ink-soft)">Unlinked Adj.</p>
+                                    <p
+                                        className={`text-xs font-semibold ${report.highlights.avgUnlinkedAdjustmentPerUnit < 0 ? "text-red-600" : ""
+                                            }`}
+                                    >
+                                        {formatCurrency(report.highlights.avgUnlinkedAdjustmentPerUnit, report.currencyCode)}
                                     </p>
                                 </div>
                                 <div className="rounded-lg bg-[rgba(229,26,39,0.08)] px-2.5 py-1.5">
@@ -1726,7 +1760,17 @@ export default function MarginAnalyticsPage() {
                                                         <td className="border border-(--line) px-4 py-3 text-(--ink-soft)">{row.originName}</td>
                                                         <td className="border border-(--line) px-4 py-3 text-(--ink-soft)">{row.rimDiameterName}</td>
                                                         <td className="border border-(--line) px-4 py-3">{formatNumber(row.purchasedQty)}</td>
-                                                        <td className="border border-(--line) px-4 py-3">{formatNumber(row.currentStock)}</td>
+                                                        <td className="border border-(--line) px-4 py-3">
+                                                            {row.stockByLot.length > 0 ? (
+                                                                row.stockByLot.map((entry) => (
+                                                                    <div key={entry.lotName} className="whitespace-nowrap">
+                                                                        {entry.lotName} ({formatNumber(entry.quantity)})
+                                                                    </div>
+                                                                ))
+                                                            ) : (
+                                                                formatNumber(row.currentStock)
+                                                            )}
+                                                        </td>
                                                         <td className="border border-(--line) px-4 py-3">
                                                             {formatCurrency(row.avgTotalCostPerUnit, report.currencyCode)}
                                                         </td>
@@ -1772,6 +1816,14 @@ export default function MarginAnalyticsPage() {
                                                                             {formatCurrency(row.avgLandedCostPerUnit, report.currencyCode)}
                                                                         </p>
                                                                     </div>
+                                                                    {row.avgOdooCostPerUnit > 0 ? (
+                                                                        <div className="rounded-xl border border-(--line) bg-(--card) px-3.5 py-2.5">
+                                                                            <p className="text-[11px] text-(--ink-soft)">Odoo valuation cost</p>
+                                                                            <p className="mt-1 text-sm font-semibold">
+                                                                                {formatCurrency(row.avgOdooCostPerUnit, report.currencyCode)}
+                                                                            </p>
+                                                                        </div>
+                                                                    ) : null}
                                                                     <div className="rounded-xl border border-(--line) bg-(--card) px-3.5 py-2.5">
                                                                         <p className="text-[11px] text-(--ink-soft)">Operation cost</p>
                                                                         <p
@@ -1779,6 +1831,15 @@ export default function MarginAnalyticsPage() {
                                                                                 }`}
                                                                         >
                                                                             {formatCurrency(row.avgOperationCostPerUnit, report.currencyCode)}
+                                                                        </p>
+                                                                    </div>
+                                                                    <div className="rounded-xl border border-(--line) bg-(--card) px-3.5 py-2.5">
+                                                                        <p className="text-[11px] text-(--ink-soft)">Unlinked adjustments</p>
+                                                                        <p
+                                                                            className={`mt-1 text-sm font-semibold ${row.avgUnlinkedAdjustmentPerUnit < 0 ? "text-red-600" : ""
+                                                                                }`}
+                                                                        >
+                                                                            {formatCurrency(row.avgUnlinkedAdjustmentPerUnit, report.currencyCode)}
                                                                         </p>
                                                                     </div>
                                                                     <div className="rounded-xl border border-(--brand)/30 bg-[rgba(229,26,39,0.06)] px-3.5 py-2.5">
@@ -2026,6 +2087,7 @@ function BreakdownModal({
             appendSection(breakdown.purchases, "Purchase Orders", "Qty", `Unit (${currencyCode})`, true);
             appendSection(breakdown.landedCosts, "Landed Cost Records", "Qty", `Per unit (${currencyCode})`);
             appendSection(breakdown.operationCosts, "Accounting Corrections", "Share %", `Entry (${currencyCode})`);
+            appendSection(breakdown.unlinkedAdjustments, "Unlinked Adjustments", "Qty", `Entry (${currencyCode})`);
             appendSection(breakdown.sales, "Sales Orders", "Qty", `Unit (${currencyCode})`);
 
             XLSX.writeFile(workbook, `${sanitizeFileName(product.productName)}-breakdown.xlsx`);
@@ -2190,6 +2252,16 @@ function BreakdownModal({
                                 quantityLabel="Share %"
                                 unitLabel={`Entry (${currencyCode})`}
                                 emptyText="No operation-cost corrections were found for these purchase orders."
+                            />
+
+                            <BreakdownSection
+                                title="Unlinked Valuation Adjustments"
+                                subtitle="Inventory valuation entries with no source document or reference — counted in full toward this product's cost"
+                                rows={breakdown.unlinkedAdjustments}
+                                currencyCode={currencyCode}
+                                quantityLabel="Qty"
+                                unitLabel={`Entry (${currencyCode})`}
+                                emptyText="No unlinked valuation adjustments were found."
                             />
 
                             <BreakdownSection

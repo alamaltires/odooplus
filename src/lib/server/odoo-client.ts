@@ -6199,7 +6199,11 @@ type MarginAnalyticsProductRow = {
     purchasedQty: number;
     avgPurchasePrice: number;
     avgLandedCostPerUnit: number;
+    /** Odoo valuation basis only: Odoo's own current cost per unit (0 otherwise). */
+    avgOdooCostPerUnit: number;
     avgOperationCostPerUnit: number;
+    /** Quantity-less valuation layers with no source document/reference (signed, per purchased unit). */
+    avgUnlinkedAdjustmentPerUnit: number;
     /** Landed cost adjusted by the operation cost correction (landed cost + operation cost — the sign of the operation cost already tells whether that's an increase or a decrease). */
     avgFinalLandedCostPerUnit: number;
     avgTotalCostPerUnit: number;
@@ -6210,6 +6214,8 @@ type MarginAnalyticsProductRow = {
     marginPercent: number;
     estimatedProfitLoss: number;
     currentStock: number;
+    /** On-hand quantity per lot (newest lot name first); empty lots omitted. */
+    stockByLot: Array<{ lotName: string; quantity: number }>;
     flags: MarginAnalyticsRowFlag[];
     /**
      * Non-AED currencies that actually contributed to this row's purchase
@@ -6238,6 +6244,7 @@ type MarginAnalyticsHighlights = {
     avgPurchasePrice: number;
     avgLandedCostPerUnit: number;
     avgOperationCostPerUnit: number;
+    avgUnlinkedAdjustmentPerUnit: number;
     avgFinalLandedCostPerUnit: number;
     avgTotalCostPerUnit: number;
     avgSalesPrice: number;
@@ -6249,6 +6256,7 @@ type MarginAnalyticsReport = {
     startDate: string;
     endDate: string;
     currencyCode: string;
+    valuationBasis?: "average" | "odoo";
     matchedProductCount: number;
     rows: MarginAnalyticsProductRow[];
     highlights: MarginAnalyticsHighlights;
@@ -6273,6 +6281,7 @@ function emptyMarginAnalyticsReport(startDate: string, endDate: string): MarginA
             avgPurchasePrice: 0,
             avgLandedCostPerUnit: 0,
             avgOperationCostPerUnit: 0,
+            avgUnlinkedAdjustmentPerUnit: 0,
             avgFinalLandedCostPerUnit: 0,
             avgTotalCostPerUnit: 0,
             avgSalesPrice: 0,
@@ -6286,6 +6295,95 @@ function emptyMarginAnalyticsReport(startDate: string, endDate: string): MarginA
 const MARGIN_ANALYTICS_MAX_PRODUCTS = 3000;
 const MARGIN_ANALYTICS_OPERATION_COST_JOURNAL_NAME = "Miscellaneous Operations";
 const MARGIN_ANALYTICS_LANDED_COST_DIFFERENCES_ACCOUNT_CODE = "400001.1";
+
+type UnlinkedValuationLayer = {
+    productId: number;
+    /** Signed value in the layer's own (company) currency. */
+    value: number;
+    currencyId: number | null;
+    currencyCode: string;
+    date: string;
+    reference: string;
+    description: string;
+};
+
+/**
+ * "Unlinked valuation adjustments": stock.valuation.layer rows that change a
+ * product's inventory value (e.g. a manual cost correction posted through a
+ * vendor bill) but have no quantity, no stock move, no landed cost and
+ * therefore no source document / reference. None of the PO-anchored cost
+ * components (purchase price, landed cost, operation cost) can ever see them.
+ *
+ * Scoped by the layer's own creation date. When a Unified Lot filter is
+ * active, only layers tied to those lots are returned; if this Odoo
+ * database's valuation layer has no lot field to scope by, nothing is
+ * returned (rather than wrongly spreading a lot-specific correction across
+ * the whole product).
+ */
+async function fetchUnlinkedValuationLayers(
+    credentials: OdooCredentials,
+    uid: number,
+    productIds: number[],
+    lotIds: number[] | null,
+    startDate: string,
+    endDate: string
+): Promise<UnlinkedValuationLayer[]> {
+    if (productIds.length === 0) {
+        return [];
+    }
+
+    const layerFields = await executeKw<Record<string, unknown>>(
+        credentials,
+        uid,
+        "stock.valuation.layer",
+        "fields_get",
+        [],
+        { attributes: ["type"] }
+    );
+    const has = (name: string) => Object.prototype.hasOwnProperty.call(layerFields, name);
+
+    const domain: unknown[] = [
+        ["product_id", "in", productIds],
+        ["quantity", "=", 0],
+        ["stock_move_id", "=", false],
+        ["create_date", ">=", `${startDate} 00:00:00`],
+        ["create_date", "<=", `${endDate} 23:59:59`],
+    ];
+    if (has("stock_landed_cost_id")) {
+        domain.push(["stock_landed_cost_id", "=", false]);
+    }
+
+    if (lotIds) {
+        const lotField = ["lot_id", "lot_ids"].find(has);
+        if (!lotField || lotIds.length === 0) {
+            return [];
+        }
+        domain.push([lotField, "in", lotIds]);
+    }
+
+    const fields = ["product_id", "value", "currency_id", "create_date", "description"].filter(has);
+    if (has("account_move_id")) {
+        fields.push("account_move_id");
+    }
+
+    const layers = await searchReadAll(credentials, uid, "stock.valuation.layer", domain, fields);
+
+    return layers.flatMap((layer) => {
+        const productId = getRelationalId(layer.product_id);
+        if (!productId) {
+            return [];
+        }
+        return [{
+            productId,
+            value: Number(layer.value ?? 0),
+            currencyId: getRelationalId(layer.currency_id),
+            currencyCode: getRelationalName(layer.currency_id) || "?",
+            date: normalizeOdooDate(layer.create_date),
+            reference: getRelationalName(layer.account_move_id) || "",
+            description: toDisplayString(layer.description),
+        }];
+    });
+}
 
 /**
  * Margin Analytics: for products matching the given filters, computes the
@@ -6359,10 +6457,19 @@ export async function getMarginAnalyticsReport(
          * March counts toward March.
          */
         dateBasis?: "order" | "transaction" | null;
+        /**
+         * "average" (default): cost = purchase price + landed + operation +
+         * unlinked adjustments, averaged over purchased qty. "odoo": cost per
+         * unit is Odoo's own current cost: total stock.valuation.layer value
+         * over total layer quantity (remaining stock value / remaining qty),
+         * which already includes landed costs and valuation corrections.
+         */
+        valuationBasis?: "average" | "odoo" | null;
     }
 ): Promise<MarginAnalyticsReport> {
     const uid = await authenticate(credentials);
     const dateBasis = input.dateBasis === "transaction" ? "transaction" : "order";
+    const valuationBasis = input.valuationBasis === "odoo" ? "odoo" : "average";
 
     const categoryId = Number(input.categoryId);
     const hasCategory = Number.isFinite(categoryId) && categoryId > 0;
@@ -7165,6 +7272,45 @@ export async function getMarginAnalyticsReport(
         }
     }
 
+    // Step 1c: "unlinked valuation adjustments" — quantity-less valuation
+    // layers with no source document (see `fetchUnlinkedValuationLayers`).
+    // Not anchored to any purchase order, so they are added product-wide
+    // (or lot-wide when a Unified Lot filter is active).
+    const unlinkedAdjustmentByProductId = new Map<number, number>();
+
+    if (finalProductIds.length > 0) {
+        const lotIdsForLayers = unifiedLotProductLots
+            ? unifiedLotProductLots
+                .filter((entry) => finalProductIds.includes(entry.productId))
+                .map((entry) => entry.lotId)
+            : null;
+        const layers = await fetchUnlinkedValuationLayers(
+            credentials,
+            uid,
+            finalProductIds,
+            lotIdsForLayers,
+            startDate,
+            endDate
+        );
+
+        await ensureCurrencyMultipliers(layers.map((layer) => layer.currencyId));
+
+        for (const layer of layers) {
+            recordSourceCurrency(layer.productId, layer.currencyId, layer.currencyCode);
+            const multiplier = layer.currencyId ? multiplierByCurrencyId.get(layer.currencyId) : undefined;
+            if (multiplier === undefined) {
+                if (layer.currencyId) {
+                    unconvertedCurrencyCodes.add(layer.currencyCode);
+                }
+                continue;
+            }
+            unlinkedAdjustmentByProductId.set(
+                layer.productId,
+                (unlinkedAdjustmentByProductId.get(layer.productId) ?? 0) + layer.value * multiplier
+            );
+        }
+    }
+
     // Step 3: sales in the same period, same currency-safe conversion.
     const soldQtyByProductId = new Map<number, number>();
     const salesValueByProductId = new Map<number, number>();
@@ -7324,10 +7470,11 @@ export async function getMarginAnalyticsReport(
             ["product_id", "in", finalProductIds],
             ["location_id.usage", "=", "internal"],
         ]],
-        { fields: ["product_id", "quantity"], limit: 50000 }
+        { fields: ["product_id", "lot_id", "quantity"], limit: 50000 }
     );
 
     const currentStockByProductId = new Map<number, number>();
+    const stockByLotByProductId = new Map<number, Map<string, number>>();
     for (const quant of quants) {
         const id = getRelationalId(quant.product_id);
         if (!id) {
@@ -7336,6 +7483,90 @@ export async function getMarginAnalyticsReport(
 
         const quantity = Number(quant.quantity ?? 0);
         currentStockByProductId.set(id, (currentStockByProductId.get(id) ?? 0) + quantity);
+
+        const lotName = getRelationalName(quant.lot_id) || "No lot";
+        const lotMap = stockByLotByProductId.get(id) ?? new Map<string, number>();
+        lotMap.set(lotName, (lotMap.get(lotName) ?? 0) + quantity);
+        stockByLotByProductId.set(id, lotMap);
+    }
+
+    // Step 3b (Odoo valuation basis only): Odoo's own current cost per unit
+    // = total value of every valuation layer / total quantity of every layer
+    // (receipts, deliveries, returns, landed costs and quantity-less
+    // revaluations alike) — i.e. remaining stock value over remaining qty,
+    // which is exactly how AVCO arrives at the product's cost after the
+    // latest receipt or revaluation. Deliberately NOT date-scoped: a
+    // correction posted after the period still moves what Odoo says the
+    // stock costs now. Lot-scoped when a Unified Lot filter is active.
+    const odooCostPerUnitByProductId = new Map<number, number>();
+
+    if (valuationBasis === "odoo" && finalProductIds.length > 0) {
+        const layerFields = await executeKw<Record<string, unknown>>(
+            credentials,
+            uid,
+            "stock.valuation.layer",
+            "fields_get",
+            [],
+            { attributes: ["type"] }
+        );
+        const layerHas = (name: string) => Object.prototype.hasOwnProperty.call(layerFields, name);
+
+        const layerDomain: unknown[] = [["product_id", "in", finalProductIds]];
+        if (unifiedLotProductLots) {
+            const lotIdsForCost = unifiedLotProductLots
+                .filter((entry) => finalProductIds.includes(entry.productId))
+                .map((entry) => entry.lotId);
+            const lotField = ["lot_id", "lot_ids"].find(layerHas);
+            // Layers tied to a stock move reach their lot through the move's
+            // lines; move-less revaluations only through the layer's own lot
+            // field (when this database has one).
+            if (lotField) {
+                layerDomain.push(
+                    "|",
+                    ["stock_move_id.move_line_ids.lot_id", "in", lotIdsForCost],
+                    [lotField, "in", lotIdsForCost]
+                );
+            } else {
+                layerDomain.push(["stock_move_id.move_line_ids.lot_id", "in", lotIdsForCost]);
+            }
+        }
+
+        const costLayers = await searchReadAll(
+            credentials,
+            uid,
+            "stock.valuation.layer",
+            layerDomain,
+            ["product_id", "quantity", "value", "currency_id"]
+        );
+        await ensureCurrencyMultipliers(costLayers.map((layer) => getRelationalId(layer.currency_id)));
+
+        const netQtyByProductId = new Map<number, number>();
+        const netValueByProductId = new Map<number, number>();
+        for (const layer of costLayers) {
+            const id = getRelationalId(layer.product_id);
+            if (!id) {
+                continue;
+            }
+            const currencyId = getRelationalId(layer.currency_id);
+            const currencyCode = getRelationalName(layer.currency_id) || "?";
+            recordSourceCurrency(id, currencyId, currencyCode);
+            const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
+            if (multiplier === undefined) {
+                if (currencyId) {
+                    unconvertedCurrencyCodes.add(currencyCode);
+                }
+                continue;
+            }
+            netQtyByProductId.set(id, (netQtyByProductId.get(id) ?? 0) + Number(layer.quantity ?? 0));
+            netValueByProductId.set(id, (netValueByProductId.get(id) ?? 0) + Number(layer.value ?? 0) * multiplier);
+        }
+        for (const [id, qty] of netQtyByProductId) {
+            // No stock left means no "remaining value / remaining qty";
+            // those products fall back to the averaged components.
+            if (qty > 0) {
+                odooCostPerUnitByProductId.set(id, (netValueByProductId.get(id) ?? 0) / qty);
+            }
+        }
     }
 
     // Step 2 & 4: per-product averages, then report-level highlights.
@@ -7346,6 +7577,7 @@ export async function getMarginAnalyticsReport(
             const purchaseValue = purchaseValueByProductId.get(id) ?? 0;
             const landedCostValue = landedCostByProductId.get(id) ?? 0;
             const operationCostValue = operationCostByProductId.get(id) ?? 0;
+            const unlinkedAdjustmentValue = unlinkedAdjustmentByProductId.get(id) ?? 0;
 
             const avgPurchasePrice = purchasedQty > 0 ? purchaseValue / purchasedQty : 0;
             const avgLandedCostPerUnit = purchasedQty > 0 ? landedCostValue / purchasedQty : 0;
@@ -7354,7 +7586,21 @@ export async function getMarginAnalyticsReport(
             // cost, negative = credit = decreases cost), so combining it
             // with landed cost is a plain sum either way.
             const avgFinalLandedCostPerUnit = avgLandedCostPerUnit + avgOperationCostPerUnit;
-            const avgTotalCostPerUnit = avgPurchasePrice + avgLandedCostPerUnit + avgOperationCostPerUnit;
+            // Unlinked valuation adjustments are signed too (a negative
+            // layer lowers cost), so they join the total as a plain sum.
+            const avgUnlinkedAdjustmentPerUnit = purchasedQty > 0 ? unlinkedAdjustmentValue / purchasedQty : 0;
+            const avgComponentsCostPerUnit =
+                avgPurchasePrice + avgLandedCostPerUnit + avgOperationCostPerUnit + avgUnlinkedAdjustmentPerUnit;
+            // Odoo valuation basis: use Odoo's current cost per unit; fall
+            // back to the averaged components when no stock remains.
+            const odooCostPerUnit = odooCostPerUnitByProductId.get(id);
+            const usesOdooCost = valuationBasis === "odoo" && odooCostPerUnit !== undefined;
+            // Operation corrections are journal entries that never create a
+            // valuation layer, so Odoo's own cost doesn't include them —
+            // they are added on top as a separate line.
+            const avgTotalCostPerUnit = usesOdooCost
+                ? (odooCostPerUnit as number) + avgOperationCostPerUnit
+                : avgComponentsCostPerUnit;
 
             const soldQty = Number((soldQtyByProductId.get(id) ?? 0).toFixed(2));
             const salesValue = salesValueByProductId.get(id) ?? 0;
@@ -7378,7 +7624,7 @@ export async function getMarginAnalyticsReport(
             if (hasSalesData && marginPercent < 0) {
                 flags.push("negative-margin");
             }
-            if (avgOperationCostPerUnit !== 0) {
+            if (avgOperationCostPerUnit !== 0 || avgUnlinkedAdjustmentPerUnit !== 0) {
                 flags.push("has-cost-correction");
             }
 
@@ -7392,7 +7638,9 @@ export async function getMarginAnalyticsReport(
                 purchasedQty,
                 avgPurchasePrice: Number(avgPurchasePrice.toFixed(2)),
                 avgLandedCostPerUnit: Number(avgLandedCostPerUnit.toFixed(2)),
+                avgOdooCostPerUnit: usesOdooCost ? Number((odooCostPerUnit as number).toFixed(2)) : 0,
                 avgOperationCostPerUnit: Number(avgOperationCostPerUnit.toFixed(2)),
+                avgUnlinkedAdjustmentPerUnit: Number(avgUnlinkedAdjustmentPerUnit.toFixed(2)),
                 avgFinalLandedCostPerUnit: Number(avgFinalLandedCostPerUnit.toFixed(2)),
                 avgTotalCostPerUnit: Number(avgTotalCostPerUnit.toFixed(2)),
                 soldQty,
@@ -7402,6 +7650,10 @@ export async function getMarginAnalyticsReport(
                 marginPercent: Number(marginPercent.toFixed(2)),
                 estimatedProfitLoss: Number(estimatedProfitLoss.toFixed(2)),
                 currentStock: Number((currentStockByProductId.get(id) ?? 0).toFixed(2)),
+                stockByLot: Array.from(stockByLotByProductId.get(id) ?? [])
+                    .map(([lotName, quantity]) => ({ lotName, quantity: Number(quantity.toFixed(2)) }))
+                    .filter((entry) => entry.quantity !== 0)
+                    .sort((a, b) => b.lotName.localeCompare(a.lotName)),
                 flags,
                 originalCurrencies: Array.from(sourceCurrencyCodesByProductId.get(id) ?? []).sort(),
             };
@@ -7419,6 +7671,10 @@ export async function getMarginAnalyticsReport(
     const totalPurchaseValue = rows.reduce((sum, row) => sum + row.avgPurchasePrice * row.purchasedQty, 0);
     const totalLandedCostValue = rows.reduce((sum, row) => sum + row.avgLandedCostPerUnit * row.purchasedQty, 0);
     const totalOperationCostValue = rows.reduce((sum, row) => sum + row.avgOperationCostPerUnit * row.purchasedQty, 0);
+    const totalUnlinkedAdjustmentValue = rows.reduce(
+        (sum, row) => sum + row.avgUnlinkedAdjustmentPerUnit * row.purchasedQty,
+        0
+    );
     const totalSoldQty = rows.reduce((sum, row) => sum + row.soldQty, 0);
     const totalSalesValue = rowsWithSalesData.reduce((sum, row) => sum + row.avgSalesPrice * row.soldQty, 0);
     const totalEstimatedProfitLoss = rows.reduce((sum, row) => sum + row.estimatedProfitLoss, 0);
@@ -7428,6 +7684,7 @@ export async function getMarginAnalyticsReport(
         startDate,
         endDate,
         currencyCode: TARGET_CURRENCY_CODE,
+        valuationBasis,
         matchedProductCount: finalProductIds.length,
         rows,
         highlights: {
@@ -7445,12 +7702,19 @@ export async function getMarginAnalyticsReport(
             avgOperationCostPerUnit: totalPurchasedQty > 0
                 ? Number((totalOperationCostValue / totalPurchasedQty).toFixed(2))
                 : 0,
+            avgUnlinkedAdjustmentPerUnit: totalPurchasedQty > 0
+                ? Number((totalUnlinkedAdjustmentValue / totalPurchasedQty).toFixed(2))
+                : 0,
             avgFinalLandedCostPerUnit: totalPurchasedQty > 0
                 ? Number(((totalLandedCostValue + totalOperationCostValue) / totalPurchasedQty).toFixed(2))
                 : 0,
             avgTotalCostPerUnit: totalPurchasedQty > 0
                 ? Number(
-                    ((totalPurchaseValue + totalLandedCostValue + totalOperationCostValue) / totalPurchasedQty).toFixed(2)
+                    (valuationBasis === "odoo"
+                        ? rows.reduce((sum, row) => sum + row.avgTotalCostPerUnit * row.purchasedQty, 0) / totalPurchasedQty
+                        : (totalPurchaseValue + totalLandedCostValue + totalOperationCostValue + totalUnlinkedAdjustmentValue) /
+                        totalPurchasedQty
+                    ).toFixed(2)
                 )
                 : 0,
             avgSalesPrice: totalSoldQty > 0 ? Number((totalSalesValue / totalSoldQty).toFixed(2)) : 0,
@@ -7490,12 +7754,14 @@ export type MarginAnalyticsBreakdown = {
     purchases: MarginAnalyticsBreakdownRow[];
     landedCosts: MarginAnalyticsBreakdownRow[];
     operationCosts: MarginAnalyticsBreakdownRow[];
+    unlinkedAdjustments: MarginAnalyticsBreakdownRow[];
     sales: MarginAnalyticsBreakdownRow[];
     totals: {
         purchasedQty: number;
         purchaseValue: number;
         landedCostValue: number;
         operationCostValue: number;
+        unlinkedAdjustmentValue: number;
         soldQty: number;
         salesValue: number;
     };
@@ -7605,6 +7871,7 @@ export async function getMarginAnalyticsBreakdown(
     let unifiedLotNames: string[] = [];
     let unifiedLotOrderIds: number[] | null = null;
     let unifiedLotSaleLineIds: number[] | null = null;
+    let unifiedLotIdsForProduct: number[] | null = null;
     const unifiedLotQtyBySaleLineId = new Map<number, number>();
 
     if (hasUnifiedLot) {
@@ -7628,6 +7895,7 @@ export async function getMarginAnalyticsBreakdown(
             ["id"]
         );
         const lotIds = lots.map((lot) => Number(lot.id ?? 0)).filter((id) => id > 0);
+        unifiedLotIdsForProduct = lotIds;
 
         unifiedLotOrderIds = [];
         unifiedLotSaleLineIds = [];
@@ -7737,6 +8005,7 @@ export async function getMarginAnalyticsBreakdown(
     const purchases: MarginAnalyticsBreakdownRow[] = [];
     const landedCosts: MarginAnalyticsBreakdownRow[] = [];
     const operationCosts: MarginAnalyticsBreakdownRow[] = [];
+    const unlinkedAdjustments: MarginAnalyticsBreakdownRow[] = [];
     const sales: MarginAnalyticsBreakdownRow[] = [];
 
     // ---- Purchases (mirrors Step 1 of the report) ----
@@ -8109,6 +8378,34 @@ export async function getMarginAnalyticsBreakdown(
         }
     }
 
+    // ---- Unlinked valuation adjustments (Step 1c) ----
+    const unlinkedLayers = await fetchUnlinkedValuationLayers(
+        credentials,
+        uid,
+        [productId],
+        unifiedLotIdsForProduct,
+        startDate,
+        endDate
+    );
+    await ensureCurrencyMultipliers(unlinkedLayers.map((layer) => layer.currencyId));
+    for (const layer of unlinkedLayers) {
+        const multiplier = rateFor(layer.currencyId);
+        if (multiplier === undefined) {
+            continue;
+        }
+        unlinkedAdjustments.push({
+            reference: layer.reference || "(no reference)",
+            date: layer.date,
+            partnerName: "",
+            lots: [],
+            quantity: 0,
+            unitPrice: 0,
+            currencyCode: layer.currencyCode,
+            amount: layer.value * multiplier,
+            note: layer.description || "Valuation adjustment with no source document",
+        });
+    }
+
     // ---- Sales (Step 3) ----
     if (dateBasis === "transaction") {
         const invoiceDomain: unknown[] = [
@@ -8304,12 +8601,14 @@ export async function getMarginAnalyticsBreakdown(
         purchases: purchases.sort((a, b) => a.date.localeCompare(b.date)),
         landedCosts: landedCosts.sort((a, b) => a.date.localeCompare(b.date)),
         operationCosts: operationCosts.sort((a, b) => a.date.localeCompare(b.date)),
+        unlinkedAdjustments: unlinkedAdjustments.sort((a, b) => a.date.localeCompare(b.date)),
         sales: sales.sort((a, b) => a.date.localeCompare(b.date)),
         totals: {
             purchasedQty: sumBy(purchases, "quantity"),
             purchaseValue: sumBy(purchases, "amount"),
             landedCostValue: sumBy(landedCosts, "amount"),
             operationCostValue: sumBy(operationCosts, "amount"),
+            unlinkedAdjustmentValue: sumBy(unlinkedAdjustments, "amount"),
             soldQty: sumBy(sales, "quantity"),
             salesValue: sumBy(sales, "amount"),
         },

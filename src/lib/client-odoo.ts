@@ -328,11 +328,13 @@ export function getMarginAnalyticsReport(input: {
     startDate: string;
     endDate: string;
     dateBasis?: "order" | "transaction" | null;
+    valuationBasis?: "average" | "odoo" | null;
 }) {
     return post<{
         startDate: string;
         endDate: string;
         currencyCode: string;
+        valuationBasis?: "average" | "odoo";
         matchedProductCount: number;
         rows: Array<{
             productId: number;
@@ -344,7 +346,9 @@ export function getMarginAnalyticsReport(input: {
             purchasedQty: number;
             avgPurchasePrice: number;
             avgLandedCostPerUnit: number;
+            avgOdooCostPerUnit: number;
             avgOperationCostPerUnit: number;
+            avgUnlinkedAdjustmentPerUnit: number;
             avgFinalLandedCostPerUnit: number;
             avgTotalCostPerUnit: number;
             soldQty: number;
@@ -354,6 +358,7 @@ export function getMarginAnalyticsReport(input: {
             marginPercent: number;
             estimatedProfitLoss: number;
             currentStock: number;
+            stockByLot: Array<{ lotName: string; quantity: number }>;
             flags: Array<"never-sold" | "sold-without-purchase" | "no-landed-cost" | "negative-margin" | "has-cost-correction">;
             originalCurrencies: string[];
         }>;
@@ -368,6 +373,7 @@ export function getMarginAnalyticsReport(input: {
             avgPurchasePrice: number;
             avgLandedCostPerUnit: number;
             avgOperationCostPerUnit: number;
+            avgUnlinkedAdjustmentPerUnit: number;
             avgFinalLandedCostPerUnit: number;
             avgTotalCostPerUnit: number;
             avgSalesPrice: number;
@@ -405,12 +411,14 @@ export type MarginBreakdown = {
     purchases: MarginBreakdownRow[];
     landedCosts: MarginBreakdownRow[];
     operationCosts: MarginBreakdownRow[];
+    unlinkedAdjustments: MarginBreakdownRow[];
     sales: MarginBreakdownRow[];
     totals: {
         purchasedQty: number;
         purchaseValue: number;
         landedCostValue: number;
         operationCostValue: number;
+        unlinkedAdjustmentValue: number;
         soldQty: number;
         salesValue: number;
     };
