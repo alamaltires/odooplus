@@ -3615,6 +3615,8 @@ export type PaymentFollowupCheque = {
     // independent of `state`/`isPending` (a Registered cheque can be either
     // deposited or not), tracked separately as "Total Deposit".
     isDeposited: boolean;
+    pendingAmount: number;
+    receivableMatched: boolean | null;
 };
 
 export type PaymentFollowupCustomerRow = {
@@ -4284,6 +4286,139 @@ function resolveAgingBucket(
     return getAgingBucketByMonth(referenceDateIso ? monthsElapsedBetween(referenceDateIso, asOfDateIso) : 0);
 }
 
+type PdcReceivableMatch = { matched: boolean; unmatchedRatio: number; unmatchedLineIds: number[] };
+
+/**
+ * For each PDC cheque record, whether its Accounts Receivable journal item is
+ * matched, and how much of it is still open. Found by the cheque's own record
+ * id first: any many2one on `account.move.line` pointing at the cheque's model
+ * (`payment_id` for `account.payment`) is queried with the id. Cheques that way
+ * finds nothing for are then resolved through their journal entry (`move_id`,
+ * or a `payment_id` whose payment owns the entry). Records with no receivable
+ * item at all are simply absent from the result.
+ */
+async function getPdcReceivableMatches(
+    credentials: OdooCredentials,
+    uid: number,
+    model: string,
+    recordIds: number[],
+    receivableTriple: unknown
+): Promise<Map<number, PdcReceivableMatch>> {
+    const result = new Map<number, PdcReceivableMatch>();
+    if (recordIds.length === 0) {
+        return result;
+    }
+
+    type Totals = { balance: number; residual: number; unmatchedLineIds: number[] };
+    const add = (map: Map<number, Totals>, key: number, line: Record<string, unknown>) => {
+        const totals = map.get(key) ?? { balance: 0, residual: 0, unmatchedLineIds: [] };
+        totals.balance += Math.abs(Number(line.balance ?? 0));
+        totals.residual += Math.abs(Number(line.amount_residual ?? 0));
+        if (Math.abs(Number(line.amount_residual ?? 0)) >= 0.005) totals.unmatchedLineIds.push(Number(line.id));
+        map.set(key, totals);
+    };
+    const finish = (recordId: number, totals: Totals) => {
+        const unmatchedRatio = totals.balance > 0 ? Math.min(Math.max(totals.residual / totals.balance, 0), 1) : 0;
+        result.set(recordId, { matched: totals.residual < 0.005, unmatchedRatio, unmatchedLineIds: totals.unmatchedLineIds });
+    };
+
+    // 1. Direct: receivable journal items that point at the cheque record itself.
+    const lineMeta = await executeKw<Record<string, { type?: string; relation?: string }>>(
+        credentials,
+        uid,
+        "account.move.line",
+        "fields_get",
+        [],
+        { attributes: ["type", "relation"] }
+    );
+    const directFields = Object.entries(lineMeta)
+        .filter(([, meta]) => meta.type === "many2one" && meta.relation === model)
+        .map(([name]) => name);
+
+    for (const field of directFields) {
+        const lines = await searchReadAll(
+            credentials,
+            uid,
+            "account.move.line",
+            [[field, "in", recordIds], receivableTriple, ["parent_state", "=", "posted"]],
+            [field, "balance", "amount_residual"]
+        );
+        const byRecord = new Map<number, Totals>();
+        for (const line of lines) {
+            const recordId = getRelationalId(line[field]);
+            if (recordId) add(byRecord, recordId, line);
+        }
+        for (const [recordId, totals] of byRecord) {
+            if (!result.has(recordId)) finish(recordId, totals);
+        }
+    }
+
+    // 2. Fallback for the rest: through the cheque's journal entry.
+    const remainingIds = recordIds.filter((id) => !result.has(id));
+    if (remainingIds.length === 0) {
+        return result;
+    }
+
+    const candidates = ["move_id", "payment_id", "account_move_id", "journal_entry_id"];
+    const meta = await executeKw<Record<string, { type?: string; relation?: string }>>(
+        credentials,
+        uid,
+        model,
+        "fields_get",
+        [candidates],
+        { attributes: ["type", "relation"] }
+    );
+
+    const moveIdByRecordId = new Map<number, number>();
+    for (const field of candidates) {
+        const relation = meta[field]?.relation;
+        if (!relation || (relation !== "account.move" && relation !== "account.payment")) {
+            continue;
+        }
+
+        const records = await readInBatches(credentials, uid, model, remainingIds, ["id", field]);
+        if (relation === "account.move") {
+            for (const record of records) {
+                const moveId = getRelationalId(record[field]);
+                if (moveId && !moveIdByRecordId.has(Number(record.id))) moveIdByRecordId.set(Number(record.id), moveId);
+            }
+            continue;
+        }
+
+        const paymentIds = Array.from(new Set(records.map((record) => getRelationalId(record[field])).filter((id): id is number => !!id)));
+        const payments = paymentIds.length > 0 ? await readInBatches(credentials, uid, "account.payment", paymentIds, ["id", "move_id"]) : [];
+        const moveIdByPaymentId = new Map(payments.map((payment) => [Number(payment.id), getRelationalId(payment.move_id)]));
+        for (const record of records) {
+            const paymentId = getRelationalId(record[field]);
+            const moveId = paymentId ? moveIdByPaymentId.get(paymentId) : null;
+            if (moveId && !moveIdByRecordId.has(Number(record.id))) moveIdByRecordId.set(Number(record.id), moveId);
+        }
+    }
+
+    const moveIds = Array.from(new Set(moveIdByRecordId.values()));
+    if (moveIds.length === 0) {
+        return result;
+    }
+
+    const lines = await searchReadAll(
+        credentials,
+        uid,
+        "account.move.line",
+        [["move_id", "in", moveIds], receivableTriple, ["parent_state", "=", "posted"]],
+        ["move_id", "balance", "amount_residual"]
+    );
+    const totalsByMoveId = new Map<number, Totals>();
+    for (const line of lines) {
+        const moveId = getRelationalId(line.move_id);
+        if (moveId) add(totalsByMoveId, moveId, line);
+    }
+    for (const [recordId, moveId] of moveIdByRecordId) {
+        const totals = totalsByMoveId.get(moveId);
+        if (totals) finish(recordId, totals);
+    }
+    return result;
+}
+
 /**
  * Shared report builder behind both `getPaymentFollowupForSalesperson` and
  * `getPaymentFollowupForCustomer`. For each of the given (already-canonical,
@@ -4503,6 +4638,24 @@ async function buildPaymentFollowupReport(
             );
         } catch {
             pdcRawMatchCount = null;
+        }
+    }
+
+    // Each cheque's Accounts Receivable journal item: if it isn't matched (or only
+    // partly), that unmatched amount comes off what the customer owes.
+    let receivableMatchByRecordId = new Map<number, PdcReceivableMatch>();
+    if (pdcInfo && pdcRecords.length > 0) {
+        try {
+            receivableMatchByRecordId = await getPdcReceivableMatches(
+                credentials,
+                uid,
+                pdcInfo.model,
+                pdcRecords.map((record) => Number(record.id)).filter((id) => id > 0),
+                receivableTriple
+            );
+        } catch {
+            // No usable link on this PDC model: fall back to the cheque's own state below.
+            receivableMatchByRecordId = new Map();
         }
     }
 
@@ -4805,6 +4958,15 @@ async function buildPaymentFollowupReport(
         invoiceHomeResidualById.set(invoiceId, toHomeAmount(amount, currencyId));
     }
 
+    // The credit an unmatched cheque represents comes off what the customer owes
+    // (spent against their oldest invoices, like any unapplied payment). A cheque
+    // whose receivable item is already among the unapplied credits above has been
+    // deducted there, so only the ones that aren't get added here — never twice.
+    const unappliedCreditLineIds = new Set(
+        unappliedLines.filter((line) => Number(line.balance ?? 0) < 0).map((line) => Number(line.id))
+    );
+    const pdcUnmatchedCreditByCustomerId = new Map<number, number>();
+
     if (pdcInfo) {
         for (const record of pdcRecords) {
             const rawPartnerId = getRelationalId(record[pdcInfo.partnerField]);
@@ -4838,6 +5000,11 @@ async function buildPaymentFollowupReport(
             const isPending =
                 (pdcInfo.pendingField ? !record[pdcInfo.pendingField] : lowerStateLabel.includes("regist")) &&
                 !isDeposited;
+            // Whether the cheque's receivable journal item is matched only drives the
+            // deduction from what the customer owes (see `pdcUnmatchedCreditByCustomerId`);
+            // it never changes whether the cheque counts as pending.
+            const receivableMatch = receivableMatchByRecordId.get(Number(record.id));
+            const pendingAmount = isPending ? amount : 0;
             // `is_deposit` is independent of `state` (a Registered cheque can
             // be either deposited or not) — shown as a compound label rather
             // than replacing the real state, so "still Registered but not
@@ -4846,6 +5013,14 @@ async function buildPaymentFollowupReport(
             const displayState = isDeposited ? "Registered & Deposited" : stateLabel || "-";
 
             const row = ensureRow(customerId);
+            if (receivableMatch && !receivableMatch.matched && !receivableMatch.unmatchedLineIds.some((id) => unappliedCreditLineIds.has(id))) {
+                pdcUnmatchedCreditByCustomerId.set(
+                    customerId,
+                    Number(
+                        ((pdcUnmatchedCreditByCustomerId.get(customerId) ?? 0) + toHomeAmount(amount * receivableMatch.unmatchedRatio, currencyId)).toFixed(2)
+                    )
+                );
+            }
             row.cheques.push({
                 id: Number(record.id),
                 number: toDisplayString(record[pdcInfo.numberField]) || `#${record.id}`,
@@ -4856,10 +5031,12 @@ async function buildPaymentFollowupReport(
                 bankName: pdcInfo.bankField ? getRelationalName(record[pdcInfo.bankField]) || toDisplayString(record[pdcInfo.bankField]) : "",
                 isPending,
                 isDeposited,
+                pendingAmount: Number(pendingAmount.toFixed(2)),
+                receivableMatched: receivableMatch ? receivableMatch.matched : null,
             });
 
             if (isPending) {
-                row.totalPdcPending = Number((row.totalPdcPending + toHomeAmount(amount, currencyId)).toFixed(2));
+                row.totalPdcPending = Number((row.totalPdcPending + toHomeAmount(pendingAmount, currencyId)).toFixed(2));
             }
             if (isDeposited) {
                 row.totalPdcDeposited = Number((row.totalPdcDeposited + toHomeAmount(amount, currencyId)).toFixed(2));
@@ -4889,7 +5066,7 @@ async function buildPaymentFollowupReport(
             .slice()
             .sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : 0));
 
-        let remainingCredit = row.totalUnapplied;
+        let remainingCredit = Number((row.totalUnapplied + (pdcUnmatchedCreditByCustomerId.get(row.customerId) ?? 0)).toFixed(2));
         row.oldestDueDate = "";
         row.maxDaysOverdue = 0;
         row.agingBucket = "notDue";

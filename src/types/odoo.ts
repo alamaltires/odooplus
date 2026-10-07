@@ -366,6 +366,10 @@ export type PaymentFollowupCheque = {
     bankName: string;
     isPending: boolean;
     isDeposited: boolean;
+    /** Part of the amount counted as pending (the whole cheque unless its receivable item is partly matched). */
+    pendingAmount: number;
+    /** Whether the cheque's Accounts Receivable journal item is fully matched; null when no journal item could be found. */
+    receivableMatched: boolean | null;
 };
 
 export type PaymentFollowupCustomerRow = {

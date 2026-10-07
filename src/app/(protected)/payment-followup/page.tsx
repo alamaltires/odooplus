@@ -685,7 +685,7 @@ function ChequesTable({ rows, currencyCode }: { rows: PaymentFollowupCustomerRow
     }
 
     const pendingAmountAll = useMemo(
-        () => rows.filter((row) => row.isPending).reduce((sum, row) => sum + row.amount, 0),
+        () => rows.filter((row) => row.isPending).reduce((sum, row) => sum + row.pendingAmount, 0),
         [rows]
     );
 
@@ -730,7 +730,7 @@ function ChequesTable({ rows, currencyCode }: { rows: PaymentFollowupCustomerRow
     }, [filteredRows, sortKey, sortDirection]);
 
     const pendingAmountFiltered = useMemo(
-        () => filteredRows.filter((row) => row.isPending).reduce((sum, row) => sum + row.amount, 0),
+        () => filteredRows.filter((row) => row.isPending).reduce((sum, row) => sum + row.pendingAmount, 0),
         [filteredRows]
     );
 
@@ -786,6 +786,11 @@ function ChequesTable({ rows, currencyCode }: { rows: PaymentFollowupCustomerRow
                                                 >
                                                     {row.state}
                                                 </span>
+                                                {row.receivableMatched === false ? (
+                                                    <span className="ml-1.5 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800" title="Its Accounts Receivable journal item isn't matched yet, so the amount is deducted from what the customer owes (not counted as pending)">
+                                                        AR unmatched · deducted
+                                                    </span>
+                                                ) : null}
                                             </td>
                                             <td className="px-3 py-2 text-right font-medium">{formatCurrency(row.amount, row.currencyCode)}</td>
                                         </tr>
