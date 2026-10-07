@@ -15,12 +15,14 @@ import {
     Truck,
 } from "lucide-react";
 import {
+    diagnosePoTracking,
     getPoTrackingOrders,
     getSavedShipmentTracking,
     getTrackingCarriers,
     trackShipmentByBl,
     type TrackingCarrier,
     type PoTrackingContainer,
+    type PoTrackingDiagnosis,
     type PoTrackingOrder,
     type ShipmentEvent,
     type ShipmentTracking,
@@ -31,6 +33,8 @@ type BlGroup = {
     orders: PoTrackingOrder[];
     containers: Array<PoTrackingContainer & { orderName: string }>;
     totalQty: number;
+    /** Units written next to this B/L's containers in Odoo (exact), 0 when not given. */
+    declaredQty: number;
 };
 
 type Stage = "waiting" | "departed" | "arrived" | "delivered";
@@ -212,15 +216,24 @@ export default function PoTrackingPage() {
         const byBl = new Map<string, BlGroup>();
 
         for (const order of orders) {
+            // The container text doesn't say how many units sit in each container, so the PO's
+            // total is shared out per B/L (all of it when the PO has a single B/L).
+            const blCount = new Set(order.containers.map((container) => container.blNumber)).size;
             for (const container of order.containers) {
-                const group = byBl.get(container.blNumber) ?? { blNumber: container.blNumber, orders: [], containers: [], totalQty: 0 };
-                if (!group.orders.some((existing) => existing.id === order.id)) group.orders.push(order);
+                const group = byBl.get(container.blNumber) ?? { blNumber: container.blNumber, orders: [], containers: [], totalQty: 0, declaredQty: 0 };
+                if (!group.orders.some((existing) => existing.id === order.id)) {
+                    group.orders.push(order);
+                    group.totalQty += order.totalQty / blCount;
+                }
+                // Units typed on the container line are exact for that B/L.
+                if (container.quantity > 0) {
+                    group.declaredQty += container.quantity;
+                }
                 group.containers.push({ ...container, orderName: order.name });
-                group.totalQty += container.quantity;
                 byBl.set(container.blNumber, group);
             }
         }
-        return Array.from(byBl.values());
+        return Array.from(byBl.values()).map((group) => (group.declaredQty > 0 ? { ...group, totalQty: group.declaredQty } : group));
     }, [orders]);
 
     const enriched = useMemo(
@@ -612,6 +625,8 @@ export default function PoTrackingPage() {
                 )}
             </div>
 
+            <PoCheck />
+
             {ordersError ? (
                 <p className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{ordersError}</p>
             ) : null}
@@ -671,7 +686,6 @@ function Details({ group, tracking }: { group: BlGroup; tracking: ShipmentTracki
                         <tr className="text-left text-xs text-(--ink-soft)">
                             <th className="pb-2 pr-3 font-medium">Container</th>
                             <th className="pb-2 pr-3 font-medium">Seal</th>
-                            <th className="pb-2 pr-3 text-right font-medium">Units</th>
                             <th className="pb-2 font-medium">Last update</th>
                         </tr>
                     </thead>
@@ -680,10 +694,9 @@ function Details({ group, tracking }: { group: BlGroup; tracking: ShipmentTracki
                             const live = tracking?.containers.find((entry) => entry.number.toUpperCase() === container.containerNo);
                             return (
                                 <tr key={`${container.orderName}-${container.containerNo}`} className="border-t border-(--line) align-top">
-                                    <td className="py-2 pr-3 font-medium">{container.containerNo}</td>
+                                    <td className="py-2 pr-3 font-medium">{container.containerNo || "(not listed)"}</td>
                                     <td className="py-2 pr-3 text-(--ink-soft)">{container.sealNo || "—"}</td>
-                                    <td className="py-2 pr-3 text-right">{container.quantity.toLocaleString("en-US")}</td>
-                                    <td className="py-2">
+                                                                        <td className="py-2">
                                         {live?.lastEvent ? (
                                             <>
                                                 {plainEvent(live.lastEvent.description)}
@@ -818,6 +831,98 @@ function Headline({ icon, label, value, tone }: { icon: React.ReactNode; label: 
                 <p className="text-2xl font-semibold leading-none">{value}</p>
                 <p className="mt-1 text-xs text-(--ink-soft)">{label}</p>
             </div>
+        </div>
+    );
+}
+
+/** "Why isn't my PO listed?" — looks one purchase order up in Odoo and explains. */
+function PoCheck() {
+    const [open, setOpen] = useState(false);
+    const [poName, setPoName] = useState("");
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [result, setResult] = useState<PoTrackingDiagnosis | null>(null);
+
+    async function check() {
+        setLoading(true);
+        setError(null);
+        setResult(null);
+        try {
+            setResult(await diagnosePoTracking(poName));
+        } catch (checkError) {
+            setError(checkError instanceof Error ? checkError.message : "Check failed.");
+        } finally {
+            setLoading(false);
+        }
+    }
+
+    return (
+        <div className="mt-3">
+            <button type="button" onClick={() => setOpen((current) => !current)} className="text-sm text-(--ink-soft) underline-offset-2 hover:underline">
+                {open ? "Hide" : "Missing a PO? Check why it isn't listed"}
+            </button>
+
+            {open ? (
+                <div className="mt-2 rounded-2xl border border-(--line) bg-(--card) p-4">
+                    <form
+                        onSubmit={(event) => {
+                            event.preventDefault();
+                            void check();
+                        }}
+                        className="flex flex-wrap gap-2"
+                    >
+                        <input
+                            value={poName}
+                            onChange={(event) => setPoName(event.target.value)}
+                            placeholder="PO number, e.g. P11789"
+                            className="min-w-[12rem] flex-1 rounded-xl border border-(--line) bg-white px-3 py-2 text-sm"
+                        />
+                        <button type="submit" disabled={loading || !poName.trim()} className="rounded-xl bg-(--brand) px-4 py-2 text-sm font-medium text-white disabled:opacity-60">
+                            {loading ? "Checking..." : "Check"}
+                        </button>
+                    </form>
+
+                    {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
+
+                    {result ? (
+                        <div className="mt-4 space-y-3 text-sm">
+                            {result.reasons.length === 0 ? (
+                                <p className="rounded-xl bg-emerald-50 px-3 py-2 font-medium text-emerald-800">
+                                    {result.name} meets every condition — it should be listed (try Reload PO list).
+                                </p>
+                            ) : (
+                                <div className="rounded-xl bg-amber-50 px-3 py-2 text-amber-900">
+                                    <p className="font-medium">{result.name || "This PO"} is not listed because:</p>
+                                    <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                                        {result.reasons.map((reason) => (
+                                            <li key={reason}>{reason}</li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
+
+                            {result.found ? (
+                                <dl className="grid gap-x-6 gap-y-1 sm:grid-cols-[10rem_1fr]">
+                                    <dt className="text-(--ink-soft)">Status</dt>
+                                    <dd>{result.state}{result.receiptStatus ? ` · receipt ${result.receiptStatus}` : ""}</dd>
+                                    <dt className="text-(--ink-soft)">Purchase Type</dt>
+                                    <dd>{result.types.length ? result.types.join(", ") : "—"}</dd>
+                                    <dt className="text-(--ink-soft)">Source Document</dt>
+                                    <dd className="break-words">{result.sourceDocument || "—"}</dd>
+                                    <dt className="text-(--ink-soft)">Notes</dt>
+                                    <dd className="whitespace-pre-wrap break-words">{result.notesPreview || "—"}</dd>
+                                    <dt className="text-(--ink-soft)">B/L found</dt>
+                                    <dd>
+                                        {result.parsed.length
+                                            ? Array.from(new Set(result.parsed.map((entry) => `${entry.blNumber} (from ${entry.from})`))).join(", ")
+                                            : "none"}
+                                    </dd>
+                                </dl>
+                            ) : null}
+                        </div>
+                    ) : null}
+                </div>
+            ) : null}
         </div>
     );
 }

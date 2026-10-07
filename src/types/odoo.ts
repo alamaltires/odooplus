@@ -336,7 +336,7 @@ export type PaymentFollowupInvoiceRow = {
     // whose unreconciled receivable-account debit isn't backed by any
     // invoice — folded in here so it still ages, buckets, and nets FIFO
     // exactly like a real invoice instead of being invisible to the report.
-    moveType: "out_invoice" | "out_refund" | "miscEntry";
+    moveType: "out_invoice" | "out_refund" | "miscEntry" | "payment" | "vendorBill" | "vendorRefund";
     invoiceDate: string;
     dueDate: string;
     paymentTermsName: string;

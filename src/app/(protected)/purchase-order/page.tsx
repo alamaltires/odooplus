@@ -27,6 +27,8 @@ type ReportRow = {
     averageMonthlySales: number;
     suggestedRestock: number;
     pendingFromBackorders: number;
+    incomingQty: number;
+    incomingOrders: Array<{ name: string; quantity: number; expectedDate: string }>;
 };
 
 type DisplayReportRow = ReportRow & {
@@ -40,6 +42,7 @@ type SortColumn =
     | "productName"
     | "soldInPeriod"
     | "currentStock"
+    | "incomingQty"
     | "averageMonthlySales"
     | "suggestedRestock";
 
@@ -304,6 +307,8 @@ export default function PurchaseOrderPage() {
                 "Product Name": row.productName,
                 "Sold in Period": row.soldInPeriod,
                 "Current Stock": row.currentStock,
+                "On the Way": row.incomingQty,
+                "On the Way (PO)": row.incomingOrders.map((order) => `${order.name} (${order.quantity})`).join(", "),
                 "Average Monthly Sales": Math.ceil(row.averageMonthlySales),
                 "Suggested Restock": row.restockDisplayValue,
                 "Suggested Restock + Pending Orders": row.suggestedRestockWithPending,
@@ -314,6 +319,8 @@ export default function PurchaseOrderPage() {
                 { wch: 42 },
                 { wch: 16 },
                 { wch: 16 },
+                { wch: 12 },
+                { wch: 36 },
                 { wch: 22 },
                 { wch: 20 },
                 { wch: 36 },
@@ -631,6 +638,11 @@ export default function PurchaseOrderPage() {
                                         </button>
                                     </th>
                                     <th className="border border-(--line) px-4 py-3 font-medium">
+                                        <button type="button" onClick={() => handleSort("incomingQty")} className="cursor-pointer">
+                                            On the Way{getSortIndicator("incomingQty")}
+                                        </button>
+                                    </th>
+                                    <th className="border border-(--line) px-4 py-3 font-medium">
                                         <button type="button" onClick={() => handleSort("averageMonthlySales")} className="cursor-pointer">
                                             Avg Monthly Sales{getSortIndicator("averageMonthlySales")}
                                         </button>
@@ -648,7 +660,7 @@ export default function PurchaseOrderPage() {
                             <tbody>
                                 {sortedFilteredDisplayRows.length === 0 ? (
                                     <tr>
-                                        <td colSpan={6} className="border border-(--line) px-4 py-6 text-center text-sm text-(--ink-soft)">
+                                        <td colSpan={7} className="border border-(--line) px-4 py-6 text-center text-sm text-(--ink-soft)">
                                             No products match &ldquo;{tableSearch}&rdquo;.
                                         </td>
                                     </tr>
@@ -658,6 +670,22 @@ export default function PurchaseOrderPage() {
                                         <td className="border border-(--line) px-4 py-3">{row.productName}</td>
                                         <td className="border border-(--line) px-4 py-3">{Math.ceil(row.soldInPeriod)}</td>
                                         <td className="border border-(--line) px-4 py-3">{Math.ceil(row.currentStock)}</td>
+                                        <td className="border border-(--line) px-4 py-3">
+                                            {row.incomingQty > 0 ? (
+                                                <>
+                                                    <span className="font-semibold text-sky-700">{Math.ceil(row.incomingQty)}</span>
+                                                    <ul className="mt-1 space-y-0.5 text-xs text-(--ink-soft)">
+                                                        {row.incomingOrders.map((order) => (
+                                                            <li key={order.name} className="whitespace-nowrap">
+                                                                <span className="font-medium text-(--ink)">{order.name}</span> · {Math.ceil(order.quantity)}
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                </>
+                                            ) : (
+                                                <span className="text-(--ink-soft)">—</span>
+                                            )}
+                                        </td>
                                         <td className="border border-(--line) px-4 py-3">{Math.ceil(row.averageMonthlySales)}</td>
                                         <td
                                             className={`border border-(--line) px-4 py-3 font-medium ${row.isOverStock ? "text-red-600" : "text-green-600"}`}

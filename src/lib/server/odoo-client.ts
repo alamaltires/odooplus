@@ -73,6 +73,10 @@ type PurchaseOrderReportRow = {
     averageMonthlySales: number;
     suggestedRestock: number;
     pendingFromBackorders: number;
+    /** Quantity on confirmed purchase orders that hasn't been received yet. */
+    incomingQty: number;
+    /** The purchase orders behind `incomingQty`, with each one's open quantity. */
+    incomingOrders: Array<{ name: string; quantity: number; expectedDate: string }>;
 };
 
 type PurchaseOrderOption = {
@@ -3578,7 +3582,7 @@ function emptyAgingTotals(): PaymentFollowupAgingTotals {
 export type PaymentFollowupInvoiceRow = {
     invoiceId: number;
     invoiceNumber: string;
-    moveType: "out_invoice" | "out_refund" | "miscEntry";
+    moveType: "out_invoice" | "out_refund" | "miscEntry" | "payment" | "vendorBill" | "vendorRefund";
     invoiceDate: string;
     dueDate: string;
     paymentTermsName: string;
@@ -4252,17 +4256,19 @@ function monthsElapsedBetween(referenceDateIso: string, asOfDateIso: string): nu
     return (asOfYear * 12 + asOfMonth) - (refYear * 12 + refMonth);
 }
 
-// Calendar-month analogue of `getAgingBucket`. A reference date still
-// within the as-of date's own calendar month (0 boundaries crossed) is
-// the first overdue tier, not "not due" — mirroring how the day-based
-// system already lumps "1 day late" through "30 days late" into one
-// first bucket rather than treating any of it as not-yet-due.
-function getAgingBucketByMonth(daysOverdue: number, monthsElapsed: number): PaymentFollowupAgingBucket {
-    if (daysOverdue <= 0) return "notDue";
-    if (monthsElapsed <= 0) return "d1_30";
-    if (monthsElapsed === 1) return "d31_60";
-    if (monthsElapsed === 2) return "d61_90";
-    if (monthsElapsed === 3) return "d91_120";
+// Calendar-month analogue of `getAgingBucket`. Anything whose reference date
+// (due or invoice date, per the report's date basis) falls in the as-of
+// date's own calendar month — or later — is still "not due": it only starts
+// ageing once that month has ended, then moves one bracket per month crossed
+// (1 month, 2 months, ... "older" from 5 months). So an invoice due on
+// Oct 3 reads as Not Due all through October and shows up under "1 Month"
+// on Nov 1.
+function getAgingBucketByMonth(monthsElapsed: number): PaymentFollowupAgingBucket {
+    if (monthsElapsed <= 0) return "notDue";
+    if (monthsElapsed === 1) return "d1_30";
+    if (monthsElapsed === 2) return "d31_60";
+    if (monthsElapsed === 3) return "d61_90";
+    if (monthsElapsed === 4) return "d91_120";
     return "older";
 }
 
@@ -4275,10 +4281,7 @@ function resolveAgingBucket(
     if (agingSystem === "day") {
         return getAgingBucket(daysOverdue);
     }
-    return getAgingBucketByMonth(
-        daysOverdue,
-        referenceDateIso ? monthsElapsedBetween(referenceDateIso, asOfDateIso) : 0
-    );
+    return getAgingBucketByMonth(referenceDateIso ? monthsElapsedBetween(referenceDateIso, asOfDateIso) : 0);
 }
 
 /**
@@ -4380,7 +4383,7 @@ async function buildPaymentFollowupReport(
                 ["state", "=", "posted"],
                 ["payment_state", "not in", ["paid", "in_payment", "reversed"]],
             ],
-            ["id", "move_type", "commercial_partner_id", "invoice_date", "invoice_date_due", "amount_residual", "currency_id"]
+            ["id", "name", "move_type", "commercial_partner_id", "invoice_date", "invoice_date_due", "invoice_payment_term_id", "amount_total", "amount_residual", "currency_id"]
         ),
         getReceivableAccountDomainTriple(credentials, uid),
         getPdcModelInfo(credentials, uid).catch((error) => ({
@@ -4702,6 +4705,23 @@ async function buildPaymentFollowupReport(
         const billBucket = resolveAgingBucket(billDaysOverdue, billAgingReferenceDate, todayStr, agingSystem);
 
         row.agingBuckets[billBucket] = Number((row.agingBuckets[billBucket] - signedHomeAmount).toFixed(2));
+
+        // Listed alongside the invoices, like Odoo's Aged Payable report. Display
+        // only — the bucket effect is already applied just above, and these rows
+        // never enter the FIFO credit-netting pass (it only takes invoices/entries).
+        row.invoices.push({
+            invoiceId: Number(bill.id),
+            invoiceNumber: toDisplayString(bill.name) || "-",
+            moveType: bill.move_type === "in_refund" ? "vendorRefund" : "vendorBill",
+            invoiceDate: billInvoiceDate,
+            dueDate: billDueDate,
+            paymentTermsName: getRelationalName(bill.invoice_payment_term_id) || "-",
+            amountTotal: Number(Number(bill.amount_total ?? 0).toFixed(2)),
+            amountResidual: Number(residual.toFixed(2)),
+            currencyCode: currencyId ? getRelationalName(bill.currency_id) || TARGET_CURRENCY_CODE : TARGET_CURRENCY_CODE,
+            daysOverdue: billDaysOverdue,
+            agingBucket: getAgingBucket(billDaysOverdue),
+        });
     }
 
     for (const line of unappliedLines) {
@@ -4728,6 +4748,27 @@ async function buildPaymentFollowupReport(
                 currencyCode,
             });
             row.totalUnapplied = Number((row.totalUnapplied + toHomeAmount(amount, currencyId)).toFixed(2));
+
+            // Also listed with the invoices (as MISC/… or payment entries are in
+            // Odoo's Aged Receivable). Display only: the FIFO pass below already
+            // spends this credit against the oldest invoices, so it must not be
+            // counted again — the pass only takes out_invoice / miscEntry rows.
+            const creditDate = normalizeOdooDate(line.date);
+            const creditMs = creditDate ? new Date(`${creditDate}T00:00:00Z`).getTime() : todayMs;
+            const creditDaysOverdue = Math.round((todayMs - creditMs) / 86400000);
+            row.invoices.push({
+                invoiceId: -Number(line.id),
+                invoiceNumber: toDisplayString(move?.name) || "-",
+                moveType: "payment",
+                invoiceDate: creditDate,
+                dueDate: creditDate,
+                paymentTermsName: toDisplayString(move?.ref) || "-",
+                amountTotal: Number(amount.toFixed(2)),
+                amountResidual: Number(amount.toFixed(2)),
+                currencyCode,
+                daysOverdue: creditDaysOverdue,
+                agingBucket: getAgingBucket(creditDaysOverdue),
+            });
             continue;
         }
 
@@ -5494,10 +5535,50 @@ export async function getPurchaseOrderReport(
         soldByProductId.set(productId, (soldByProductId.get(productId) ?? 0) + qty);
     }
 
+    // "On the way": what confirmed purchase orders still owe us. Dropship
+    // orders are left out — that stock goes straight to a customer, never to us.
+    const dropshipTypeIds = await findDropshipPickingTypeIds(credentials, uid);
+    const incomingDomain: unknown[] = [
+        ["product_id", "in", productIds],
+        ["display_type", "=", false],
+        ["order_id.state", "in", ["purchase", "done"]],
+    ];
+    if (dropshipTypeIds.length > 0) {
+        incomingDomain.push(["order_id.picking_type_id", "not in", dropshipTypeIds]);
+    }
+    const incomingLines = await searchReadAll(
+        credentials,
+        uid,
+        "purchase.order.line",
+        incomingDomain,
+        ["product_id", "order_id", "product_qty", "qty_received", "date_planned"]
+    );
+
+    const incomingByProductId = new Map<number, Map<string, { quantity: number; expectedDate: string }>>();
+    for (const line of incomingLines) {
+        const productId = getRelationalId(line.product_id);
+        const orderName = getRelationalName(line.order_id);
+        const open = Number(line.product_qty ?? 0) - Number(line.qty_received ?? 0);
+        if (!productId || !orderName || open <= 0) {
+            continue;
+        }
+        const orders = incomingByProductId.get(productId) ?? new Map<string, { quantity: number; expectedDate: string }>();
+        const existing = orders.get(orderName);
+        orders.set(orderName, {
+            quantity: (existing?.quantity ?? 0) + open,
+            expectedDate: existing?.expectedDate || normalizeOdooDate(line.date_planned),
+        });
+        incomingByProductId.set(productId, orders);
+    }
+
     const monthsInRange = monthsBetweenInclusive(startDate, endDate);
     const rows = products
         .map((product) => {
             const productId = Number(product.id);
+            const incomingOrders = Array.from(incomingByProductId.get(productId) ?? [])
+                .map(([name, entry]) => ({ name, quantity: Number(entry.quantity.toFixed(2)), expectedDate: entry.expectedDate }))
+                .sort((a, b) => a.expectedDate.localeCompare(b.expectedDate) || a.name.localeCompare(b.name));
+            const incomingQty = Number(incomingOrders.reduce((sum, order) => sum + order.quantity, 0).toFixed(2));
             const soldInPeriod = Number((soldByProductId.get(productId) ?? 0).toFixed(2));
             const currentStock = Number(Number(product.qty_available ?? 0).toFixed(2));
             const averageMonthlySales = Number((soldInPeriod / monthsInRange).toFixed(2));
@@ -5514,6 +5595,8 @@ export async function getPurchaseOrderReport(
                 averageMonthlySales,
                 suggestedRestock,
                 pendingFromBackorders: 0,
+                incomingQty,
+                incomingOrders,
             };
         })
         .filter((row) => row.soldInPeriod > 0 || row.suggestedRestock > 0)
@@ -9095,6 +9178,8 @@ export type PoTrackingOrder = {
     currencyCode: string;
     types: string[];
     fullyReceived: boolean;
+    /** Total ordered quantity on the PO (the container text doesn't say how it splits). */
+    totalQty: number;
     containers: PoTrackingContainer[];
 };
 
@@ -9102,7 +9187,7 @@ export type PoTrackingOrder = {
 // colons and case vary between entries, so each piece is matched on its own.
 function parsePoTrackingSection(label: string): Omit<PoTrackingContainer, "quantity" | "label"> | null {
     const container = /Container\s*(\d+)?\s*[:\-]?\s*([A-Za-z0-9]+)/i.exec(label);
-    const bl = /B\s*\/\s*L\s*(?:No\.?)?\s*[:\-]?\s*([A-Za-z0-9\-]+)/i.exec(label);
+    const bl = /(?:\bB\s*\/\s*L|\bB\.\s*L\.?|\bBL(?![A-Za-z])|\bBill\s+of\s+Lading)\s*(?:No\.?|number|#)?\s*[:\-#]?\s*([A-Za-z0-9\-]+)/i.exec(label);
     if (!container || !bl) {
         return null;
     }
@@ -9113,6 +9198,90 @@ function parsePoTrackingSection(label: string): Omit<PoTrackingContainer, "quant
         sealNo: seal ? seal[1].toUpperCase() : "",
         blNumber: bl[1].toUpperCase(),
     };
+}
+
+/** Notes is an HTML field: turn it into plain lines of text. */
+function htmlToPlainText(value: string) {
+    return value
+        .replace(/<\s*br\s*\/?>/gi, "\n")
+        .replace(/<\/(p|div|li|tr)>/gi, "\n")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&nbsp;/gi, " ")
+        .replace(/&amp;/gi, "&")
+        .replace(/&lt;/gi, "<")
+        .replace(/&gt;/gi, ">")
+        .replace(/&#0?39;|&apos;/gi, "'")
+        .replace(/[ \t]+/g, " ");
+}
+
+type ParsedTrackingEntry = Omit<PoTrackingContainer, "quantity"> & { quantity: number };
+
+/**
+ * Shipment details typed into a PO's Source Document / Notes. Two shapes are
+ * understood:
+ *   1. "Container 1:SEKU4329929  Seal No:J2989174  B/L:QGD3507124"
+ *      (one entry per container, split wherever a new "Container" label starts)
+ *   2. "ALAT260803 - B/L:177GATATQ3923V - MEDU4698037 - MEDU8525451 - … - 5 - 1827 - UAE"
+ *      (one line per B/L: the B/L, its container numbers, then the container
+ *      count and the total units). The units are put on the line's first container.
+ */
+function parsePoTrackingText(text: string): ParsedTrackingEntry[] {
+    const found: ParsedTrackingEntry[] = [];
+
+    for (const chunk of text.split(/(?=Container\s*\d*\s*[:\-])/i)) {
+        const label = chunk.replace(/\s+/g, " ").trim();
+        const parsed = parsePoTrackingSection(label);
+        if (parsed) {
+            found.push({ ...parsed, quantity: 0, label });
+        }
+    }
+    if (found.length > 0) {
+        return found;
+    }
+
+    for (const line of text.split(/\n+/)) {
+        const label = line.replace(/\s+/g, " ").trim();
+        const segments = label.split(/\s+-\s+/).map((segment) => segment.trim());
+
+        // ISO 6346 container numbers: 4 letters (owner + category) + 6 digits + check digit.
+        const containerNos = Array.from(new Set((label.match(/\b[A-Za-z]{4}\d{7}\b/g) ?? []).map((value) => value.toUpperCase())));
+
+        // The B/L is the one labelled "B/L:…"; otherwise it is the line's second part
+        // ("REF - BLNUMBER - CONTAINER - … - count - units - country"), which only
+        // counts when the line also lists containers so ordinary notes aren't misread.
+        const labelled = /(?:\bB\s*\/\s*L|\bB\.\s*L\.?|\bBL(?![A-Za-z])|\bBill\s+of\s+Lading)\s*(?:No\.?|number|#)?\s*[:\-#]?\s*([A-Za-z0-9\-]+)/i.exec(label);
+        const second = segments[1] ?? "";
+        const secondLooksLikeBl =
+            segments.length >= 3 &&
+            containerNos.length > 0 &&
+            /^[A-Za-z0-9\-]{6,}$/.test(second) &&
+            !/^[A-Za-z]{4}\d{7}$/.test(second) &&
+            !/^\d{1,5}$/.test(second);
+        const blNumber = labelled ? labelled[1].toUpperCase() : secondLooksLikeBl ? second.toUpperCase() : "";
+        if (!blNumber) {
+            continue;
+        }
+
+        // After the last container the line lists the container count, then the units.
+        let lastContainerIndex = -1;
+        segments.forEach((segment, index) => {
+            if (/^[A-Za-z]{4}\d{7}$/.test(segment)) lastContainerIndex = index;
+        });
+        const numbers = segments
+            .slice(lastContainerIndex + 1)
+            .filter((segment) => /^[\d,]+$/.test(segment))
+            .map((segment) => Number(segment.replace(/,/g, "")));
+        const units = numbers.length >= 2 ? numbers[1] : 0;
+
+        if (containerNos.length === 0) {
+            found.push({ index: 1, containerNo: "", sealNo: "", blNumber, quantity: units, label });
+            continue;
+        }
+        containerNos.forEach((containerNo, position) => {
+            found.push({ index: position + 1, containerNo, sealNo: "", blNumber, quantity: position === 0 ? units : 0, label });
+        });
+    }
+    return found;
 }
 
 /**
@@ -9160,7 +9329,7 @@ export async function getImportedPurchaseOrdersForTracking(
         domain.push(["receipt_status", "!=", "full"]);
     }
 
-    const readFields = ["name", "partner_id", "partner_ref", "date_order", "date_planned", "currency_id", typeField.fieldName]
+    const readFields = ["name", "partner_id", "partner_ref", "origin", "notes", "date_order", "date_planned", "currency_id", typeField.fieldName]
         .filter((name, index, all) => all.indexOf(name) === index && hasField(name));
 
     const orders = await executeKw<Array<Record<string, unknown>>>(
@@ -9181,42 +9350,23 @@ export async function getImportedPurchaseOrdersForTracking(
         uid,
         "purchase.order.line",
         [["order_id", "in", orderIds]],
-        ["order_id", "sequence", "display_type", "name", "product_qty", "qty_received"]
+        ["order_id", "display_type", "product_qty", "qty_received"]
     );
-    lines.sort((a, b) => Number(a.sequence ?? 0) - Number(b.sequence ?? 0) || Number(a.id ?? 0) - Number(b.id ?? 0));
 
-    type Section = PoTrackingContainer | null;
-    const containersByOrderId = new Map<number, PoTrackingContainer[]>();
-    const currentSectionByOrderId = new Map<number, Section>();
+    // Container / seal / B/L come from the PO's own Source Document, falling
+    // back to its Notes — the product lines are only used for quantities and
+    // to tell whether the order has been received.
+    const totalQtyByOrderId = new Map<number, number>();
     const fullyReceivedByOrderId = new Map<number, boolean>();
 
     for (const line of lines) {
         const orderId = getRelationalId(line.order_id);
-        if (!orderId) {
-            continue;
-        }
-
-        if (line.display_type === "line_section") {
-            const label = toDisplayString(line.name).trim();
-            const parsed = parsePoTrackingSection(label);
-            if (parsed) {
-                const container: PoTrackingContainer = { ...parsed, quantity: 0, label };
-                containersByOrderId.set(orderId, [...(containersByOrderId.get(orderId) ?? []), container]);
-                currentSectionByOrderId.set(orderId, container);
-            } else {
-                currentSectionByOrderId.set(orderId, null);
-            }
-            continue;
-        }
-        if (line.display_type) {
+        if (!orderId || line.display_type) {
             continue;
         }
 
         const qty = Number(line.product_qty ?? 0);
-        const section = currentSectionByOrderId.get(orderId);
-        if (section) {
-            section.quantity += qty;
-        }
+        totalQtyByOrderId.set(orderId, (totalQtyByOrderId.get(orderId) ?? 0) + qty);
         if (Number(line.qty_received ?? 0) < qty) {
             fullyReceivedByOrderId.set(orderId, false);
         } else if (!fullyReceivedByOrderId.has(orderId)) {
@@ -9228,7 +9378,20 @@ export async function getImportedPurchaseOrdersForTracking(
     const result: PoTrackingOrder[] = [];
     for (const order of orders) {
         const id = Number(order.id ?? 0);
-        const containers = containersByOrderId.get(id) ?? [];
+        let parsed = parsePoTrackingText(toDisplayString(order.origin));
+        if (parsed.length === 0) {
+            parsed = parsePoTrackingText(htmlToPlainText(toDisplayString(order.notes)));
+        }
+        // A container listed twice (same number) is one container.
+        const seen = new Set<string>();
+        const containers: PoTrackingContainer[] = parsed.filter((entry) => {
+            const key = `${entry.blNumber}|${entry.containerNo}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+        // Units written in the text win over the PO's own line total.
+        const declaredUnits = containers.reduce((sum, container) => sum + container.quantity, 0);
         const fullyReceived = fullyReceivedByOrderId.get(id) ?? false;
         // Without the receipt_status field, awaiting-receipt is judged from the lines.
         if (!includeReceived && fullyReceived) {
@@ -9251,9 +9414,98 @@ export async function getImportedPurchaseOrdersForTracking(
             currencyCode: getRelationalName(order.currency_id),
             types,
             fullyReceived,
+            totalQty: Number((declaredUnits > 0 ? declaredUnits : totalQtyByOrderId.get(id) ?? 0).toFixed(2)),
             containers,
         });
     }
 
     return { orders: result, importedTypeNames: importedTypes.map((option) => option.label) };
+}
+
+export type PoTrackingDiagnosis = {
+    found: boolean;
+    name: string;
+    state: string;
+    types: string[];
+    isImportedType: boolean;
+    receiptStatus: string;
+    fullyReceivedByLines: boolean;
+    sourceDocument: string;
+    notesPreview: string;
+    parsed: Array<{ blNumber: string; containerNo: string; units: number; from: "Source Document" | "Notes" }>;
+    /** Plain-language reasons the order would be missing from the list (empty = it is listed). */
+    reasons: string[];
+};
+
+/** Explains why one purchase order is — or isn't — in the PO Tracking list. */
+export async function diagnosePoTracking(credentials: OdooCredentials, poName: string): Promise<PoTrackingDiagnosis> {
+    const uid = await authenticate(credentials);
+    const name = poName.trim();
+    const empty: PoTrackingDiagnosis = {
+        found: false, name, state: "", types: [], isImportedType: false, receiptStatus: "", fullyReceivedByLines: false,
+        sourceDocument: "", notesPreview: "", parsed: [], reasons: [],
+    };
+    if (!name) {
+        return { ...empty, reasons: ["Enter a PO number, e.g. P11789."] };
+    }
+
+    const typeField = await discoverTypeField(credentials, uid, "purchase.order", PURCHASE_TYPE_FIELD_SPEC);
+    const typeOptions = typeField ? await getTypeFieldOptions(credentials, uid, "purchase.order", PURCHASE_TYPE_FIELD_SPEC) : [];
+
+    const orderFields = await executeKw<Record<string, unknown>>(credentials, uid, "purchase.order", "fields_get", [], { attributes: ["type"] });
+    const hasField = (field: string) => Object.prototype.hasOwnProperty.call(orderFields, field);
+    const fields = ["name", "state", "origin", "notes", "receipt_status", typeField?.fieldName ?? ""].filter((field) => field && hasField(field));
+
+    let orders = await executeKw<Array<Record<string, unknown>>>(credentials, uid, "purchase.order", "search_read", [[["name", "=", name]]], { fields, limit: 1 });
+    if (orders.length === 0) {
+        orders = await executeKw<Array<Record<string, unknown>>>(credentials, uid, "purchase.order", "search_read", [[["name", "ilike", name]]], { fields, limit: 1 });
+    }
+    const order = orders[0];
+    if (!order) {
+        return { ...empty, reasons: [`No purchase order named "${name}" was found (or you don't have access to its company — check the company selector).`] };
+    }
+
+    const state = toDisplayString(order.state);
+    const origin = toDisplayString(order.origin);
+    const notes = htmlToPlainText(toDisplayString(order.notes)).trim();
+
+    let typeKeys: string[] = [];
+    if (typeField) {
+        const raw = order[typeField.fieldName];
+        typeKeys = Array.isArray(raw) && typeof raw[0] === "number" ? (raw as number[]).map(String) : typeof raw === "string" && raw ? [raw] : [];
+        // A Many2one comes back as [id, name].
+        if (Array.isArray(raw) && typeof raw[0] === "number" && typeof raw[1] === "string") typeKeys = [String(raw[0])];
+    }
+    const labelByValue = new Map(typeOptions.map((option) => [option.value, option.label]));
+    const types = typeKeys.map((key) => labelByValue.get(key) ?? key);
+    const isImportedType = types.some((label) => /import/i.test(label));
+
+    const fromSource = parsePoTrackingText(origin).map((entry) => ({ ...entry, from: "Source Document" as const }));
+    const parsed = fromSource.length > 0 ? fromSource : parsePoTrackingText(notes).map((entry) => ({ ...entry, from: "Notes" as const }));
+
+    const lines = await searchReadAll(credentials, uid, "purchase.order.line", [["order_id", "=", Number(order.id)]], ["display_type", "product_qty", "qty_received"]);
+    const productLines = lines.filter((line) => !line.display_type);
+    const fullyReceivedByLines = productLines.length > 0 && productLines.every((line) => Number(line.qty_received ?? 0) >= Number(line.product_qty ?? 0));
+    const receiptStatus = toDisplayString(order.receipt_status);
+
+    const reasons: string[] = [];
+    if (state !== "purchase" && state !== "done") reasons.push(`The order is "${state || "unknown"}" — only confirmed (Purchase Order / Locked) orders are listed.`);
+    if (!typeField) reasons.push("The Purchase Type field couldn't be found on purchase orders.");
+    else if (!isImportedType) reasons.push(`Its Purchase Type is ${types.length ? `"${types.join('", "')}"` : "empty"} — none contains the word "Import".`);
+    if (receiptStatus === "full" || fullyReceivedByLines) reasons.push('It is fully received, so it is hidden unless "Include fully received" is ticked.');
+    if (parsed.length === 0) reasons.push("No B/L was found in its Source Document or Notes (looking for text like \"B/L:XXXX\").");
+
+    return {
+        found: true,
+        name: toDisplayString(order.name),
+        state,
+        types,
+        isImportedType,
+        receiptStatus,
+        fullyReceivedByLines,
+        sourceDocument: origin,
+        notesPreview: notes.slice(0, 400),
+        parsed: parsed.map((entry) => ({ blNumber: entry.blNumber, containerNo: entry.containerNo, units: entry.quantity, from: entry.from })),
+        reasons,
+    };
 }

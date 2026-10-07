@@ -21,6 +21,8 @@ import {
     Users,
 } from "lucide-react";
 import { getCustomers, getPaymentFollowupByCustomer, getPaymentFollowupBySalesperson, getSalespeople } from "@/lib/client-odoo";
+import { printPaymentFollowupPdf } from "@/lib/payment-followup-pdf";
+import { documentBadgeClass, documentTypeLabel, isCreditSide, signedResidual } from "@/lib/payment-followup-items";
 import { useAuth } from "@/lib/auth-context";
 import { Select2 } from "@/components/select2";
 import {
@@ -439,7 +441,7 @@ function InvoicesTable({ rows, currencyCode }: { rows: PaymentFollowupCustomerRo
     }
 
     const netResidualAll = useMemo(
-        () => rows.reduce((sum, row) => sum + (row.moveType === "out_refund" ? -row.amountResidual : row.amountResidual), 0),
+        () => rows.reduce((sum, row) => sum + signedResidual(row), 0),
         [rows]
     );
 
@@ -447,7 +449,7 @@ function InvoicesTable({ rows, currencyCode }: { rows: PaymentFollowupCustomerRo
         const normalizedQuery = query.trim().toLowerCase();
         if (!normalizedQuery) return rows;
         return rows.filter((row) =>
-            [row.invoiceNumber, row.paymentTermsName].some((value) => value.toLowerCase().includes(normalizedQuery))
+            [row.invoiceNumber, row.paymentTermsName, documentTypeLabel(row.moveType)].some((value) => value.toLowerCase().includes(normalizedQuery))
         );
     }, [rows, query]);
 
@@ -482,34 +484,34 @@ function InvoicesTable({ rows, currencyCode }: { rows: PaymentFollowupCustomerRo
     }, [filteredRows, sortKey, sortDirection]);
 
     const netResidualFiltered = useMemo(
-        () => filteredRows.reduce((sum, row) => sum + (row.moveType === "out_refund" ? -row.amountResidual : row.amountResidual), 0),
+        () => filteredRows.reduce((sum, row) => sum + signedResidual(row), 0),
         [filteredRows]
     );
 
     return (
         <CollapsibleSection
             icon={Receipt}
-            title="Due Invoices & Credit Notes"
+            title="Open Items: Invoices, Credit Notes & Payments"
             count={rows.length}
             totalLabel={rows.length > 0 ? `Net ${formatCurrency(netResidualAll, currencyCode)}` : null}
             collapsed={collapsed}
             onToggle={() => setCollapsed((value) => !value)}
         >
             {rows.length === 0 ? (
-                <EmptyState message="No open invoices or credit notes." />
+                <EmptyState message="No open invoices, credit notes or payments." />
             ) : (
                 <>
                     <SectionToolbar
                         query={query}
                         onQueryChange={setQuery}
-                        placeholder="Search invoice # or terms"
+                        placeholder="Search document #, type or terms"
                         filteredCount={filteredRows.length}
                         totalCount={rows.length}
                         statLabel="Net"
                         statValue={formatCurrency(netResidualFiltered, currencyCode)}
                     />
                     {sortedRows.length === 0 ? (
-                        <EmptyState message="No invoices match your search." />
+                        <EmptyState message="No items match your search." />
                     ) : (
                         <div className="max-h-72 overflow-y-auto rounded-xl border border-(--line)">
                             <table className="min-w-full divide-y divide-(--line) text-sm">
@@ -529,25 +531,16 @@ function InvoicesTable({ rows, currencyCode }: { rows: PaymentFollowupCustomerRo
                                             <td className="px-3 py-2 align-top">
                                                 <p className="font-medium text-(--ink)">{row.invoiceNumber}</p>
                                                 <span
-                                                    className={`mt-0.5 inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${row.moveType === "out_refund"
-                                                        ? "bg-emerald-100 text-emerald-800"
-                                                        : row.moveType === "miscEntry"
-                                                            ? "bg-sky-100 text-sky-800"
-                                                            : "bg-(--chip) text-(--ink-soft)"
-                                                        }`}
+                                                    className={`mt-0.5 inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${documentBadgeClass(row.moveType)}`}
                                                 >
-                                                    {row.moveType === "out_refund"
-                                                        ? "Credit Note"
-                                                        : row.moveType === "miscEntry"
-                                                            ? "Journal Entry"
-                                                            : "Invoice"}
+                                                    {documentTypeLabel(row.moveType)}
                                                 </span>
                                             </td>
                                             <td className="px-3 py-2 align-top text-(--ink-soft)">{formatDate(row.invoiceDate)}</td>
                                             <td className="px-3 py-2 align-top text-(--ink-soft)">{formatDate(row.dueDate)}</td>
                                             <td className="px-3 py-2 align-top text-(--ink-soft)">{row.paymentTermsName}</td>
                                             <td className="px-3 py-2 text-right align-top font-medium">
-                                                {row.moveType === "out_refund" ? "-" : ""}
+                                                {isCreditSide(row.moveType) ? "-" : ""}
                                                 {formatCurrency(row.amountResidual, row.currencyCode || currencyCode)}
                                             </td>
                                             <td className="px-3 py-2 text-right align-top">
@@ -1110,6 +1103,23 @@ export default function PaymentFollowupPage() {
         );
     }, [report, search]);
 
+    function exportPdf() {
+        if (!report || filteredCustomers.length === 0) return;
+        setReportError(null);
+
+        try {
+            const who = mode === "salesperson" ? report.salesperson?.name ?? "Salesperson" : filteredCustomers[0]?.customerName ?? "Customer";
+            printPaymentFollowupPdf({
+                report,
+                customers: filteredCustomers,
+                agingColumns: agingColumnsFor(agingSystem),
+                title: `Payment Followup — ${who}`,
+            });
+        } catch (error) {
+            setReportError(error instanceof Error ? error.message : "Failed to open the PDF view.");
+        }
+    }
+
     async function exportReport() {
         if (!report || filteredCustomers.length === 0) return;
 
@@ -1128,12 +1138,12 @@ export default function PaymentFollowupPage() {
                         Phone: customer.phone,
                         Email: customer.email,
                         Document: invoice.invoiceNumber,
-                        Type: invoice.moveType === "out_refund" ? "Credit Note" : invoice.moveType === "miscEntry" ? "Journal Entry" : "Invoice",
+                        Type: documentTypeLabel(invoice.moveType),
                         "Invoice Date": invoice.invoiceDate,
                         "Due Date": invoice.dueDate,
                         "Payment Terms": invoice.paymentTermsName,
                         "Days Overdue": invoice.daysOverdue,
-                        Residual: invoice.amountResidual,
+                        Residual: signedResidual(invoice),
                         Currency: invoice.currencyCode,
                     });
                 }
@@ -1468,6 +1478,15 @@ export default function PaymentFollowupPage() {
                             >
                                 <Download className="h-4 w-4" aria-hidden="true" />
                                 {exporting ? "Exporting..." : "Export Excel"}
+                            </button>
+                            <button
+                                type="button"
+                                onClick={exportPdf}
+                                disabled={filteredCustomers.length === 0}
+                                className="inline-flex items-center justify-center gap-2 rounded-xl bg-(--brand) px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                                <Download className="h-4 w-4" aria-hidden="true" />
+                                Export PDF
                             </button>
                         </div>
                     </div>

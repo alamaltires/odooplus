@@ -173,6 +173,8 @@ export function getPurchaseOrderReport(
             averageMonthlySales: number;
             suggestedRestock: number;
             pendingFromBackorders: number;
+            incomingQty: number;
+            incomingOrders: Array<{ name: string; quantity: number; expectedDate: string }>;
         }>;
     }>("/api/odoo/purchase-order-report", input);
 }
@@ -680,6 +682,7 @@ export type PoTrackingOrder = {
     currencyCode: string;
     types: string[];
     fullyReceived: boolean;
+    totalQty: number;
     containers: PoTrackingContainer[];
 };
 
@@ -731,4 +734,22 @@ export function getTrackingCarriers() {
 
 export function getSavedShipmentTracking() {
     return post<{ tracked: Record<string, ShipmentTracking>; carriers: Record<string, string> }>("/api/po-tracking/saved", {});
+}
+
+export type PoTrackingDiagnosis = {
+    found: boolean;
+    name: string;
+    state: string;
+    types: string[];
+    isImportedType: boolean;
+    receiptStatus: string;
+    fullyReceivedByLines: boolean;
+    sourceDocument: string;
+    notesPreview: string;
+    parsed: Array<{ blNumber: string; containerNo: string; units: number; from: "Source Document" | "Notes" }>;
+    reasons: string[];
+};
+
+export function diagnosePoTracking(poName: string) {
+    return post<PoTrackingDiagnosis>("/api/odoo/po-tracking/diagnose", { poName });
 }
