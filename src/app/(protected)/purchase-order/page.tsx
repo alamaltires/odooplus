@@ -29,6 +29,10 @@ type ReportRow = {
     pendingFromBackorders: number;
     incomingQty: number;
     incomingOrders: Array<{ name: string; quantity: number; expectedDate: string }>;
+    stockByLot: Array<{ lotName: string; quantity: number; warehouses: Array<{ name: string; quantity: number }> }>;
+    excludedItems: Array<{ kind: "sale" | "purchase"; reasons: string[]; document: string; partner: string; quantity: number }>;
+    excludedSoldQty: number;
+    excludedIncomingQty: number;
 };
 
 type DisplayReportRow = ReportRow & {
@@ -108,6 +112,11 @@ export default function PurchaseOrderPage() {
     });
     const [endDate, setEndDate] = useState(todayISO);
     const [stockDurationMonths, setStockDurationMonths] = useState(3);
+    const [excludeDropshipping, setExcludeDropshipping] = useState(false);
+    const [excludeInternalCompanies, setExcludeInternalCompanies] = useState(false);
+    // Which exclusions the shown report was built with (the checkboxes can change afterwards).
+    const [appliedExclusions, setAppliedExclusions] = useState({ dropshipping: false, internal: false });
+    const [excludedFor, setExcludedFor] = useState<ReportRow | null>(null);
 
     const [reportLoading, setReportLoading] = useState(false);
     const [reportError, setReportError] = useState<string | null>(null);
@@ -278,9 +287,12 @@ export default function PurchaseOrderPage() {
                 startDate,
                 endDate,
                 stockDurationMonths,
+                excludeDropshipping,
+                excludeInternalCompanies,
             });
 
             setMonthsInRange(data.monthsInRange);
+            setAppliedExclusions({ dropshipping: excludeDropshipping, internal: excludeInternalCompanies });
             setRows(data.rows);
         } catch (generateError) {
             setReportError(
@@ -307,11 +319,22 @@ export default function PurchaseOrderPage() {
                 "Product Name": row.productName,
                 "Sold in Period": row.soldInPeriod,
                 "Current Stock": row.currentStock,
+                "Stock by Lot / Warehouse": (row.stockByLot ?? [])
+                    .map((lot) => `${lot.lotName} (${Math.ceil(lot.quantity)}): ${lot.warehouses.map((warehouse) => `${warehouse.name} ${Math.ceil(warehouse.quantity)}`).join(", ")}`)
+                    .join("\n"),
                 "On the Way": row.incomingQty,
                 "On the Way (PO)": row.incomingOrders.map((order) => `${order.name} (${order.quantity})`).join(", "),
+                ...(showExcludedColumn
+                    ? {
+                        "Excluded Sold Qty": row.excludedSoldQty,
+                        "Excluded Incoming Qty": row.excludedIncomingQty,
+                        "Excluded Orders": row.excludedItems
+                            .map((item) => `${item.document} (${Math.ceil(item.quantity)}, ${item.reasons.join("/")})`)
+                            .join(", "),
+                    }
+                    : {}),
                 "Average Monthly Sales": Math.ceil(row.averageMonthlySales),
                 "Suggested Restock": row.restockDisplayValue,
-                "Suggested Restock + Pending Orders": row.suggestedRestockWithPending,
             }));
 
             const worksheet = XLSX.utils.json_to_sheet(exportData);
@@ -319,11 +342,12 @@ export default function PurchaseOrderPage() {
                 { wch: 42 },
                 { wch: 16 },
                 { wch: 16 },
+                { wch: 44 },
                 { wch: 12 },
                 { wch: 36 },
+                ...(showExcludedColumn ? [{ wch: 18 }, { wch: 20 }, { wch: 44 }] : []),
                 { wch: 22 },
                 { wch: 20 },
-                { wch: 36 },
             ];
 
             if (format === "csv") {
@@ -369,6 +393,8 @@ export default function PurchaseOrderPage() {
 
         return sortDirection === "asc" ? " ▲" : " ▼";
     }
+
+    const showExcludedColumn = appliedExclusions.dropshipping || appliedExclusions.internal;
 
     return (
         <section>
@@ -528,6 +554,17 @@ export default function PurchaseOrderPage() {
                     </label>
                 </div>
 
+                <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2">
+                    <label className="flex cursor-pointer items-center gap-2 text-sm">
+                        <input type="checkbox" checked={excludeDropshipping} onChange={(event) => setExcludeDropshipping(event.target.checked)} className="h-4 w-4" />
+                        Exclude dropshipping
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-2 text-sm">
+                        <input type="checkbox" checked={excludeInternalCompanies} onChange={(event) => setExcludeInternalCompanies(event.target.checked)} className="h-4 w-4" />
+                        Exclude purchases between internal companies
+                    </label>
+                </div>
+
                 <div className="mt-5 flex flex-wrap items-center gap-3">
                     <button
                         type="submit"
@@ -642,6 +679,9 @@ export default function PurchaseOrderPage() {
                                             On the Way{getSortIndicator("incomingQty")}
                                         </button>
                                     </th>
+                                    {showExcludedColumn ? (
+                                        <th className="border border-(--line) px-4 py-3 font-medium">Excluded QTY</th>
+                                    ) : null}
                                     <th className="border border-(--line) px-4 py-3 font-medium">
                                         <button type="button" onClick={() => handleSort("averageMonthlySales")} className="cursor-pointer">
                                             Avg Monthly Sales{getSortIndicator("averageMonthlySales")}
@@ -652,15 +692,12 @@ export default function PurchaseOrderPage() {
                                             Suggested Restock{getSortIndicator("suggestedRestock")}
                                         </button>
                                     </th>
-                                    <th className="border border-(--line) px-4 py-3 font-medium">
-                                        Suggested Restock + Pending Orders
-                                    </th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {sortedFilteredDisplayRows.length === 0 ? (
                                     <tr>
-                                        <td colSpan={7} className="border border-(--line) px-4 py-6 text-center text-sm text-(--ink-soft)">
+                                        <td colSpan={showExcludedColumn ? 7 : 6} className="border border-(--line) px-4 py-6 text-center text-sm text-(--ink-soft)">
                                             No products match &ldquo;{tableSearch}&rdquo;.
                                         </td>
                                     </tr>
@@ -669,7 +706,27 @@ export default function PurchaseOrderPage() {
                                     <tr key={row.productId}>
                                         <td className="border border-(--line) px-4 py-3">{row.productName}</td>
                                         <td className="border border-(--line) px-4 py-3">{Math.ceil(row.soldInPeriod)}</td>
-                                        <td className="border border-(--line) px-4 py-3">{Math.ceil(row.currentStock)}</td>
+                                        <td className="border border-(--line) px-4 py-3 align-top">
+                                            <span className="font-semibold">{Math.ceil(row.currentStock)}</span>
+                                            {(row.stockByLot ?? []).length > 0 ? (
+                                                <div className="mt-1 space-y-1.5">
+                                                    {(row.stockByLot ?? []).map((lot) => (
+                                                        <div key={lot.lotName} className="text-xs">
+                                                            <p className="whitespace-nowrap font-medium">
+                                                                {lot.lotName} <span className="text-(--ink-soft)">({Math.ceil(lot.quantity)})</span>
+                                                            </p>
+                                                            <ul className="ml-3 border-l border-(--line) pl-2 text-(--ink-soft)">
+                                                                {lot.warehouses.map((warehouse) => (
+                                                                    <li key={warehouse.name} className="whitespace-nowrap">
+                                                                        {warehouse.name} · {Math.ceil(warehouse.quantity)}
+                                                                    </li>
+                                                                ))}
+                                                            </ul>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            ) : null}
+                                        </td>
                                         <td className="border border-(--line) px-4 py-3">
                                             {row.incomingQty > 0 ? (
                                                 <>
@@ -686,14 +743,34 @@ export default function PurchaseOrderPage() {
                                                 <span className="text-(--ink-soft)">—</span>
                                             )}
                                         </td>
+                                        {showExcludedColumn ? (
+                                            <td className="border border-(--line) px-4 py-3 align-top">
+                                                {row.excludedItems.length > 0 ? (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setExcludedFor(row)}
+                                                        className="rounded-lg border border-(--line) bg-white px-3 py-1 text-xs font-medium hover:bg-(--chip)"
+                                                    >
+                                                        Excluded QTY
+                                                        <span className="ml-1.5 text-(--ink-soft)">
+                                                            {[
+                                                                row.excludedSoldQty > 0 ? `${Math.ceil(row.excludedSoldQty)} sold` : null,
+                                                                row.excludedIncomingQty > 0 ? `${Math.ceil(row.excludedIncomingQty)} incoming` : null,
+                                                            ]
+                                                                .filter(Boolean)
+                                                                .join(" · ")}
+                                                        </span>
+                                                    </button>
+                                                ) : (
+                                                    <span className="text-(--ink-soft)">—</span>
+                                                )}
+                                            </td>
+                                        ) : null}
                                         <td className="border border-(--line) px-4 py-3">{Math.ceil(row.averageMonthlySales)}</td>
                                         <td
                                             className={`border border-(--line) px-4 py-3 font-medium ${row.isOverStock ? "text-red-600" : "text-green-600"}`}
                                         >
                                             {row.restockDisplayValue}
-                                        </td>
-                                        <td className="border border-(--line) px-4 py-3 font-medium text-blue-600">
-                                            {row.suggestedRestockWithPending}
                                         </td>
                                     </tr>
                                 ))}
@@ -702,6 +779,63 @@ export default function PurchaseOrderPage() {
                     </div>
                 ) : null}
             </div>
+
+            {excludedFor ? (
+                <div
+                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+                    onClick={() => setExcludedFor(null)}
+                    role="dialog"
+                    aria-modal="true"
+                >
+                    <div className="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-2xl bg-(--card) p-5 shadow-xl" onClick={(event) => event.stopPropagation()}>
+                        <div className="flex items-start justify-between gap-3">
+                            <div>
+                                <h3 className="font-display text-xl">Excluded quantity</h3>
+                                <p className="mt-0.5 text-sm text-(--ink-soft)">{excludedFor.productName}</p>
+                            </div>
+                            <button type="button" onClick={() => setExcludedFor(null)} className="rounded-lg px-2 py-1 text-sm text-(--ink-soft)">
+                                Close
+                            </button>
+                        </div>
+
+                        {(["sale", "purchase"] as const).map((kind) => {
+                            const items = excludedFor.excludedItems.filter((item) => item.kind === kind);
+                            if (items.length === 0) return null;
+                            const total = items.reduce((sum, item) => sum + item.quantity, 0);
+                            return (
+                                <div key={kind} className="mt-4">
+                                    <p className="text-sm font-semibold">
+                                        {kind === "sale" ? "Removed from Sold in Period" : "Removed from On the Way"}
+                                        <span className="ml-2 font-normal text-(--ink-soft)">{Math.ceil(total)} total</span>
+                                    </p>
+                                    <div className="mt-2 overflow-x-auto rounded-xl border border-(--line)">
+                                        <table className="min-w-full text-left text-sm">
+                                            <thead className="bg-(--chip) text-(--ink-soft)">
+                                                <tr>
+                                                    <th className="px-3 py-2 font-medium">{kind === "sale" ? "Sales order" : "Purchase order"}</th>
+                                                    <th className="px-3 py-2 font-medium">{kind === "sale" ? "Customer" : "Vendor"}</th>
+                                                    <th className="px-3 py-2 font-medium">Reason</th>
+                                                    <th className="px-3 py-2 text-right font-medium">Qty</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {items.map((item) => (
+                                                    <tr key={`${item.document}-${item.reasons.join()}-${item.quantity}`} className="border-t border-(--line)">
+                                                        <td className="px-3 py-2 font-medium">{item.document}</td>
+                                                        <td className="px-3 py-2 text-(--ink-soft)">{item.partner || "—"}</td>
+                                                        <td className="px-3 py-2">{item.reasons.join(", ")}</td>
+                                                        <td className="px-3 py-2 text-right font-medium">{Math.ceil(item.quantity)}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            ) : null}
         </section>
     );
 }

@@ -14,6 +14,8 @@ export async function POST(request: Request) {
             startDate,
             endDate,
             stockDurationMonths,
+            excludeDropshipping,
+            excludeInternalCompanies,
         } = (await request.json()) as {
             categoryId?: number | null;
             categoryModel?: "product.public.category" | "product.category";
@@ -21,6 +23,8 @@ export async function POST(request: Request) {
             startDate: string;
             endDate: string;
             stockDurationMonths: number;
+            excludeDropshipping?: boolean | null;
+            excludeInternalCompanies?: boolean | null;
         };
 
         const report = await runWithCompanyIds(companyIds, () =>
@@ -31,6 +35,8 @@ export async function POST(request: Request) {
                 startDate,
                 endDate,
                 stockDurationMonths,
+                excludeDropshipping,
+                excludeInternalCompanies,
             })
         );
 

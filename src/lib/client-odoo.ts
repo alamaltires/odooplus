@@ -161,6 +161,8 @@ export function getPurchaseOrderReport(
         startDate: string;
         endDate: string;
         stockDurationMonths: number;
+        excludeDropshipping?: boolean;
+        excludeInternalCompanies?: boolean;
     }
 ) {
     return post<{
@@ -175,6 +177,10 @@ export function getPurchaseOrderReport(
             pendingFromBackorders: number;
             incomingQty: number;
             incomingOrders: Array<{ name: string; quantity: number; expectedDate: string }>;
+            stockByLot: Array<{ lotName: string; quantity: number; warehouses: Array<{ name: string; quantity: number }> }>;
+            excludedItems: Array<{ kind: "sale" | "purchase"; reasons: string[]; document: string; partner: string; quantity: number }>;
+            excludedSoldQty: number;
+            excludedIncomingQty: number;
         }>;
     }>("/api/odoo/purchase-order-report", input);
 }

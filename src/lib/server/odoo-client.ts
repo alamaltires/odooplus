@@ -77,6 +77,22 @@ type PurchaseOrderReportRow = {
     incomingQty: number;
     /** The purchase orders behind `incomingQty`, with each one's open quantity. */
     incomingOrders: Array<{ name: string; quantity: number; expectedDate: string }>;
+    /** On-hand stock per lot, each split by the warehouse it sits in (lots newest first). */
+    stockByLot: Array<{ lotName: string; quantity: number; warehouses: Array<{ name: string; quantity: number }> }>;
+    /** Orders the exclusion toggles removed from this product's figures. */
+    excludedItems: PurchaseOrderExcludedItem[];
+    /** Sold quantity removed from "Sold in Period" by the exclusions. */
+    excludedSoldQty: number;
+    /** Open quantity removed from "On the Way" by the exclusions. */
+    excludedIncomingQty: number;
+};
+
+type PurchaseOrderExcludedItem = {
+    kind: "sale" | "purchase";
+    reasons: string[];
+    document: string;
+    partner: string;
+    quantity: number;
 };
 
 type PurchaseOrderOption = {
@@ -5615,6 +5631,10 @@ export async function getPurchaseOrderReport(
         startDate: string;
         endDate: string;
         stockDurationMonths: number;
+        /** Leave out sales fulfilled by a dropship operation. */
+        excludeDropshipping?: boolean | null;
+        /** Leave out sales to, and purchases from, the company's own internal companies. */
+        excludeInternalCompanies?: boolean | null;
     }
 ): Promise<{ monthsInRange: number; rows: PurchaseOrderReportRow[] }> {
     const uid = await authenticate(credentials);
@@ -5683,18 +5703,89 @@ export async function getPurchaseOrderReport(
     const from = toOdooDateBoundary(startDate, false, timeZone);
     const to = toOdooDateBoundary(endDate, true, timeZone);
 
+    const dropshipTypeIds = await findDropshipPickingTypeIds(credentials, uid);
+
+    // Partners that are the company's own internal companies: orders with them
+    // are internal transfers, not real purchases or sales.
+    let internalCompanyPartnerIds: number[] = [];
+    if (input.excludeInternalCompanies) {
+        const companies = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "res.company",
+            "search_read",
+            [[]],
+            { fields: ["partner_id"], context: { active_test: false } }
+        );
+        internalCompanyPartnerIds = companies.map((company) => getRelationalId(company.partner_id)).filter((id): id is number => !!id);
+
+        // A sister company is often also set up as a separate vendor/customer
+        // record carrying the company's name, so those count as internal too.
+        const companyNames = companies.map((company) => getRelationalName(company.partner_id)).filter(Boolean);
+        if (companyNames.length > 0) {
+            const namedPartners = await executeKw<number[]>(
+                credentials,
+                uid,
+                "res.partner",
+                "search",
+                [[["name", "in", companyNames]]],
+                { context: { active_test: false } }
+            );
+            internalCompanyPartnerIds = Array.from(new Set([...internalCompanyPartnerIds, ...namedPartners]));
+        }
+    }
+
+    // A purchase order sent to a delivery address (dest_address_id) is a dropship
+    // too, even when its operation type isn't named/coded "dropship".
+    const hasDropshipAddressField = await executeKw<Record<string, unknown>>(
+        credentials,
+        uid,
+        "purchase.order",
+        "fields_get",
+        [["dest_address_id"]],
+        { attributes: ["type"] }
+    )
+        .then((fields) => Boolean(fields.dest_address_id))
+        .catch(() => false);
+
+    // Sale lines delivered through a dropship operation (supplier straight to customer).
+    let dropshipSaleLineIds: number[] = [];
+    if (input.excludeDropshipping && dropshipTypeIds.length > 0) {
+        const dropshipMoves = await searchReadAll(
+            credentials,
+            uid,
+            "stock.move",
+            [
+                ["picking_type_id", "in", dropshipTypeIds],
+                ["sale_line_id", "!=", false],
+                ["product_id", "in", productIds],
+                ["state", "!=", "cancel"],
+            ],
+            ["sale_line_id"]
+        );
+        dropshipSaleLineIds = Array.from(new Set(dropshipMoves.map((move) => getRelationalId(move.sale_line_id)).filter((id): id is number => !!id)));
+    }
+
+    const saleLineDomain: unknown[] = [
+        ["product_id", "in", productIds],
+        ["display_type", "=", false],
+        ["order_id.state", "in", ["sale", "done"]],
+        ["order_id.date_order", ">=", from],
+        ["order_id.date_order", "<=", to],
+    ];
+    if (dropshipSaleLineIds.length > 0) {
+        saleLineDomain.push(["id", "not in", dropshipSaleLineIds]);
+    }
+    if (internalCompanyPartnerIds.length > 0) {
+        saleLineDomain.push(["order_id.partner_id.commercial_partner_id", "not in", internalCompanyPartnerIds]);
+    }
+
     const lines = await executeKw<Array<{ product_id?: [number, string]; product_uom_qty?: number }>>(
         credentials,
         uid,
         "sale.order.line",
         "search_read",
-        [[
-            ["product_id", "in", productIds],
-            ["display_type", "=", false],
-            ["order_id.state", "in", ["sale", "done"]],
-            ["order_id.date_order", ">=", from],
-            ["order_id.date_order", "<=", to],
-        ]],
+        [saleLineDomain],
         {
             fields: ["product_id", "product_uom_qty"],
             limit: 20000,
@@ -5712,16 +5803,24 @@ export async function getPurchaseOrderReport(
         soldByProductId.set(productId, (soldByProductId.get(productId) ?? 0) + qty);
     }
 
-    // "On the way": what confirmed purchase orders still owe us. Dropship
-    // orders are left out — that stock goes straight to a customer, never to us.
-    const dropshipTypeIds = await findDropshipPickingTypeIds(credentials, uid);
+    // "On the way": what confirmed purchase orders still owe us. With "Exclude
+    // dropshipping" on, dropship orders are left out (that stock goes straight to
+    // a customer); with "Exclude internal companies" on, so are orders from sister companies.
     const incomingDomain: unknown[] = [
         ["product_id", "in", productIds],
         ["display_type", "=", false],
         ["order_id.state", "in", ["purchase", "done"]],
     ];
-    if (dropshipTypeIds.length > 0) {
-        incomingDomain.push(["order_id.picking_type_id", "not in", dropshipTypeIds]);
+    if (input.excludeDropshipping) {
+        if (dropshipTypeIds.length > 0) {
+            incomingDomain.push(["order_id.picking_type_id", "not in", dropshipTypeIds]);
+        }
+        if (hasDropshipAddressField) {
+            incomingDomain.push(["order_id.dest_address_id", "=", false]);
+        }
+    }
+    if (internalCompanyPartnerIds.length > 0) {
+        incomingDomain.push(["order_id.partner_id.commercial_partner_id", "not in", internalCompanyPartnerIds]);
     }
     const incomingLines = await searchReadAll(
         credentials,
@@ -5746,6 +5845,132 @@ export async function getPurchaseOrderReport(
             expectedDate: existing?.expectedDate || normalizeOdooDate(line.date_planned),
         });
         incomingByProductId.set(productId, orders);
+    }
+
+    // What the exclusion toggles actually removed, per product, so it can be shown
+    // (and checked) instead of silently disappearing from the figures.
+    const excludedItemsByProductId = new Map<number, Map<string, PurchaseOrderExcludedItem>>();
+    const addExcluded = (productId: number, key: string, item: PurchaseOrderExcludedItem) => {
+        const items = excludedItemsByProductId.get(productId) ?? new Map<string, PurchaseOrderExcludedItem>();
+        const existing = items.get(key);
+        if (existing) {
+            for (const reason of item.reasons) if (!existing.reasons.includes(reason)) existing.reasons.push(reason);
+        } else {
+            items.set(key, item);
+        }
+        excludedItemsByProductId.set(productId, items);
+    };
+
+    const partnerNameByOrder = async (model: "sale.order" | "purchase.order", orderIds: number[]) => {
+        const orders = orderIds.length > 0 ? await readInBatches(credentials, uid, model, orderIds, ["id", "partner_id"]) : [];
+        return new Map(orders.map((order) => [Number(order.id), getRelationalName(order.partner_id)]));
+    };
+
+    const saleBase: unknown[] = [
+        ["product_id", "in", productIds],
+        ["display_type", "=", false],
+        ["order_id.state", "in", ["sale", "done"]],
+        ["order_id.date_order", ">=", from],
+        ["order_id.date_order", "<=", to],
+    ];
+    const saleLegs: Array<{ leaf: unknown; reason: string }> = [];
+    if (dropshipSaleLineIds.length > 0) saleLegs.push({ leaf: ["id", "in", dropshipSaleLineIds], reason: "Dropshipping" });
+    if (internalCompanyPartnerIds.length > 0) {
+        saleLegs.push({ leaf: ["order_id.partner_id.commercial_partner_id", "in", internalCompanyPartnerIds], reason: "Internal company" });
+    }
+    for (const leg of saleLegs) {
+        const removed = await searchReadAll(credentials, uid, "sale.order.line", [...saleBase, leg.leaf], ["product_id", "order_id", "product_uom_qty"]);
+        const partners = await partnerNameByOrder(
+            "sale.order",
+            Array.from(new Set(removed.map((line) => getRelationalId(line.order_id)).filter((id): id is number => !!id)))
+        );
+        for (const line of removed) {
+            const productId = getRelationalId(line.product_id);
+            const orderId = getRelationalId(line.order_id);
+            if (!productId || !orderId) continue;
+            addExcluded(productId, `sale-${line.id}`, {
+                kind: "sale",
+                reasons: [leg.reason],
+                document: getRelationalName(line.order_id),
+                partner: partners.get(orderId) ?? "",
+                quantity: Number(line.product_uom_qty ?? 0),
+            });
+        }
+    }
+
+    const purchaseBase: unknown[] = [
+        ["product_id", "in", productIds],
+        ["display_type", "=", false],
+        ["order_id.state", "in", ["purchase", "done"]],
+    ];
+    const purchaseLegs: Array<{ leaf: unknown; reason: string }> = [];
+    if (input.excludeDropshipping) {
+        if (dropshipTypeIds.length > 0) {
+            purchaseLegs.push({ leaf: ["order_id.picking_type_id", "in", dropshipTypeIds], reason: "Dropshipping" });
+        }
+        if (hasDropshipAddressField) {
+            purchaseLegs.push({ leaf: ["order_id.dest_address_id", "!=", false], reason: "Dropshipping" });
+        }
+    }
+    if (internalCompanyPartnerIds.length > 0) {
+        purchaseLegs.push({ leaf: ["order_id.partner_id.commercial_partner_id", "in", internalCompanyPartnerIds], reason: "Internal company" });
+    }
+    for (const leg of purchaseLegs) {
+        const removed = await searchReadAll(
+            credentials,
+            uid,
+            "purchase.order.line",
+            [...purchaseBase, leg.leaf],
+            ["product_id", "order_id", "product_qty", "qty_received"]
+        );
+        const partners = await partnerNameByOrder(
+            "purchase.order",
+            Array.from(new Set(removed.map((line) => getRelationalId(line.order_id)).filter((id): id is number => !!id)))
+        );
+        for (const line of removed) {
+            const productId = getRelationalId(line.product_id);
+            const orderId = getRelationalId(line.order_id);
+            const open = Number(line.product_qty ?? 0) - Number(line.qty_received ?? 0);
+            if (!productId || !orderId || open <= 0) continue;
+            addExcluded(productId, `purchase-${line.id}`, {
+                kind: "purchase",
+                reasons: [leg.reason],
+                document: getRelationalName(line.order_id),
+                partner: partners.get(orderId) ?? "",
+                quantity: open,
+            });
+        }
+    }
+
+    // Where today's stock sits: per product, per lot, per warehouse.
+    const quants = await searchReadAll(
+        credentials,
+        uid,
+        "stock.quant",
+        [["product_id", "in", productIds], ["location_id.usage", "=", "internal"], ["quantity", "!=", 0]],
+        ["product_id", "lot_id", "location_id", "quantity"]
+    );
+    const locationIds = Array.from(new Set(quants.map((quant) => getRelationalId(quant.location_id)).filter((id): id is number => !!id)));
+    const locations = locationIds.length > 0 ? await readInBatches(credentials, uid, "stock.location", locationIds, ["id", "complete_name", "warehouse_id"]) : [];
+    const warehouseNameByLocationId = new Map<number, string>();
+    for (const location of locations) {
+        warehouseNameByLocationId.set(
+            Number(location.id),
+            getRelationalName(location.warehouse_id) || toDisplayString(location.complete_name) || `Location #${location.id}`
+        );
+    }
+    const stockByProductId = new Map<number, Map<string, Map<string, number>>>();
+    for (const quant of quants) {
+        const productId = getRelationalId(quant.product_id);
+        if (!productId) continue;
+        const lotName = getRelationalName(quant.lot_id) || "No lot";
+        const locationId = getRelationalId(quant.location_id);
+        const warehouse = (locationId ? warehouseNameByLocationId.get(locationId) : undefined) ?? "Unknown location";
+        const lots = stockByProductId.get(productId) ?? new Map<string, Map<string, number>>();
+        const warehouses = lots.get(lotName) ?? new Map<string, number>();
+        warehouses.set(warehouse, (warehouses.get(warehouse) ?? 0) + Number(quant.quantity ?? 0));
+        lots.set(lotName, warehouses);
+        stockByProductId.set(productId, lots);
     }
 
     const monthsInRange = monthsBetweenInclusive(startDate, endDate);
@@ -5774,6 +5999,24 @@ export async function getPurchaseOrderReport(
                 pendingFromBackorders: 0,
                 incomingQty,
                 incomingOrders,
+                ...(() => {
+                    const excludedItems = Array.from(excludedItemsByProductId.get(productId)?.values() ?? [])
+                        .map((item) => ({ ...item, quantity: Number(item.quantity.toFixed(2)) }))
+                        .sort((a, b) => a.kind.localeCompare(b.kind) || a.document.localeCompare(b.document));
+                    const total = (kind: "sale" | "purchase") =>
+                        Number(excludedItems.filter((item) => item.kind === kind).reduce((sum, item) => sum + item.quantity, 0).toFixed(2));
+                    return { excludedItems, excludedSoldQty: total("sale"), excludedIncomingQty: total("purchase") };
+                })(),
+                stockByLot: Array.from(stockByProductId.get(productId) ?? [])
+                    .map(([lotName, warehouses]) => {
+                        const list = Array.from(warehouses)
+                            .map(([name, quantity]) => ({ name, quantity: Number(quantity.toFixed(2)) }))
+                            .filter((entry) => entry.quantity !== 0)
+                            .sort((a, b) => b.quantity - a.quantity);
+                        return { lotName, quantity: Number(list.reduce((sum, entry) => sum + entry.quantity, 0).toFixed(2)), warehouses: list };
+                    })
+                    .filter((lot) => lot.quantity !== 0)
+                    .sort((a, b) => b.lotName.localeCompare(a.lotName)),
             };
         })
         .filter((row) => row.soldInPeriod > 0 || row.suggestedRestock > 0)
