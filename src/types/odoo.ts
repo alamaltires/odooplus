@@ -178,6 +178,27 @@ export type OdooCustomerBrandSummary = {
     totalSales: number;
 };
 
+export type OdooCustomerSalesProduct = {
+    productName: string;
+    quantitySold: number;
+    totalSales: number;
+};
+
+export type OdooCustomerSalesCategory = {
+    categoryName: string;
+    quantitySold: number;
+    totalSales: number;
+    products: OdooCustomerSalesProduct[];
+};
+
+/** A brand with the categories sold under it, each with its products. */
+export type OdooCustomerSalesBrand = {
+    brandName: string;
+    quantitySold: number;
+    totalSales: number;
+    categories: OdooCustomerSalesCategory[];
+};
+
 export type OdooCustomerReport = {
     customer: OdooCustomerSummary;
     totalSales: number;
@@ -187,6 +208,7 @@ export type OdooCustomerReport = {
     openQuotationCount: number;
     topBrands: OdooCustomerBrandSummary[];
     topCategories: OdooCustomerBrandSummary[];
+    brandTree: OdooCustomerSalesBrand[];
 };
 
 export type OdooCurrencyTotal = {
@@ -432,4 +454,68 @@ export type PaymentFollowupReport = {
         netDue: number;
         agingBuckets: PaymentFollowupAgingTotals;
     };
+};
+
+export type OdooCustomerActivityMonth = {
+    /** "YYYY-MM" */
+    month: string;
+    label: string;
+    orderCount: number;
+    sales: number;
+    target: number;
+    /** Delivered revenue (ex VAT, AED) and the gross profit on it, for orders dated in this month. */
+    deliveredRevenue: number;
+    grossProfit: number;
+};
+
+export type OdooCustomerActivityOrder = {
+    id: number;
+    name: string;
+    date: string;
+    amount: number;
+    state: string;
+    salespersonName: string;
+    /** Revenue (ex VAT, AED) of what has been delivered so far, its cost, and the profit — confirmed orders only. */
+    deliveredRevenue: number;
+    grossProfit: number;
+};
+
+export type OdooCustomerActivityReport = {
+    customer: OdooCustomerSummary;
+    startDate: string;
+    endDate: string;
+    /** The customer's "Customer Monthly Target" from Odoo (0 when not set). */
+    customerMonthlyTarget: number;
+    totals: {
+        orderCount: number;
+        totalSales: number;
+        averageOrderValue: number;
+        lastSaleDate: string;
+        openQuotationCount: number;
+        openQuotationValue: number;
+        /** Months touched by the range, each counted in full against the monthly target. */
+        targetMonths: number;
+        targetTotal: number;
+        /** Sales as a percentage of the target for those months; null when there is no target. */
+        targetPercent: number | null;
+        /** All-time confirmed sales (not limited to the range). */
+        lifetimeSales: number;
+        /** Order value excluding VAT, in AED. */
+        netSales: number;
+        /** The part of net sales already delivered — GP is measured on this only. */
+        deliveredRevenue: number;
+        /** What Odoo booked as the cost of those deliveries. */
+        costOfGoods: number;
+        grossProfit: number;
+        /** Gross profit as a percentage of delivered revenue; null when nothing was delivered. */
+        gpPercent: number | null;
+        /** Delivered order lines with no cost recorded (their profit is overstated). */
+        linesWithoutCost: number;
+    };
+    months: OdooCustomerActivityMonth[];
+    orders: OdooCustomerActivityOrder[];
+    openQuotations: OdooCustomerActivityOrder[];
+    topBrands: OdooCustomerBrandSummary[];
+    topCategories: OdooCustomerBrandSummary[];
+    brandTree: OdooCustomerSalesBrand[];
 };

@@ -7,6 +7,7 @@ import { ArrowLeft, BadgeDollarSign, Building2, ClipboardList, Clock3 } from "lu
 import { getCustomerReport } from "@/lib/client-odoo";
 import { useAuth } from "@/lib/auth-context";
 import { OdooCustomerReport } from "@/types/odoo";
+import { BrandSalesTree } from "@/components/brand-sales-tree";
 
 function formatNumber(value: number) {
     return value.toLocaleString(undefined, {
@@ -163,36 +164,13 @@ export default function CustomerReportPage() {
                             <div>
                                 <h2 className="font-display text-2xl">Most Sold Brands</h2>
                                 <p className="text-sm text-(--ink-soft)">
-                                    Ranked by total confirmed sales for this customer.
+                                    Ranked by total confirmed sales. Open a brand to see its categories, then a category to see its products.
                                 </p>
                             </div>
 
-                            {report.topBrands.length === 0 ? (
-                                <p className="mt-4 text-sm text-(--ink-soft)">
-                                    No sold brands were found for this customer.
-                                </p>
-                            ) : (
-                                <div className="mt-4 overflow-hidden rounded-xl border border-(--line)">
-                                    <table className="w-full border-collapse text-left text-sm">
-                                        <thead className="bg-(--chip) text-(--ink-soft)">
-                                            <tr>
-                                                <th className="px-4 py-3 font-medium">Brand</th>
-                                                <th className="px-4 py-3 font-medium text-right">Quantity Sold</th>
-                                                <th className="px-4 py-3 font-medium text-right">Total Sales</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {report.topBrands.map((brand) => (
-                                                <tr key={brand.brandName} className="border-t border-(--line)">
-                                                    <td className="px-4 py-3">{brand.brandName}</td>
-                                                    <td className="px-4 py-3 text-right">{formatNumber(brand.quantitySold)}</td>
-                                                    <td className="px-4 py-3 text-right">{formatCurrency(brand.totalSales)}</td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            )}
+                            <div className="mt-4">
+                                <BrandSalesTree brands={report.brandTree ?? []} />
+                            </div>
                         </div>
 
                         <div className="rounded-2xl border border-(--line) bg-(--card) p-5">

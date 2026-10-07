@@ -6,6 +6,7 @@ import {
     OdooCustomerOption,
     OdooDashboardActivityType,
     OdooDashboardStats,
+    OdooCustomerActivityReport,
     OdooCustomerReport,
     OdooNearExpiryProduct,
     OdooProductOption,
@@ -758,4 +759,8 @@ export type PoTrackingDiagnosis = {
 
 export function diagnosePoTracking(poName: string) {
     return post<PoTrackingDiagnosis>("/api/odoo/po-tracking/diagnose", { poName });
+}
+
+export function getCustomerActivityReport(input: { customerId: number; startDate: string; endDate: string }) {
+    return post<OdooCustomerActivityReport>("/api/odoo/customer-activity-report", input);
 }

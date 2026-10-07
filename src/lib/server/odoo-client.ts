@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
     OdooCredentials,
+    OdooCustomerActivityReport,
     OdooDashboardActivityType,
     OdooOrderLineInput,
 } from "@/types/odoo";
@@ -218,6 +219,18 @@ type CustomerBrandSummary = {
     totalSales: number;
 };
 
+type CustomerSalesBrand = {
+    brandName: string;
+    quantitySold: number;
+    totalSales: number;
+    categories: Array<{
+        categoryName: string;
+        quantitySold: number;
+        totalSales: number;
+        products: Array<{ productName: string; quantitySold: number; totalSales: number }>;
+    }>;
+};
+
 type CustomerReport = {
     customer: CustomerSummary;
     totalSales: number;
@@ -227,6 +240,7 @@ type CustomerReport = {
     openQuotationCount: number;
     topBrands: CustomerBrandSummary[];
     topCategories: CustomerBrandSummary[];
+    brandTree: CustomerSalesBrand[];
 };
 
 type CurrencyTotal = {
@@ -2778,7 +2792,7 @@ export async function getCustomerReport(
             "read",
             [productIds],
             {
-                fields: ["id", "product_tmpl_id"],
+                fields: ["id", "product_tmpl_id", "display_name"],
             }
         )
         : [];
@@ -2810,11 +2824,15 @@ export async function getCustomerReport(
     }
 
     const productToTemplateId = new Map<number, number>();
+    const productNameById = new Map<number, string>();
     for (const product of products) {
         const productId = Number(product.id ?? 0);
         const templateId = getRelationalId(product.product_tmpl_id);
         if (productId > 0 && templateId) {
             productToTemplateId.set(productId, templateId);
+        }
+        if (productId > 0) {
+            productNameById.set(productId, toDisplayString(product.display_name) || `Product #${productId}`);
         }
     }
 
@@ -2844,6 +2862,14 @@ export async function getCustomerReport(
     // conflating them lost real brand-level detail behind a generic category.
     const brandMap = new Map<string, CustomerBrandSummary>();
     const categoryMap = new Map<string, CustomerBrandSummary>();
+    const treeMap = new Map<
+        string,
+        {
+            quantitySold: number;
+            totalSales: number;
+            categories: Map<string, { quantitySold: number; totalSales: number; products: Map<string, { quantitySold: number; totalSales: number }> }>;
+        }
+    >();
     for (const line of saleLines) {
         const productId = getRelationalId(line.product_id);
         if (!productId) {
@@ -2861,7 +2887,41 @@ export async function getCustomerReport(
 
         const categoryName = getRelationalName(template?.categ_id) || "Uncategorized";
         accumulateBrandSummary(categoryMap, categoryName, quantity, sales);
+
+        // Brand -> category -> product, for the expandable breakdown.
+        const treeBrand = treeMap.get(brandName) ?? { quantitySold: 0, totalSales: 0, categories: new Map() };
+        const treeCategory = treeBrand.categories.get(categoryName) ?? { quantitySold: 0, totalSales: 0, products: new Map() };
+        const productName = productNameById.get(productId) ?? `Product #${productId}`;
+        const treeProduct = treeCategory.products.get(productName) ?? { quantitySold: 0, totalSales: 0 };
+        treeProduct.quantitySold += quantity;
+        treeProduct.totalSales += sales;
+        treeCategory.quantitySold += quantity;
+        treeCategory.totalSales += sales;
+        treeBrand.quantitySold += quantity;
+        treeBrand.totalSales += sales;
+        treeCategory.products.set(productName, treeProduct);
+        treeBrand.categories.set(categoryName, treeCategory);
+        treeMap.set(brandName, treeBrand);
     }
+
+    const bySalesThenQty = <T extends { totalSales: number; quantitySold: number }>(a: T, b: T) =>
+        b.totalSales - a.totalSales || b.quantitySold - a.quantitySold;
+    const round2 = (value: number) => Number(value.toFixed(2));
+    const brandTree: CustomerSalesBrand[] = Array.from(treeMap, ([brandName, brand]) => ({
+        brandName,
+        quantitySold: round2(brand.quantitySold),
+        totalSales: round2(brand.totalSales),
+        categories: Array.from(brand.categories, ([categoryName, category]) => ({
+            categoryName,
+            quantitySold: round2(category.quantitySold),
+            totalSales: round2(category.totalSales),
+            products: Array.from(category.products, ([productName, product]) => ({
+                productName,
+                quantitySold: round2(product.quantitySold),
+                totalSales: round2(product.totalSales),
+            })).sort(bySalesThenQty),
+        })).sort(bySalesThenQty),
+    })).sort(bySalesThenQty);
 
     const lastVisit = latestVisit[0];
     const lastVisitDate =
@@ -2882,6 +2942,7 @@ export async function getCustomerReport(
         topCategories: Array.from(categoryMap.values())
             .sort((a, b) => b.totalSales - a.totalSales || b.quantitySold - a.quantitySold)
             .slice(0, 10),
+        brandTree,
     };
 }
 
@@ -9927,5 +9988,228 @@ export async function diagnosePoTracking(credentials: OdooCredentials, poName: s
         notesPreview: notes.slice(0, 400),
         parsed: parsed.map((entry) => ({ blNumber: entry.blNumber, containerNo: entry.containerNo, units: entry.quantity, from: entry.from })),
         reasons,
+    };
+}
+
+/** "YYYY-MM" of an Odoo UTC datetime, as seen in the user's own timezone. */
+function localMonthKey(odooDatetime: string, timeZone: string): string {
+    const date = new Date(`${odooDatetime.replace(" ", "T")}${odooDatetime.length > 10 ? "Z" : "T00:00:00Z"}`);
+    if (Number.isNaN(date.getTime())) {
+        return odooDatetime.slice(0, 7);
+    }
+    const parts = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit" }).formatToParts(date);
+    const year = parts.find((part) => part.type === "year")?.value ?? "";
+    const month = parts.find((part) => part.type === "month")?.value ?? "";
+    return `${year}-${month}`;
+}
+
+/**
+ * One customer's activity over a date range — the single-customer counterpart of
+ * the Salesperson Activity report: confirmed orders and sales (month by month
+ * against the Customer Monthly Target), open quotations, plus the
+ * customer's top brands and categories.
+ */
+export async function getCustomerActivityReport(
+    credentials: OdooCredentials,
+    input: { customerId: number; startDate: string; endDate: string }
+): Promise<OdooCustomerActivityReport> {
+    const uid = await authenticate(credentials);
+    const customerId = Number(input.customerId);
+    if (!Number.isFinite(customerId) || customerId <= 0) {
+        throw new Error("A valid customer is required.");
+    }
+    const { startDate, endDate } = input;
+    ensureDateRange(startDate, endDate);
+
+    const timeZone = await getUserTimezone(credentials, uid);
+    const rangeStart = toOdooDateBoundary(startDate, false, timeZone);
+    const rangeEnd = toOdooDateBoundary(endDate, true, timeZone);
+    const monthlyTargetField = await getCustomerMonthlyTargetField(credentials, uid);
+
+    const commercial = await getCommercialPartner(credentials, uid, customerId);
+    const commercialPartnerId = Number(commercial.id ?? 0);
+    const canonical = await getCanonicalCustomerMap(
+        credentials,
+        uid,
+        [commercialPartnerId],
+        monthlyTargetField ? [monthlyTargetField] : []
+    );
+    const customerRecord = canonical.get(commercialPartnerId) ?? commercial;
+    const customer = toCustomerSummary(customerRecord, getRelationalName(customerRecord.user_id));
+    const customerMonthlyTarget = monthlyTargetField ? Number(customerRecord[monthlyTargetField] ?? 0) || 0 : 0;
+
+    const [orders, quotations, brandReport] = await Promise.all([
+        searchReadAll(
+            credentials,
+            uid,
+            "sale.order",
+            [
+                ["partner_id", "child_of", commercialPartnerId],
+                ["state", "in", ["sale", "done"]],
+                ["date_order", ">=", rangeStart],
+                ["date_order", "<=", rangeEnd],
+            ],
+            ["id", "name", "amount_total", "date_order", "user_id", "state"]
+        ),
+        searchReadAll(
+            credentials,
+            uid,
+            "sale.order",
+            [
+                ["partner_id", "child_of", commercialPartnerId],
+                ["state", "in", ["draft", "sent"]],
+            ],
+            ["id", "name", "amount_total", "date_order", "user_id", "state"]
+        ),
+        getCustomerReport(credentials, customerId),
+    ]);
+
+    const toOrder = (order: Record<string, unknown>) => ({
+        id: Number(order.id ?? 0),
+        name: toDisplayString(order.name),
+        date: normalizeOdooDate(order.date_order),
+        amount: Number(Number(order.amount_total ?? 0).toFixed(2)),
+        state: toDisplayString(order.state),
+        salespersonName: getRelationalName(order.user_id) || "-",
+        deliveredRevenue: 0,
+        grossProfit: 0,
+    });
+    const orderRows = orders.map(toOrder).sort((a, b) => b.date.localeCompare(a.date));
+    const quotationRows = quotations.map(toOrder).sort((a, b) => b.date.localeCompare(a.date));
+
+    // ---- Gross profit -------------------------------------------------------
+    // Measured on what has actually been delivered: each line's revenue (ex VAT)
+    // scaled by delivered/ordered quantity, against the cost Odoo booked on the
+    // delivery (its stock valuation entries — deliveries negative, returns
+    // positive). An undelivered order therefore doesn't read as 100% profit.
+    const saleLines = orderRows.length > 0
+        ? await searchReadAll(
+            credentials,
+            uid,
+            "sale.order.line",
+            [
+                ["order_id", "in", orderRows.map((order) => order.id)],
+                ["display_type", "=", false],
+                ["product_id", "!=", false],
+            ],
+            ["order_id", "price_subtotal", "product_uom_qty", "qty_delivered", "currency_id"]
+        )
+        : [];
+    const saleLineIds = saleLines.map((line) => Number(line.id));
+    const costLayers = saleLineIds.length > 0
+        ? await searchReadAll(credentials, uid, "stock.valuation.layer", [["stock_move_id.sale_line_id", "in", saleLineIds]], ["stock_move_id", "value", "currency_id"])
+        : [];
+    const layerMoveIds = Array.from(new Set(costLayers.map((layer) => getRelationalId(layer.stock_move_id)).filter((id): id is number => !!id)));
+    const layerMoves = layerMoveIds.length > 0 ? await readInBatches(credentials, uid, "stock.move", layerMoveIds, ["id", "sale_line_id"]) : [];
+    const saleLineIdByMoveId = new Map(layerMoves.map((move) => [Number(move.id), getRelationalId(move.sale_line_id)]));
+
+    const gpCurrencyIds = new Set<number>();
+    for (const record of [...saleLines, ...costLayers]) {
+        const currencyId = getRelationalId(record.currency_id);
+        if (currencyId) gpCurrencyIds.add(currencyId);
+    }
+    const gpPrimaryCurrencyId = await getPrimaryCurrencyId(credentials, uid, Array.from(gpCurrencyIds).map((currencyId) => ({ currencyId })));
+    const gpHomeCompanyId = await getHomeCompanyId(credentials, uid);
+    const gpOtherCurrencyIds = Array.from(gpCurrencyIds).filter((id) => id !== gpPrimaryCurrencyId);
+    const gpRates = gpHomeCompanyId && gpOtherCurrencyIds.length > 0
+        ? await getCurrencyRatesToHomeCurrency(credentials, uid, gpHomeCompanyId, gpOtherCurrencyIds, endDate)
+        : new Map<number, number>();
+    const gpMultipliers = buildCurrencyMultipliers(gpPrimaryCurrencyId, gpRates);
+    const toHomeAmount = (amount: number, currencyId: number | null) => {
+        if (!currencyId) return amount;
+        const multiplier = gpMultipliers.get(currencyId);
+        return typeof multiplier === "number" ? amount * multiplier : amount;
+    };
+
+    const costByLineId = new Map<number, number>();
+    for (const layer of costLayers) {
+        const lineId = saleLineIdByMoveId.get(getRelationalId(layer.stock_move_id) ?? -1);
+        if (!lineId) continue;
+        const cost = -toHomeAmount(Number(layer.value ?? 0), getRelationalId(layer.currency_id));
+        costByLineId.set(lineId, (costByLineId.get(lineId) ?? 0) + cost);
+    }
+
+    const gpByOrderId = new Map<number, { revenue: number; delivered: number; cost: number }>();
+    let linesWithoutCost = 0;
+    for (const line of saleLines) {
+        const orderId = getRelationalId(line.order_id);
+        if (!orderId) continue;
+        const ordered = Number(line.product_uom_qty ?? 0);
+        const deliveredQty = Math.min(Math.max(Number(line.qty_delivered ?? 0), 0), ordered);
+        const revenue = toHomeAmount(Number(line.price_subtotal ?? 0), getRelationalId(line.currency_id));
+        const delivered = ordered > 0 ? revenue * (deliveredQty / ordered) : 0;
+        const cost = costByLineId.get(Number(line.id)) ?? 0;
+        if (deliveredQty > 0 && !costByLineId.has(Number(line.id))) linesWithoutCost += 1;
+
+        const entry = gpByOrderId.get(orderId) ?? { revenue: 0, delivered: 0, cost: 0 };
+        entry.revenue += revenue;
+        entry.delivered += delivered;
+        entry.cost += cost;
+        gpByOrderId.set(orderId, entry);
+    }
+    for (const order of orderRows) {
+        const entry = gpByOrderId.get(order.id);
+        order.deliveredRevenue = Number((entry?.delivered ?? 0).toFixed(2));
+        order.grossProfit = Number(((entry?.delivered ?? 0) - (entry?.cost ?? 0)).toFixed(2));
+    }
+    const netSales = Number(Array.from(gpByOrderId.values()).reduce((sum, entry) => sum + entry.revenue, 0).toFixed(2));
+    const deliveredRevenue = Number(orderRows.reduce((sum, order) => sum + order.deliveredRevenue, 0).toFixed(2));
+    const grossProfit = Number(orderRows.reduce((sum, order) => sum + order.grossProfit, 0).toFixed(2));
+
+    // One row per calendar month the range touches, each measured against the full monthly target.
+    const monthKeys: string[] = [];
+    {
+        const [startYear, startMonth] = startDate.split("-").map(Number);
+        const [endYear, endMonth] = endDate.split("-").map(Number);
+        for (let index = startYear * 12 + startMonth - 1; index <= endYear * 12 + endMonth - 1; index += 1) {
+            monthKeys.push(`${Math.floor(index / 12)}-${String((index % 12) + 1).padStart(2, "0")}`);
+        }
+    }
+    const monthRows = monthKeys.map((month) => {
+        const inMonth = orderRows.filter((order) => localMonthKey(order.date, timeZone) === month);
+        const [year, monthNumber] = month.split("-").map(Number);
+        return {
+            month,
+            label: new Date(Date.UTC(year, monthNumber - 1, 1)).toLocaleString("en-GB", { month: "short", year: "numeric", timeZone: "UTC" }),
+            orderCount: inMonth.length,
+            sales: Number(inMonth.reduce((sum, order) => sum + order.amount, 0).toFixed(2)),
+            target: customerMonthlyTarget,
+            deliveredRevenue: Number(inMonth.reduce((sum, order) => sum + order.deliveredRevenue, 0).toFixed(2)),
+            grossProfit: Number(inMonth.reduce((sum, order) => sum + order.grossProfit, 0).toFixed(2)),
+        };
+    });
+
+    const totalSales = Number(orderRows.reduce((sum, order) => sum + order.amount, 0).toFixed(2));
+    const targetTotal = Number((customerMonthlyTarget * monthKeys.length).toFixed(2));
+
+    return {
+        customer,
+        startDate,
+        endDate,
+        customerMonthlyTarget,
+        totals: {
+            orderCount: orderRows.length,
+            totalSales,
+            averageOrderValue: orderRows.length > 0 ? Number((totalSales / orderRows.length).toFixed(2)) : 0,
+            lastSaleDate: orderRows[0]?.date ?? "",
+            openQuotationCount: quotationRows.length,
+            openQuotationValue: Number(quotationRows.reduce((sum, order) => sum + order.amount, 0).toFixed(2)),
+            targetMonths: monthKeys.length,
+            targetTotal,
+            targetPercent: targetTotal > 0 ? Number(((totalSales / targetTotal) * 100).toFixed(1)) : null,
+            lifetimeSales: brandReport.totalSales,
+            netSales,
+            deliveredRevenue,
+            costOfGoods: Number((deliveredRevenue - grossProfit).toFixed(2)),
+            grossProfit,
+            gpPercent: deliveredRevenue > 0 ? Number(((grossProfit / deliveredRevenue) * 100).toFixed(1)) : null,
+            linesWithoutCost,
+        },
+        months: monthRows,
+        orders: orderRows,
+        openQuotations: quotationRows,
+        topBrands: brandReport.topBrands,
+        topCategories: brandReport.topCategories,
+        brandTree: brandReport.brandTree,
     };
 }
