@@ -4364,81 +4364,6 @@ function resolveAgingBucket(
     return getAgingBucketByMonth(referenceDateIso ? monthsElapsedBetween(referenceDateIso, asOfDateIso) : 0);
 }
 
-/**
- * A cancelled cheque never paid anything. If its receivable item was nevertheless
- * matched to customer invoices, Odoo shows those invoices as (partly) paid — so
- * the matched amount is put back on each invoice: onto its open residual, or, for
- * an invoice Odoo now lists as fully paid, as a new open item for just that amount.
- */
-async function reopenInvoicesPaidByCancelledCheques(
-    credentials: OdooCredentials,
-    uid: number,
-    chequeLineIds: number[],
-    customerIds: number[],
-    invoices: Array<Record<string, unknown>>
-): Promise<void> {
-    if (chequeLineIds.length === 0) {
-        return;
-    }
-
-    const partials = await searchReadAll(
-        credentials,
-        uid,
-        "account.partial.reconcile",
-        [["credit_move_id", "in", chequeLineIds]],
-        ["debit_move_id", "debit_amount_currency"]
-    );
-    const debitLineIds = Array.from(new Set(partials.map((partial) => getRelationalId(partial.debit_move_id)).filter((id): id is number => !!id)));
-    if (debitLineIds.length === 0) {
-        return;
-    }
-
-    const debitLines = await readInBatches(credentials, uid, "account.move.line", debitLineIds, ["id", "move_id"]);
-    const moveIdByDebitLineId = new Map(debitLines.map((line) => [Number(line.id), getRelationalId(line.move_id)]));
-
-    const reopenedByMoveId = new Map<number, number>();
-    for (const partial of partials) {
-        const moveId = moveIdByDebitLineId.get(getRelationalId(partial.debit_move_id) ?? 0);
-        if (!moveId) continue;
-        reopenedByMoveId.set(moveId, (reopenedByMoveId.get(moveId) ?? 0) + Number(partial.debit_amount_currency ?? 0));
-    }
-
-    const openById = new Map(invoices.map((invoice) => [Number(invoice.id), invoice]));
-    const missingMoveIds: number[] = [];
-    for (const [moveId, amount] of reopenedByMoveId) {
-        const open = openById.get(moveId);
-        if (open) {
-            open.amount_residual = Number(open.amount_residual ?? 0) + amount;
-        } else if (amount > 0.005) {
-            missingMoveIds.push(moveId);
-        }
-    }
-
-    if (missingMoveIds.length === 0) {
-        return;
-    }
-    const customerIdSet = new Set(customerIds);
-    const paidInvoices = await readInBatches(credentials, uid, "account.move", missingMoveIds, [
-        "id",
-        "name",
-        "move_type",
-        "state",
-        "commercial_partner_id",
-        "invoice_date",
-        "invoice_date_due",
-        "invoice_payment_term_id",
-        "amount_total",
-        "currency_id",
-    ]);
-    for (const invoice of paidInvoices) {
-        const partnerId = getRelationalId(invoice.commercial_partner_id);
-        if (invoice.move_type !== "out_invoice" || invoice.state !== "posted" || !partnerId || !customerIdSet.has(partnerId)) {
-            continue;
-        }
-        invoices.push({ ...invoice, amount_residual: reopenedByMoveId.get(Number(invoice.id)) ?? 0 });
-    }
-}
-
 /** Whether a PDC cheque record's own state says it was cancelled. */
 function isPdcCancelled(pdcInfo: PdcModelInfo, record: Record<string, unknown>): boolean {
     const raw = pdcInfo.stateField ? toDisplayString(record[pdcInfo.stateField]) : "";
@@ -4713,15 +4638,32 @@ async function buildPaymentFollowupReport(
         uid,
         "account.move.line",
         [
+            // The customer can sit on the entry's header OR only on the journal item
+            // (manual Miscellaneous Operations / MISC entries usually do the latter).
+            "|",
             ["move_id.commercial_partner_id", "in", customerIds],
+            ["partner_id.commercial_partner_id", "in", customerIds],
             ["move_id.state", "=", "posted"],
             ["move_id.move_type", "=", "entry"],
             receivableTriple,
             ["reconciled", "=", false],
             ["balance", "!=", 0],
         ],
-        ["id", "move_id", "date", "balance", "amount_currency", "currency_id"]
+        ["id", "move_id", "partner_id", "date", "balance", "amount_currency", "currency_id"]
     );
+
+    // For entries with no header partner, the customer is the item's own partner.
+    const customerIdSet = new Set(customerIds);
+    const itemPartnerIds = Array.from(
+        new Set(unappliedLines.map((line) => getRelationalId(line.partner_id)).filter((id): id is number => typeof id === "number"))
+    );
+    const commercialByItemPartnerId = new Map<number, number>();
+    if (itemPartnerIds.length > 0) {
+        for (const partner of await readPartnersByIds(credentials, uid, itemPartnerIds, ["id", "commercial_partner_id"])) {
+            const commercialId = getRelationalId(partner.commercial_partner_id);
+            if (commercialId) commercialByItemPartnerId.set(Number(partner.id), commercialId);
+        }
+    }
 
     const unappliedMoveIds = Array.from(
         new Set(
@@ -4820,21 +4762,6 @@ async function buildPaymentFollowupReport(
         }
     }
 
-    // Cancelled cheques are never received payments. Their receivable items must
-    // not count as unapplied credit, and invoices they were matched to reopen.
-    const cancelledChequeLineIds = new Set<number>();
-    if (pdcInfo) {
-        for (const record of pdcRecords) {
-            if (!isPdcCancelled(pdcInfo, record)) continue;
-            for (const lineId of receivableMatchByRecordId.get(Number(record.id))?.lineIds ?? []) cancelledChequeLineIds.add(lineId);
-        }
-        try {
-            await reopenInvoicesPaidByCancelledCheques(credentials, uid, Array.from(cancelledChequeLineIds), customerIds, invoices);
-        } catch {
-            // If reconciliation details can't be read, the invoices simply stay as Odoo shows them.
-        }
-    }
-
     // Resolve each cheque's own partner to the canonical (commercial)
     // customer it should be grouped under, same as the invoice/unapplied
     // sections — the query above matches on `commercial_partner_id` but
@@ -4856,7 +4783,41 @@ async function buildPaymentFollowupReport(
     // this app is expressed in — see `TARGET_CURRENCY_CODE`) follows the same
     // approach as `getSalespersonMonthlyInvoices`: each amount stays in its own
     // transaction currency for display, and is only converted for the totals.
+    // Net Due and the aging columns come straight from the customer's unmatched
+    // journal items on receivable and payable accounts — the same items Odoo's
+    // Partner Ledger / Aged Receivable list — so the total always agrees with the
+    // ledger. (The invoice / credit / cheque lists below stay as the detail views.)
+    const ledgerAccountMeta = await executeKw<Record<string, unknown>>(credentials, uid, "account.account", "fields_get", [["account_type"]], { attributes: ["type"] });
+    const ledgerAccountDomain: unknown = ledgerAccountMeta.account_type
+        ? ["account_id.account_type", "in", ["asset_receivable", "liability_payable"]]
+        : ["account_id.user_type_id.type", "in", ["receivable", "payable"]];
+    const ledgerLines = await searchReadAll(
+        credentials,
+        uid,
+        "account.move.line",
+        [
+            ["partner_id.commercial_partner_id", "in", customerIds],
+            ["parent_state", "=", "posted"],
+            ["date", "<=", todayStr],
+            ledgerAccountDomain,
+            ["reconciled", "=", false],
+        ],
+        ["partner_id", "date", "date_maturity", "balance", "company_currency_id"]
+    );
+    const ledgerPartnerIds = Array.from(new Set(ledgerLines.map((line) => getRelationalId(line.partner_id)).filter((id): id is number => typeof id === "number")));
+    const ledgerCommercialByPartnerId = new Map<number, number>();
+    if (ledgerPartnerIds.length > 0) {
+        for (const partner of await readPartnersByIds(credentials, uid, ledgerPartnerIds, ["id", "commercial_partner_id"])) {
+            const commercialId = getRelationalId(partner.commercial_partner_id);
+            if (commercialId) ledgerCommercialByPartnerId.set(Number(partner.id), commercialId);
+        }
+    }
+
     const currencyIdsSeen = new Set<number>();
+    for (const line of ledgerLines) {
+        const id = getRelationalId(line.company_currency_id);
+        if (id) currencyIdsSeen.add(id);
+    }
     for (const invoice of invoices) {
         const id = getRelationalId(invoice.currency_id);
         if (id) currencyIdsSeen.add(id);
@@ -5054,10 +5015,17 @@ async function buildPaymentFollowupReport(
     }
 
     for (const line of unappliedLines) {
-        // A cancelled cheque's receivable item is not money received.
-        if (cancelledChequeLineIds.has(Number(line.id))) continue;
         const move = unappliedMoveById.get(getRelationalId(line.move_id) ?? -1);
-        const customerId = move ? getRelationalId(move.commercial_partner_id) : null;
+        // The header's customer wins when it is one of ours; otherwise the item's own partner.
+        const headerCustomerId = move ? getRelationalId(move.commercial_partner_id) : null;
+        const itemPartnerId = getRelationalId(line.partner_id);
+        const itemCustomerId = itemPartnerId ? commercialByItemPartnerId.get(itemPartnerId) ?? null : null;
+        const customerId =
+            headerCustomerId && customerIdSet.has(headerCustomerId)
+                ? headerCustomerId
+                : itemCustomerId && customerIdSet.has(itemCustomerId)
+                    ? itemCustomerId
+                    : null;
         if (!customerId) continue;
 
         const currencyId = getRelationalId(line.currency_id);
@@ -5136,15 +5104,6 @@ async function buildPaymentFollowupReport(
         invoiceHomeResidualById.set(invoiceId, toHomeAmount(amount, currencyId));
     }
 
-    // The credit an unmatched cheque represents comes off what the customer owes
-    // (spent against their oldest invoices, like any unapplied payment). A cheque
-    // whose receivable item is already among the unapplied credits above has been
-    // deducted there, so only the ones that aren't get added here — never twice.
-    const unappliedCreditLineIds = new Set(
-        unappliedLines.filter((line) => Number(line.balance ?? 0) < 0).map((line) => Number(line.id))
-    );
-    const pdcUnmatchedCreditByCustomerId = new Map<number, number>();
-
     if (pdcInfo) {
         for (const record of pdcRecords) {
             const rawPartnerId = getRelationalId(record[pdcInfo.partnerField]);
@@ -5180,8 +5139,7 @@ async function buildPaymentFollowupReport(
                 (pdcInfo.pendingField ? !record[pdcInfo.pendingField] : lowerStateLabel.includes("regist")) &&
                 !isDeposited &&
                 !isCancelled;
-            // Whether the cheque's receivable journal item is matched only drives the
-            // deduction from what the customer owes (see `pdcUnmatchedCreditByCustomerId`);
+            // Whether the cheque's receivable journal item is matched is shown as a tag;
             // it never changes whether the cheque counts as pending.
             const receivableMatch = receivableMatchByRecordId.get(Number(record.id));
             const pendingAmount = isPending ? amount : 0;
@@ -5193,20 +5151,6 @@ async function buildPaymentFollowupReport(
             const displayState = isDeposited ? "Registered & Deposited" : stateLabel || "-";
 
             const row = ensureRow(customerId);
-            // A cancelled cheque was never received, so it never reduces what the customer owes.
-            const deductedFromDue =
-                !isCancelled &&
-                Boolean(receivableMatch) &&
-                !receivableMatch!.matched &&
-                !receivableMatch!.unmatchedLineIds.some((id) => unappliedCreditLineIds.has(id));
-            if (receivableMatch && deductedFromDue) {
-                pdcUnmatchedCreditByCustomerId.set(
-                    customerId,
-                    Number(
-                        ((pdcUnmatchedCreditByCustomerId.get(customerId) ?? 0) + toHomeAmount(amount * receivableMatch.unmatchedRatio, currencyId)).toFixed(2)
-                    )
-                );
-            }
             row.cheques.push({
                 id: Number(record.id),
                 number: toDisplayString(record[pdcInfo.numberField]) || `#${record.id}`,
@@ -5228,6 +5172,37 @@ async function buildPaymentFollowupReport(
                 row.totalPdcDeposited = Number((row.totalPdcDeposited + toHomeAmount(amount, currencyId)).toFixed(2));
             }
         }
+    }
+
+    // Age each unmatched item by its own date (invoice date, or due date) and drop it
+    // in its own bucket: debits add, credits subtract, exactly as the ledger nets.
+    const ledgerByCustomerId = new Map<
+        number,
+        { buckets: Record<PaymentFollowupAgingBucket, number>; oldestRef: string; oldestDays: number; oldestBucket: PaymentFollowupAgingBucket }
+    >();
+    const customerIdSetForLedger = new Set(customerIds);
+    for (const line of ledgerLines) {
+        const partnerId = getRelationalId(line.partner_id);
+        const customerId = partnerId ? ledgerCommercialByPartnerId.get(partnerId) : undefined;
+        if (!customerId || !customerIdSetForLedger.has(customerId)) continue;
+
+        const dateValue = normalizeOdooDate(line.date).slice(0, 10);
+        const referenceDate = dateBasis === "invoice" ? dateValue : normalizeOdooDate(line.date_maturity).slice(0, 10) || dateValue;
+        const referenceMs = referenceDate ? new Date(`${referenceDate}T00:00:00Z`).getTime() : todayMs;
+        const daysOverdue = Math.round((todayMs - referenceMs) / 86400000);
+        const bucket = resolveAgingBucket(daysOverdue, referenceDate, todayStr, agingSystem);
+        const amount = toHomeAmount(Number(line.balance ?? 0), getRelationalId(line.company_currency_id));
+
+        ensureRow(customerId);
+        const entry = ledgerByCustomerId.get(customerId) ?? { buckets: emptyAgingTotals(), oldestRef: "", oldestDays: 0, oldestBucket: "notDue" as PaymentFollowupAgingBucket };
+        entry.buckets[bucket] += amount;
+        // The oldest still-owed charge is what the customer's badge reports.
+        if (amount > 0 && (!entry.oldestRef || referenceDate < entry.oldestRef)) {
+            entry.oldestRef = referenceDate;
+            entry.oldestDays = daysOverdue;
+            entry.oldestBucket = bucket;
+        }
+        ledgerByCustomerId.set(customerId, entry);
     }
 
     for (const row of rowByCustomerId.values()) {
@@ -5252,7 +5227,7 @@ async function buildPaymentFollowupReport(
             .slice()
             .sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : 0));
 
-        let remainingCredit = Number((row.totalUnapplied + (pdcUnmatchedCreditByCustomerId.get(row.customerId) ?? 0)).toFixed(2));
+        let remainingCredit = row.totalUnapplied;
         row.oldestDueDate = "";
         row.maxDaysOverdue = 0;
         row.agingBucket = "notDue";
@@ -5300,13 +5275,32 @@ async function buildPaymentFollowupReport(
         // they're already inside `totalInvoiceDue` via the buckets.
         row.netDue = Number((row.totalInvoiceDue - Math.max(remainingCredit, 0)).toFixed(2));
 
+        // Net Due and the aging columns are the unmatched journal items, as in the ledger.
+        const ledger = ledgerByCustomerId.get(row.customerId);
+        const ledgerBuckets = ledger?.buckets ?? emptyAgingTotals();
+        row.agingBuckets = {
+            notDue: Number(ledgerBuckets.notDue.toFixed(2)),
+            d1_30: Number(ledgerBuckets.d1_30.toFixed(2)),
+            d31_60: Number(ledgerBuckets.d31_60.toFixed(2)),
+            d61_90: Number(ledgerBuckets.d61_90.toFixed(2)),
+            d91_120: Number(ledgerBuckets.d91_120.toFixed(2)),
+            older: Number(ledgerBuckets.older.toFixed(2)),
+        };
+        row.totalInvoiceDue = Number(
+            (row.agingBuckets.notDue + row.agingBuckets.d1_30 + row.agingBuckets.d31_60 + row.agingBuckets.d61_90 + row.agingBuckets.d91_120 + row.agingBuckets.older).toFixed(2)
+        );
+        row.netDue = row.totalInvoiceDue;
+        row.oldestDueDate = ledger?.oldestRef ?? "";
+        row.maxDaysOverdue = ledger?.oldestRef ? ledger.oldestDays : 0;
+        row.agingBucket = ledger?.oldestRef ? ledger.oldestBucket : "notDue";
+
         row.invoices.sort((a, b) => b.daysOverdue - a.daysOverdue);
         row.unappliedPayments.sort((a, b) => (b.date > a.date ? 1 : -1));
         row.cheques.sort((a, b) => (a.date > b.date ? 1 : -1));
     }
 
     const customers = Array.from(rowByCustomerId.values())
-        .filter((row) => row.invoices.length > 0 || row.unappliedPayments.length > 0 || row.cheques.length > 0)
+        .filter((row) => row.invoices.length > 0 || row.unappliedPayments.length > 0 || row.cheques.length > 0 || row.netDue !== 0)
         .sort((a, b) => b.maxDaysOverdue - a.maxDaysOverdue || b.netDue - a.netDue);
 
     const totals = customers.reduce(

@@ -788,8 +788,8 @@ function ChequesTable({ rows, currencyCode }: { rows: PaymentFollowupCustomerRow
                                                     {row.state}
                                                 </span>
                                                 {row.receivableMatched === false ? (
-                                                    <span className="ml-1.5 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800" title="Its Accounts Receivable journal item isn't matched yet, so the amount is deducted from what the customer owes (not counted as pending)">
-                                                        AR unmatched · deducted
+                                                    <span className="ml-1.5 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800" title="Its Accounts Receivable journal item isn't matched yet, (informational — Net Due comes from the unmatched journal items)">
+                                                        AR unmatched
                                                     </span>
                                                 ) : null}
                                             </td>
