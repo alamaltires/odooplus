@@ -753,6 +753,7 @@ export type PoTrackingDiagnosis = {
     fullyReceivedByLines: boolean;
     sourceDocument: string;
     notesPreview: string;
+    notesFieldNames: string[];
     parsed: Array<{ blNumber: string; containerNo: string; units: number; from: "Source Document" | "Notes" }>;
     reasons: string[];
 };

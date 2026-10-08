@@ -9891,6 +9891,82 @@ function parsePoTrackingText(text: string): ParsedTrackingEntry[] {
     return found;
 }
 
+/**
+ * The text fields on a purchase order that can hold a note: the standard `notes`
+ * ("Terms and Conditions") plus any other text/HTML/char field whose own name or
+ * label mentions "note" — a deployment often adds its own "Notes" field.
+ */
+function findPoNoteFields(fieldMeta: Record<string, { type?: string; string?: string; relation?: string }>): string[] {
+    const textTypes = new Set(["text", "html", "char"]);
+    return Object.entries(fieldMeta)
+        .filter(([name, meta]) => {
+            // The deployment's own notes field, whatever its type.
+            if (name === "order_notes") return true;
+            if (!textTypes.has(String(meta?.type)) || name.startsWith("message_") || name === "name") return false;
+            return name === "notes" || /note/i.test(name) || /\bnotes?\b/i.test(String(meta?.string ?? ""));
+        })
+        .map(([name]) => name)
+        .sort((a, b) => (a === "order_notes" ? -1 : b === "order_notes" ? 1 : a === "notes" ? -1 : b === "notes" ? 1 : a.localeCompare(b)));
+}
+
+/**
+ * The plain note text per purchase order, from every note field. Text/HTML
+ * fields are cleaned; a field that links to records (tags, a list of note
+ * lines) contributes each record's name or text, one per line.
+ */
+async function buildPoNoteTexts(
+    credentials: OdooCredentials,
+    uid: number,
+    orders: Array<Record<string, unknown>>,
+    noteFields: string[],
+    fieldMeta: Record<string, { type?: string; string?: string; relation?: string }>
+): Promise<Map<number, string>> {
+    const result = new Map<number, string>();
+    const parts = new Map<number, string[]>();
+    const push = (orderId: number, text: string) => {
+        const trimmed = text.trim();
+        if (trimmed) parts.set(orderId, [...(parts.get(orderId) ?? []), trimmed]);
+    };
+
+    for (const field of noteFields) {
+        const meta = fieldMeta[field];
+        const relation = meta?.relation;
+        const isLinked = meta?.type === "many2one" || meta?.type === "many2many" || meta?.type === "one2many";
+
+        if (!isLinked || !relation) {
+            for (const order of orders) push(Number(order.id), htmlToPlainText(toDisplayString(order[field])));
+            continue;
+        }
+
+        const idsByOrder = new Map<number, number[]>();
+        for (const order of orders) {
+            const value = order[field];
+            const ids = meta.type === "many2one"
+                ? [getRelationalId(value)].filter((id): id is number => !!id)
+                : Array.isArray(value) ? (value as unknown[]).filter((id): id is number => typeof id === "number") : [];
+            if (ids.length > 0) idsByOrder.set(Number(order.id), ids);
+        }
+        const allIds = Array.from(new Set(Array.from(idsByOrder.values()).flat()));
+        if (allIds.length === 0) continue;
+
+        // Note-like records keep their text in `name`, `note`, `notes` or `description`; any of them can carry the B/L.
+        const recordFields = await executeKw<Record<string, { type?: string }>>(credentials, uid, relation, "fields_get", [["name", "note", "notes", "description", "display_name"]], { attributes: ["type"] });
+        const readable = Object.keys(recordFields);
+        const records = await readInBatches(credentials, uid, relation, allIds, ["id", ...readable]);
+        const textById = new Map<number, string>();
+        for (const record of records) {
+            const lines = readable.map((name) => htmlToPlainText(toDisplayString(record[name])).trim()).filter(Boolean);
+            textById.set(Number(record.id), Array.from(new Set(lines)).join("\n"));
+        }
+        for (const [orderId, ids] of idsByOrder) {
+            for (const id of ids) push(orderId, textById.get(id) ?? "");
+        }
+    }
+
+    for (const [orderId, texts] of parts) result.set(orderId, texts.join("\n"));
+    return result;
+}
+
 /** Leading "B/L:", "BL", "B.L.", "B/L No." … label on a note line. */
 const BL_PREFIX = /^\s*(?:B\s*\/\s*L|B\.\s*L\.?|BL(?![A-Za-z])|Bill\s+of\s+Lading)\s*(?:No\.?|number|#)?\s*[:\-#]?\s*/i;
 
@@ -9951,15 +10027,16 @@ export async function getImportedPurchaseOrdersForTracking(
         ? importedTypes.map((option) => Number(option.value)).filter((id) => Number.isFinite(id) && id > 0)
         : importedTypes.map((option) => option.value);
 
-    const orderFields = await executeKw<Record<string, unknown>>(
+    const orderFields = await executeKw<Record<string, { type?: string; string?: string; relation?: string }>>(
         credentials,
         uid,
         "purchase.order",
         "fields_get",
         [],
-        { attributes: ["type"] }
+        { attributes: ["type", "string", "relation"] }
     );
     const hasField = (name: string) => Object.prototype.hasOwnProperty.call(orderFields, name);
+    const noteFields = findPoNoteFields(orderFields);
 
     const domain: unknown[] = [
         ["state", "in", ["purchase", "done"]],
@@ -9969,7 +10046,7 @@ export async function getImportedPurchaseOrdersForTracking(
         domain.push(["receipt_status", "!=", "full"]);
     }
 
-    const readFields = ["name", "partner_id", "partner_ref", "notes", "date_order", "date_planned", "currency_id", typeField.fieldName]
+    const readFields = ["name", "partner_id", "partner_ref", ...noteFields, "date_order", "date_planned", "currency_id", typeField.fieldName]
         .filter((name, index, all) => all.indexOf(name) === index && hasField(name));
 
     const orders = await executeKw<Array<Record<string, unknown>>>(
@@ -9983,6 +10060,7 @@ export async function getImportedPurchaseOrdersForTracking(
     if (orders.length === 0) {
         return { orders: [], importedTypeNames: importedTypes.map((option) => option.label) };
     }
+    const noteTextByOrderId = await buildPoNoteTexts(credentials, uid, orders, noteFields, orderFields);
 
     const orderIds = orders.map((order) => Number(order.id ?? 0)).filter((id) => id > 0);
     const lines = await searchReadAll(
@@ -10019,7 +10097,7 @@ export async function getImportedPurchaseOrdersForTracking(
     for (const order of orders) {
         const id = Number(order.id ?? 0);
         // The B/L always comes from the PO's Notes.
-        const parsed = parsePoTrackingNotes(htmlToPlainText(toDisplayString(order.notes)));
+        const parsed = parsePoTrackingNotes(noteTextByOrderId.get(id) ?? "");
         // A container listed twice (same number) is one container.
         const seen = new Set<string>();
         const containers: PoTrackingContainer[] = parsed.filter((entry) => {
@@ -10070,6 +10148,8 @@ export type PoTrackingDiagnosis = {
     fullyReceivedByLines: boolean;
     sourceDocument: string;
     notesPreview: string;
+    /** The purchase-order fields that were read as notes. */
+    notesFieldNames: string[];
     parsed: Array<{ blNumber: string; containerNo: string; units: number; from: "Source Document" | "Notes" }>;
     /** Plain-language reasons the order would be missing from the list (empty = it is listed). */
     reasons: string[];
@@ -10081,7 +10161,7 @@ export async function diagnosePoTracking(credentials: OdooCredentials, poName: s
     const name = poName.trim();
     const empty: PoTrackingDiagnosis = {
         found: false, name, state: "", types: [], isImportedType: false, receiptStatus: "", fullyReceivedByLines: false,
-        sourceDocument: "", notesPreview: "", parsed: [], reasons: [],
+        sourceDocument: "", notesPreview: "", notesFieldNames: [], parsed: [], reasons: [],
     };
     if (!name) {
         return { ...empty, reasons: ["Enter a PO number, e.g. P11789."] };
@@ -10090,9 +10170,10 @@ export async function diagnosePoTracking(credentials: OdooCredentials, poName: s
     const typeField = await discoverTypeField(credentials, uid, "purchase.order", PURCHASE_TYPE_FIELD_SPEC);
     const typeOptions = typeField ? await getTypeFieldOptions(credentials, uid, "purchase.order", PURCHASE_TYPE_FIELD_SPEC) : [];
 
-    const orderFields = await executeKw<Record<string, unknown>>(credentials, uid, "purchase.order", "fields_get", [], { attributes: ["type"] });
+    const orderFields = await executeKw<Record<string, { type?: string; string?: string; relation?: string }>>(credentials, uid, "purchase.order", "fields_get", [], { attributes: ["type", "string", "relation"] });
     const hasField = (field: string) => Object.prototype.hasOwnProperty.call(orderFields, field);
-    const fields = ["name", "state", "origin", "notes", "receipt_status", typeField?.fieldName ?? ""].filter((field) => field && hasField(field));
+    const noteFields = findPoNoteFields(orderFields);
+    const fields = ["name", "state", "origin", ...noteFields, "receipt_status", typeField?.fieldName ?? ""].filter((field) => field && hasField(field));
 
     let orders = await executeKw<Array<Record<string, unknown>>>(credentials, uid, "purchase.order", "search_read", [[["name", "=", name]]], { fields, limit: 1 });
     if (orders.length === 0) {
@@ -10105,7 +10186,7 @@ export async function diagnosePoTracking(credentials: OdooCredentials, poName: s
 
     const state = toDisplayString(order.state);
     const origin = toDisplayString(order.origin);
-    const notes = htmlToPlainText(toDisplayString(order.notes)).trim();
+    const notes = (await buildPoNoteTexts(credentials, uid, [order], noteFields, orderFields)).get(Number(order.id)) ?? "";
 
     let typeKeys: string[] = [];
     if (typeField) {
@@ -10142,6 +10223,7 @@ export async function diagnosePoTracking(credentials: OdooCredentials, poName: s
         fullyReceivedByLines,
         sourceDocument: origin,
         notesPreview: notes.slice(0, 400),
+        notesFieldNames: noteFields.map((field) => `${toDisplayString(orderFields[field]?.string) || field} (${field}, ${orderFields[field]?.type ?? "?"})`),
         parsed: parsed.map((entry) => ({ blNumber: entry.blNumber, containerNo: entry.containerNo, units: entry.quantity, from: entry.from })),
         reasons,
     };

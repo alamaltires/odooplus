@@ -909,6 +909,8 @@ function PoCheck() {
                                     <dd>{result.types.length ? result.types.join(", ") : "—"}</dd>
                                     <dt className="text-(--ink-soft)">Source Document</dt>
                                     <dd className="break-words">{result.sourceDocument || "—"}</dd>
+                                    <dt className="text-(--ink-soft)">Notes fields read</dt>
+                                    <dd className="break-words">{result.notesFieldNames.length ? result.notesFieldNames.join(", ") : "none found"}</dd>
                                     <dt className="text-(--ink-soft)">Notes</dt>
                                     <dd className="whitespace-pre-wrap break-words">{result.notesPreview || "—"}</dd>
                                     <dt className="text-(--ink-soft)">B/L found</dt>
