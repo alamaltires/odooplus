@@ -25,6 +25,7 @@ import { printPaymentFollowupPdf } from "@/lib/payment-followup-pdf";
 import { documentBadgeClass, documentTypeLabel, isCreditSide, signedResidual } from "@/lib/payment-followup-items";
 import { useAuth } from "@/lib/auth-context";
 import { Select2 } from "@/components/select2";
+import { PartnerLedgerSection } from "@/components/partner-ledger-section";
 import {
     OdooCustomerOption,
     OdooSalesperson,
@@ -920,12 +921,14 @@ function CustomerCard({
     onToggle,
     currencyCode,
     agingSystem,
+    asOfDate,
 }: {
     row: PaymentFollowupCustomerRow;
     expanded: boolean;
     onToggle: () => void;
     currencyCode: string;
     agingSystem: AgingSystem;
+    asOfDate: string;
 }) {
     const meta = agingMetaFor(row.agingBucket, agingSystem);
 
@@ -975,6 +978,7 @@ function CustomerCard({
                     <InvoicesTable rows={row.invoices} currencyCode={row.currencyCode || currencyCode} />
                     <UnappliedTable rows={row.unappliedPayments} currencyCode={row.currencyCode || currencyCode} />
                     <ChequesTable rows={row.cheques} currencyCode={row.currencyCode || currencyCode} />
+                    <PartnerLedgerSection customerId={row.customerId} asOfDate={asOfDate} />
                 </div>
             ) : null}
         </div>
@@ -1514,6 +1518,7 @@ export default function PaymentFollowupPage() {
                                     onToggle={() => toggleExpanded(row.customerId)}
                                     currencyCode={report.currencyCode}
                                     agingSystem={report.agingSystem}
+                                    asOfDate={report.asOfDate}
                                 />
                             ))}
                         </div>

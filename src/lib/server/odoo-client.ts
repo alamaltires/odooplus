@@ -3,6 +3,7 @@ import {
     OdooCredentials,
     OdooCustomerActivityReport,
     OdooDashboardActivityType,
+    OdooPartnerLedger,
     OdooOrderLineInput,
 } from "@/types/odoo";
 
@@ -4363,6 +4364,81 @@ function resolveAgingBucket(
     return getAgingBucketByMonth(referenceDateIso ? monthsElapsedBetween(referenceDateIso, asOfDateIso) : 0);
 }
 
+/**
+ * A cancelled cheque never paid anything. If its receivable item was nevertheless
+ * matched to customer invoices, Odoo shows those invoices as (partly) paid — so
+ * the matched amount is put back on each invoice: onto its open residual, or, for
+ * an invoice Odoo now lists as fully paid, as a new open item for just that amount.
+ */
+async function reopenInvoicesPaidByCancelledCheques(
+    credentials: OdooCredentials,
+    uid: number,
+    chequeLineIds: number[],
+    customerIds: number[],
+    invoices: Array<Record<string, unknown>>
+): Promise<void> {
+    if (chequeLineIds.length === 0) {
+        return;
+    }
+
+    const partials = await searchReadAll(
+        credentials,
+        uid,
+        "account.partial.reconcile",
+        [["credit_move_id", "in", chequeLineIds]],
+        ["debit_move_id", "debit_amount_currency"]
+    );
+    const debitLineIds = Array.from(new Set(partials.map((partial) => getRelationalId(partial.debit_move_id)).filter((id): id is number => !!id)));
+    if (debitLineIds.length === 0) {
+        return;
+    }
+
+    const debitLines = await readInBatches(credentials, uid, "account.move.line", debitLineIds, ["id", "move_id"]);
+    const moveIdByDebitLineId = new Map(debitLines.map((line) => [Number(line.id), getRelationalId(line.move_id)]));
+
+    const reopenedByMoveId = new Map<number, number>();
+    for (const partial of partials) {
+        const moveId = moveIdByDebitLineId.get(getRelationalId(partial.debit_move_id) ?? 0);
+        if (!moveId) continue;
+        reopenedByMoveId.set(moveId, (reopenedByMoveId.get(moveId) ?? 0) + Number(partial.debit_amount_currency ?? 0));
+    }
+
+    const openById = new Map(invoices.map((invoice) => [Number(invoice.id), invoice]));
+    const missingMoveIds: number[] = [];
+    for (const [moveId, amount] of reopenedByMoveId) {
+        const open = openById.get(moveId);
+        if (open) {
+            open.amount_residual = Number(open.amount_residual ?? 0) + amount;
+        } else if (amount > 0.005) {
+            missingMoveIds.push(moveId);
+        }
+    }
+
+    if (missingMoveIds.length === 0) {
+        return;
+    }
+    const customerIdSet = new Set(customerIds);
+    const paidInvoices = await readInBatches(credentials, uid, "account.move", missingMoveIds, [
+        "id",
+        "name",
+        "move_type",
+        "state",
+        "commercial_partner_id",
+        "invoice_date",
+        "invoice_date_due",
+        "invoice_payment_term_id",
+        "amount_total",
+        "currency_id",
+    ]);
+    for (const invoice of paidInvoices) {
+        const partnerId = getRelationalId(invoice.commercial_partner_id);
+        if (invoice.move_type !== "out_invoice" || invoice.state !== "posted" || !partnerId || !customerIdSet.has(partnerId)) {
+            continue;
+        }
+        invoices.push({ ...invoice, amount_residual: reopenedByMoveId.get(Number(invoice.id)) ?? 0 });
+    }
+}
+
 /** Whether a PDC cheque record's own state says it was cancelled. */
 function isPdcCancelled(pdcInfo: PdcModelInfo, record: Record<string, unknown>): boolean {
     const raw = pdcInfo.stateField ? toDisplayString(record[pdcInfo.stateField]) : "";
@@ -4370,7 +4446,7 @@ function isPdcCancelled(pdcInfo: PdcModelInfo, record: Record<string, unknown>):
     return /cancel/i.test(raw) || /cancel/i.test(label);
 }
 
-type PdcReceivableMatch = { matched: boolean; unmatchedRatio: number; unmatchedLineIds: number[] };
+type PdcReceivableMatch = { matched: boolean; unmatchedRatio: number; unmatchedLineIds: number[]; lineIds: number[] };
 
 /**
  * For each PDC cheque record, whether its Accounts Receivable journal item is
@@ -4393,9 +4469,10 @@ async function getPdcReceivableMatches(
         return result;
     }
 
-    type Totals = { balance: number; residual: number; unmatchedLineIds: number[] };
+    type Totals = { balance: number; residual: number; unmatchedLineIds: number[]; lineIds: number[] };
     const add = (map: Map<number, Totals>, key: number, line: Record<string, unknown>) => {
-        const totals = map.get(key) ?? { balance: 0, residual: 0, unmatchedLineIds: [] };
+        const totals = map.get(key) ?? { balance: 0, residual: 0, unmatchedLineIds: [], lineIds: [] };
+        totals.lineIds.push(Number(line.id));
         totals.balance += Math.abs(Number(line.balance ?? 0));
         totals.residual += Math.abs(Number(line.amount_residual ?? 0));
         if (Math.abs(Number(line.amount_residual ?? 0)) >= 0.005) totals.unmatchedLineIds.push(Number(line.id));
@@ -4403,7 +4480,7 @@ async function getPdcReceivableMatches(
     };
     const finish = (recordId: number, totals: Totals) => {
         const unmatchedRatio = totals.balance > 0 ? Math.min(Math.max(totals.residual / totals.balance, 0), 1) : 0;
-        result.set(recordId, { matched: totals.residual < 0.005, unmatchedRatio, unmatchedLineIds: totals.unmatchedLineIds });
+        result.set(recordId, { matched: totals.residual < 0.005, unmatchedRatio, unmatchedLineIds: totals.unmatchedLineIds, lineIds: totals.lineIds });
     };
 
     // 1. Direct: receivable journal items that point at the cheque record itself.
@@ -4743,6 +4820,21 @@ async function buildPaymentFollowupReport(
         }
     }
 
+    // Cancelled cheques are never received payments. Their receivable items must
+    // not count as unapplied credit, and invoices they were matched to reopen.
+    const cancelledChequeLineIds = new Set<number>();
+    if (pdcInfo) {
+        for (const record of pdcRecords) {
+            if (!isPdcCancelled(pdcInfo, record)) continue;
+            for (const lineId of receivableMatchByRecordId.get(Number(record.id))?.lineIds ?? []) cancelledChequeLineIds.add(lineId);
+        }
+        try {
+            await reopenInvoicesPaidByCancelledCheques(credentials, uid, Array.from(cancelledChequeLineIds), customerIds, invoices);
+        } catch {
+            // If reconciliation details can't be read, the invoices simply stay as Odoo shows them.
+        }
+    }
+
     // Resolve each cheque's own partner to the canonical (commercial)
     // customer it should be grouped under, same as the invoice/unapplied
     // sections — the query above matches on `commercial_partner_id` but
@@ -4962,6 +5054,8 @@ async function buildPaymentFollowupReport(
     }
 
     for (const line of unappliedLines) {
+        // A cancelled cheque's receivable item is not money received.
+        if (cancelledChequeLineIds.has(Number(line.id))) continue;
         const move = unappliedMoveById.get(getRelationalId(line.move_id) ?? -1);
         const customerId = move ? getRelationalId(move.commercial_partner_id) : null;
         if (!customerId) continue;
@@ -10464,5 +10558,128 @@ export async function getCustomerActivityReport(
         topBrands: brandReport.topBrands,
         topCategories: brandReport.topCategories,
         brandTree: brandReport.brandTree,
+    };
+}
+
+/**
+ * The customer's partner ledger, built the way Odoo's Partner Ledger report is:
+ * straight from the posted journal items on receivable and payable accounts —
+ * invoices, credit notes, payments, manual (MISC/…) entries and every other
+ * entry that touches the partner — with each item's debit, credit and the
+ * running balance. By default only items that are not fully matched are listed.
+ */
+export async function getPartnerLedger(
+    credentials: OdooCredentials,
+    input: { customerId: number; asOfDate: string; unreconciledOnly?: boolean }
+): Promise<OdooPartnerLedger> {
+    const uid = await authenticate(credentials);
+    const customerId = Number(input.customerId);
+    if (!Number.isFinite(customerId) || customerId <= 0) {
+        throw new Error("A valid customer is required.");
+    }
+    const unreconciledOnly = input.unreconciledOnly !== false;
+    const asOfDate = input.asOfDate || new Date().toISOString().slice(0, 10);
+
+    const commercial = await getCommercialPartner(credentials, uid, customerId);
+    const commercialPartnerId = Number(commercial.id ?? 0);
+
+    // Odoo 17+ keeps the receivable/payable distinction on account_type; older versions one hop away.
+    const accountFields = await executeKw<Record<string, unknown>>(credentials, uid, "account.account", "fields_get", [["account_type"]], { attributes: ["type"] });
+    const accountTypeDomain: unknown = accountFields.account_type
+        ? ["account_id.account_type", "in", ["asset_receivable", "liability_payable"]]
+        : ["account_id.user_type_id.type", "in", ["receivable", "payable"]];
+
+    const lineFieldMeta = await executeKw<Record<string, unknown>>(
+        credentials,
+        uid,
+        "account.move.line",
+        "fields_get",
+        [["matching_number", "full_reconcile_id", "company_currency_id", "amount_residual"]],
+        { attributes: ["type"] }
+    );
+
+    const domain: unknown[] = [
+        ["partner_id", "child_of", commercialPartnerId],
+        ["parent_state", "=", "posted"],
+        ["date", "<=", asOfDate],
+        accountTypeDomain,
+    ];
+    if (unreconciledOnly) {
+        domain.push(["reconciled", "=", false]);
+    }
+
+    const fields = [
+        "date",
+        "date_maturity",
+        "move_id",
+        "move_name",
+        "journal_id",
+        "account_id",
+        "name",
+        "ref",
+        "debit",
+        "credit",
+        "balance",
+        "amount_currency",
+        "currency_id",
+        "reconciled",
+        ...Object.keys(lineFieldMeta),
+    ];
+    const lines = await searchReadAll(credentials, uid, "account.move.line", domain, Array.from(new Set(fields)));
+    lines.sort((a, b) => toDisplayString(a.date).localeCompare(toDisplayString(b.date)) || Number(a.id) - Number(b.id));
+
+    // Receivable vs payable, by account.
+    const accountIds = Array.from(new Set(lines.map((line) => getRelationalId(line.account_id)).filter((id): id is number => !!id)));
+    const accounts = accountIds.length > 0 ? await readInBatches(credentials, uid, "account.account", accountIds, ["id", accountFields.account_type ? "account_type" : "user_type_id"]) : [];
+    const kindByAccountId = new Map<number, "receivable" | "payable">();
+    for (const account of accounts) {
+        const type = accountFields.account_type ? toDisplayString(account.account_type) : getRelationalName(account.user_type_id).toLowerCase();
+        kindByAccountId.set(Number(account.id), /payable/.test(type) ? "payable" : "receivable");
+    }
+
+    let running = 0;
+    let totalDebit = 0;
+    let totalCredit = 0;
+    let currencyCode = "";
+    const rows = lines.map((line) => {
+        const debit = Number(line.debit ?? 0);
+        const credit = Number(line.credit ?? 0);
+        running += debit - credit;
+        totalDebit += debit;
+        totalCredit += credit;
+        if (!currencyCode) currencyCode = getRelationalName(line.company_currency_id);
+        const ownCurrency = getRelationalName(line.currency_id);
+        const sameCurrency = !ownCurrency || ownCurrency === getRelationalName(line.company_currency_id);
+        return {
+            id: Number(line.id),
+            date: toDisplayString(line.date),
+            dueDate: toDisplayString(line.date_maturity),
+            entry: getRelationalName(line.move_id) || toDisplayString(line.move_name),
+            journal: getRelationalName(line.journal_id),
+            account: getRelationalName(line.account_id),
+            kind: kindByAccountId.get(getRelationalId(line.account_id) ?? 0) ?? "receivable",
+            label: toDisplayString(line.name),
+            reference: toDisplayString(line.ref),
+            matching: toDisplayString(line.matching_number) || (line.full_reconcile_id ? "Matched" : ""),
+            debit: Number(debit.toFixed(2)),
+            credit: Number(credit.toFixed(2)),
+            balance: Number(running.toFixed(2)),
+            amountCurrency: sameCurrency ? 0 : Number(Number(line.amount_currency ?? 0).toFixed(2)),
+            currencyCode: sameCurrency ? "" : ownCurrency,
+            residual: Number(Math.abs(Number(line.amount_residual ?? 0)).toFixed(2)),
+        } as OdooPartnerLedger["rows"][number];
+    });
+
+    return {
+        customerName: toDisplayString(commercial.name ?? commercial.display_name),
+        asOfDate,
+        unreconciledOnly,
+        currencyCode: currencyCode || TARGET_CURRENCY_CODE,
+        rows,
+        totals: {
+            debit: Number(totalDebit.toFixed(2)),
+            credit: Number(totalCredit.toFixed(2)),
+            balance: Number((totalDebit - totalCredit).toFixed(2)),
+        },
     };
 }

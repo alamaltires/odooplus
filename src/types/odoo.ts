@@ -519,3 +519,36 @@ export type OdooCustomerActivityReport = {
     topCategories: OdooCustomerBrandSummary[];
     brandTree: OdooCustomerSalesBrand[];
 };
+
+export type OdooPartnerLedgerRow = {
+    id: number;
+    date: string;
+    dueDate: string;
+    /** The journal entry's number, e.g. INV/2026/00012, MISC/2026/…, BNK1/… */
+    entry: string;
+    journal: string;
+    account: string;
+    kind: "receivable" | "payable";
+    label: string;
+    reference: string;
+    /** Odoo's matching number (e.g. "A123"), blank when not matched at all. */
+    matching: string;
+    debit: number;
+    credit: number;
+    /** Running balance after this item (debit - credit), in company currency. */
+    balance: number;
+    /** Amount in the item's own currency, when it isn't the company currency. */
+    amountCurrency: number;
+    currencyCode: string;
+    /** What is still open on the item, in company currency (0 when fully matched). */
+    residual: number;
+};
+
+export type OdooPartnerLedger = {
+    customerName: string;
+    asOfDate: string;
+    unreconciledOnly: boolean;
+    currencyCode: string;
+    rows: OdooPartnerLedgerRow[];
+    totals: { debit: number; credit: number; balance: number };
+};

@@ -8,6 +8,7 @@ import {
     OdooDashboardStats,
     OdooCustomerActivityReport,
     OdooCustomerReport,
+    OdooPartnerLedger,
     OdooNearExpiryProduct,
     OdooProductOption,
     OdooSalesperson,
@@ -764,4 +765,8 @@ export function diagnosePoTracking(poName: string) {
 
 export function getCustomerActivityReport(input: { customerId: number; startDate: string; endDate: string }) {
     return post<OdooCustomerActivityReport>("/api/odoo/customer-activity-report", input);
+}
+
+export function getPartnerLedger(input: { customerId: number; asOfDate: string; unreconciledOnly?: boolean }) {
+    return post<OdooPartnerLedger>("/api/odoo/partner-ledger", input);
 }
