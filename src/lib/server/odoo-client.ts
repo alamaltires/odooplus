@@ -9891,6 +9891,39 @@ function parsePoTrackingText(text: string): ParsedTrackingEntry[] {
     return found;
 }
 
+/** Leading "B/L:", "BL", "B.L.", "B/L No." … label on a note line. */
+const BL_PREFIX = /^\s*(?:B\s*\/\s*L|B\.\s*L\.?|BL(?![A-Za-z])|Bill\s+of\s+Lading)\s*(?:No\.?|number|#)?\s*[:\-#]?\s*/i;
+
+/**
+ * The B/L numbers written in a PO's Notes. Each line (or comma / semicolon
+ * separated piece) is either "B/L:XXXX" — the label is cut off — or just the
+ * number itself. Lines that carry more (a "Container … Seal … B/L" entry, or a
+ * "REF - B/L - containers - …" line) are read by `parsePoTrackingText` so their
+ * containers and units still come through. Free-text notes (words with spaces)
+ * are never mistaken for a B/L.
+ */
+function parsePoTrackingNotes(text: string): ParsedTrackingEntry[] {
+    const found: ParsedTrackingEntry[] = [];
+
+    for (const line of text.split(/\n+/)) {
+        const rich = parsePoTrackingText(line);
+        if (rich.length > 0) {
+            found.push(...rich);
+            continue;
+        }
+
+        for (const piece of line.split(/[;,]/)) {
+            const candidate = piece.replace(BL_PREFIX, "").trim();
+            // One token, with at least one digit — real B/L numbers are references, not words.
+            if (!/^[A-Za-z0-9][A-Za-z0-9\-\/_.]{4,}$/.test(candidate) || !/\d/.test(candidate)) {
+                continue;
+            }
+            found.push({ index: 1, containerNo: "", sealNo: "", blNumber: candidate.toUpperCase(), quantity: 0, label: piece.trim() });
+        }
+    }
+    return found;
+}
+
 /**
  * Confirmed purchase orders whose Purchase Type name contains "Import",
  * with the container / seal / B/L read from the section rows on their
@@ -9936,7 +9969,7 @@ export async function getImportedPurchaseOrdersForTracking(
         domain.push(["receipt_status", "!=", "full"]);
     }
 
-    const readFields = ["name", "partner_id", "partner_ref", "origin", "notes", "date_order", "date_planned", "currency_id", typeField.fieldName]
+    const readFields = ["name", "partner_id", "partner_ref", "notes", "date_order", "date_planned", "currency_id", typeField.fieldName]
         .filter((name, index, all) => all.indexOf(name) === index && hasField(name));
 
     const orders = await executeKw<Array<Record<string, unknown>>>(
@@ -9960,9 +9993,9 @@ export async function getImportedPurchaseOrdersForTracking(
         ["order_id", "display_type", "product_qty", "qty_received"]
     );
 
-    // Container / seal / B/L come from the PO's own Source Document, falling
-    // back to its Notes — the product lines are only used for quantities and
-    // to tell whether the order has been received.
+    // The B/L (and any containers written with it) come from the PO's Notes —
+    // the product lines are only used for quantities and to tell whether the
+    // order has been received.
     const totalQtyByOrderId = new Map<number, number>();
     const fullyReceivedByOrderId = new Map<number, boolean>();
 
@@ -9985,10 +10018,8 @@ export async function getImportedPurchaseOrdersForTracking(
     const result: PoTrackingOrder[] = [];
     for (const order of orders) {
         const id = Number(order.id ?? 0);
-        let parsed = parsePoTrackingText(toDisplayString(order.origin));
-        if (parsed.length === 0) {
-            parsed = parsePoTrackingText(htmlToPlainText(toDisplayString(order.notes)));
-        }
+        // The B/L always comes from the PO's Notes.
+        const parsed = parsePoTrackingNotes(htmlToPlainText(toDisplayString(order.notes)));
         // A container listed twice (same number) is one container.
         const seen = new Set<string>();
         const containers: PoTrackingContainer[] = parsed.filter((entry) => {
@@ -10087,8 +10118,7 @@ export async function diagnosePoTracking(credentials: OdooCredentials, poName: s
     const types = typeKeys.map((key) => labelByValue.get(key) ?? key);
     const isImportedType = types.some((label) => /import/i.test(label));
 
-    const fromSource = parsePoTrackingText(origin).map((entry) => ({ ...entry, from: "Source Document" as const }));
-    const parsed = fromSource.length > 0 ? fromSource : parsePoTrackingText(notes).map((entry) => ({ ...entry, from: "Notes" as const }));
+    const parsed = parsePoTrackingNotes(notes).map((entry) => ({ ...entry, from: "Notes" as const }));
 
     const lines = await searchReadAll(credentials, uid, "purchase.order.line", [["order_id", "=", Number(order.id)]], ["display_type", "product_qty", "qty_received"]);
     const productLines = lines.filter((line) => !line.display_type);
@@ -10100,7 +10130,7 @@ export async function diagnosePoTracking(credentials: OdooCredentials, poName: s
     if (!typeField) reasons.push("The Purchase Type field couldn't be found on purchase orders.");
     else if (!isImportedType) reasons.push(`Its Purchase Type is ${types.length ? `"${types.join('", "')}"` : "empty"} — none contains the word "Import".`);
     if (receiptStatus === "full" || fullyReceivedByLines) reasons.push('It is fully received, so it is hidden unless "Include fully received" is ticked.');
-    if (parsed.length === 0) reasons.push("No B/L was found in its Source Document or Notes (looking for text like \"B/L:XXXX\").");
+    if (parsed.length === 0) reasons.push("No B/L was found in its Notes (a line like \"B/L:XXXX\", or just the B/L number on its own).");
 
     return {
         found: true,
