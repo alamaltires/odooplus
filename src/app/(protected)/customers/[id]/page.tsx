@@ -159,20 +159,7 @@ export default function CustomerReportPage() {
                         />
                     </div>
 
-                    <div className="grid gap-6 xl:grid-cols-2">
-                        <div className="rounded-2xl border border-(--line) bg-(--card) p-5">
-                            <div>
-                                <h2 className="font-display text-2xl">Most Sold Brands</h2>
-                                <p className="text-sm text-(--ink-soft)">
-                                    Ranked by total confirmed sales. Open a brand to see its categories, then a category to see its products.
-                                </p>
-                            </div>
-
-                            <div className="mt-4">
-                                <BrandSalesTree brands={report.brandTree ?? []} />
-                            </div>
-                        </div>
-
+                    <div className="space-y-6">
                         <div className="rounded-2xl border border-(--line) bg-(--card) p-5">
                             <div>
                                 <h2 className="font-display text-2xl">Most Sold Categories</h2>
@@ -207,6 +194,18 @@ export default function CustomerReportPage() {
                                     </table>
                                 </div>
                             )}
+                        </div>
+                        <div className="rounded-2xl border border-(--line) bg-(--card) p-5">
+                            <div>
+                                <h2 className="font-display text-2xl">Most Sold Brands</h2>
+                                <p className="text-sm text-(--ink-soft)">
+                                    Ranked by total confirmed sales. Open a brand to see its categories, then a category to see its products.
+                                </p>
+                            </div>
+
+                            <div className="mt-4">
+                                <BrandSalesTree brands={report.brandTree ?? []} />
+                            </div>
                         </div>
                     </div>
                 </div>

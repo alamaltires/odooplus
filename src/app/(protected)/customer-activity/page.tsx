@@ -356,20 +356,17 @@ export default function CustomerActivityPage() {
                         <p className="mt-3 text-xs text-(--ink-soft)">The dark tick marks each month&apos;s target. The first and last month count in full against the target even if the range covers only part of them.</p>
                     </Panel>
 
-                    <div className="grid gap-6 xl:grid-cols-2">
-                        <Panel icon={<ShoppingCart className="h-5 w-5" />} title={`Orders in period (${report.orders.length})`}>
-                            <OrdersTable rows={report.orders} empty="No confirmed orders in this period." showGp />
-                        </Panel>
-                        <Panel icon={<FileText className="h-5 w-5" />} title={`Open quotations (${report.openQuotations.length})`}>
-                            <OrdersTable rows={report.openQuotations} empty="No open quotations." />
-                        </Panel>
-                    </div>
+                    <Panel icon={<ShoppingCart className="h-5 w-5" />} title={`Orders in period (${report.orders.length})`}>
+                        <OrdersTable rows={report.orders} empty="No confirmed orders in this period." showGp />
+                    </Panel>
 
-                    <div className="grid gap-6 xl:grid-cols-2">
-                        <Panel icon={<ShoppingCart className="h-5 w-5" />} title="What they buy (all time)">
-                            <BrandSalesTree brands={report.brandTree ?? []} />
-                        </Panel>
-                    </div>
+                    <Panel icon={<FileText className="h-5 w-5" />} title={`Open quotations (${report.openQuotations.length})`}>
+                        <OrdersTable rows={report.openQuotations} empty="No open quotations." />
+                    </Panel>
+
+                    <Panel icon={<ShoppingCart className="h-5 w-5" />} title="What they buy (all time)">
+                        <BrandSalesTree brands={report.brandTree ?? []} />
+                    </Panel>
                 </div>
             ) : null}
         </section>

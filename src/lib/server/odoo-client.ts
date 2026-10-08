@@ -6872,6 +6872,99 @@ type UnlinkedValuationLayer = {
 };
 
 /**
+ * For a Unified Lot report: what share of each purchase line's (and each
+ * receipt's) incoming quantity went into the selected lots. A single PO line is
+ * routinely received into several lots at once (e.g. L-2025 and L-2026), so
+ * counting the whole line whenever ANY of it landed in the selected lot
+ * overstates quantity, value, landed cost and corrections for that lot.
+ * Receipts add; returns to the vendor subtract; internal moves are ignored.
+ * A line or move with no incoming quantity at all gets no entry (treated as 0).
+ */
+async function getPurchaseLotFractions(
+    credentials: OdooCredentials,
+    uid: number,
+    purchaseLineIds: number[],
+    lotIds: number[]
+): Promise<{ byLineId: Map<number, number>; byMoveId: Map<number, number> }> {
+    const byLineId = new Map<number, number>();
+    const byMoveId = new Map<number, number>();
+    if (purchaseLineIds.length === 0 || lotIds.length === 0) {
+        return { byLineId, byMoveId };
+    }
+
+    const moves = await searchReadAll(
+        credentials,
+        uid,
+        "stock.move",
+        [["purchase_line_id", "in", purchaseLineIds], ["state", "=", "done"]],
+        ["purchase_line_id"]
+    );
+    const lineIdByMoveId = new Map<number, number>();
+    for (const move of moves) {
+        const lineId = getRelationalId(move.purchase_line_id);
+        if (lineId) lineIdByMoveId.set(Number(move.id), lineId);
+    }
+    if (lineIdByMoveId.size === 0) {
+        return { byLineId, byMoveId };
+    }
+
+    const moveLines = await searchReadAll(
+        credentials,
+        uid,
+        "stock.move.line",
+        [["move_id", "in", Array.from(lineIdByMoveId.keys())], ["state", "=", "done"]],
+        ["move_id", "quantity", "qty_done", "lot_id", "location_id", "location_dest_id"]
+    );
+
+    const locationIds = Array.from(
+        new Set(
+            moveLines
+                .flatMap((line) => [getRelationalId(line.location_id), getRelationalId(line.location_dest_id)])
+                .filter((id): id is number => typeof id === "number" && id > 0)
+        )
+    );
+    const usageById = new Map<number, string>();
+    if (locationIds.length > 0) {
+        for (const location of await readInBatches(credentials, uid, "stock.location", locationIds, ["id", "usage"])) {
+            usageById.set(Number(location.id), toDisplayString(location.usage));
+        }
+    }
+
+    const lotSet = new Set(lotIds);
+    const perMove = new Map<number, { lot: number; total: number }>();
+    for (const line of moveLines) {
+        const moveId = getRelationalId(line.move_id);
+        if (!moveId) continue;
+        const sourceUsage = usageById.get(getRelationalId(line.location_id) ?? 0);
+        const destUsage = usageById.get(getRelationalId(line.location_dest_id) ?? 0);
+        const rawQty = Number(line.quantity ?? line.qty_done ?? 0);
+        const signed = destUsage === "internal" && sourceUsage !== "internal" ? rawQty : sourceUsage === "internal" && destUsage !== "internal" ? -rawQty : 0;
+        if (signed === 0) continue;
+
+        const entry = perMove.get(moveId) ?? { lot: 0, total: 0 };
+        entry.total += signed;
+        const lotId = getRelationalId(line.lot_id);
+        if (lotId && lotSet.has(lotId)) entry.lot += signed;
+        perMove.set(moveId, entry);
+    }
+
+    const perLine = new Map<number, { lot: number; total: number }>();
+    for (const [moveId, entry] of perMove) {
+        byMoveId.set(moveId, entry.total > 0 ? Math.min(Math.max(entry.lot / entry.total, 0), 1) : 0);
+        const lineId = lineIdByMoveId.get(moveId);
+        if (!lineId) continue;
+        const lineEntry = perLine.get(lineId) ?? { lot: 0, total: 0 };
+        lineEntry.lot += entry.lot;
+        lineEntry.total += entry.total;
+        perLine.set(lineId, lineEntry);
+    }
+    for (const [lineId, entry] of perLine) {
+        byLineId.set(lineId, entry.total > 0 ? Math.min(Math.max(entry.lot / entry.total, 0), 1) : 0);
+    }
+    return { byLineId, byMoveId };
+}
+
+/**
  * "Unlinked valuation adjustments": stock.valuation.layer rows that change a
  * product's inventory value (e.g. a manual cost correction posted through a
  * vendor bill) but have no quantity, no stock move, no landed cost and
@@ -7499,6 +7592,15 @@ export async function getMarginAnalyticsReport(
 
     await ensureCurrencyMultipliers(purchaseLines.map((line) => getRelationalId(line.currency_id)));
 
+    // With a Unified Lot selected, only the share of each line received into the
+    // selected lot(s) counts — not the whole line (see `getPurchaseLotFractions`).
+    const selectedLotIds = unifiedLotProductLots
+        ? unifiedLotProductLots.filter((entry) => finalProductIds.includes(entry.productId)).map((entry) => entry.lotId)
+        : null;
+    const lotFractions = selectedLotIds
+        ? await getPurchaseLotFractions(credentials, uid, purchaseLines.map((line) => Number(line.id)).filter((id) => id > 0), selectedLotIds)
+        : null;
+
     const purchaseLineIds: number[] = [];
 
     for (const line of purchaseLines) {
@@ -7519,10 +7621,11 @@ export async function getMarginAnalyticsReport(
         const orderedQty = Number(line.product_qty ?? 0);
         const lineSubtotal = Number(line.price_subtotal ?? 0);
         const unitPrice = orderedQty > 0 ? lineSubtotal / orderedQty : 0;
-        const qty =
+        const billableQty =
             dateBasis === "transaction"
                 ? Number(line.qty_invoiced ?? 0)
                 : Number(line.qty_to_invoice ?? 0) + Number(line.qty_invoiced ?? 0);
+        const qty = lotFractions ? billableQty * (lotFractions.byLineId.get(lineId) ?? 0) : billableQty;
         if (qty <= 0) {
             continue;
         }
@@ -7575,7 +7678,7 @@ export async function getMarginAnalyticsReport(
             "stock.valuation.adjustment.lines",
             "search_read",
             [[["move_id", "in", landedCostMoveIds]]],
-            { fields: ["product_id", "additional_landed_cost", "currency_id"], limit: 50000 }
+            { fields: ["product_id", "move_id", "additional_landed_cost", "currency_id"], limit: 50000 }
         );
 
         await ensureCurrencyMultipliers(valuationLines.map((line) => getRelationalId(line.currency_id)));
@@ -7583,6 +7686,11 @@ export async function getMarginAnalyticsReport(
         for (const line of valuationLines) {
             const id = getRelationalId(line.product_id);
             if (!id) {
+                continue;
+            }
+            // Only the share of this receipt that went into the selected lot(s).
+            const moveFraction = lotFractions ? lotFractions.byMoveId.get(getRelationalId(line.move_id) ?? 0) ?? 0 : 1;
+            if (moveFraction <= 0) {
                 continue;
             }
 
@@ -7597,7 +7705,7 @@ export async function getMarginAnalyticsReport(
                 continue;
             }
 
-            const amount = Number(line.additional_landed_cost ?? 0) * multiplier;
+            const amount = Number(line.additional_landed_cost ?? 0) * multiplier * moveFraction;
             landedCostByProductId.set(id, (landedCostByProductId.get(id) ?? 0) + amount);
         }
     }
@@ -7828,7 +7936,9 @@ export async function getMarginAnalyticsReport(
                         continue;
                     }
 
-                    const share = Number(line.price_subtotal ?? 0) / orderTotal;
+                    // With a Unified Lot, only the share of the line received into it.
+                    const lineFraction = lotFractions ? lotFractions.byLineId.get(Number(line.id ?? 0)) ?? 0 : 1;
+                    const share = (Number(line.price_subtotal ?? 0) / orderTotal) * lineFraction;
                     const allocated = orderCorrection * share;
                     operationCostByProductId.set(productId, (operationCostByProductId.get(productId) ?? 0) + allocated);
                 }
@@ -8607,6 +8717,11 @@ export async function getMarginAnalyticsBreakdown(
     );
     await ensureCurrencyMultipliers(poLines.map((line) => getRelationalId(line.currency_id)));
 
+    // With a Unified Lot, only the share of each line received into it counts.
+    const lotFractions = unifiedLotIdsForProduct
+        ? await getPurchaseLotFractions(credentials, uid, poLines.map((line) => Number(line.id)).filter((id) => id > 0), unifiedLotIdsForProduct)
+        : null;
+
     const orderIds = Array.from(
         new Set(
             poLines
@@ -8637,10 +8752,11 @@ export async function getMarginAnalyticsBreakdown(
         const orderedQty = Number(line.product_qty ?? 0);
         const subtotal = Number(line.price_subtotal ?? 0);
         const unitPrice = orderedQty > 0 ? subtotal / orderedQty : 0;
-        const qty =
+        const billableQty =
             dateBasis === "transaction"
                 ? Number(line.qty_invoiced ?? 0)
                 : Number(line.qty_to_invoice ?? 0) + Number(line.qty_invoiced ?? 0);
+        const qty = lotFractions ? billableQty * (lotFractions.byLineId.get(lineId) ?? 0) : billableQty;
         if (qty <= 0) {
             continue;
         }
@@ -8702,7 +8818,10 @@ export async function getMarginAnalyticsBreakdown(
             credentials,
             uid,
             "stock.move.line",
-            [["move_id", "in", landedCostMoveIds], ["lot_id", "!=", false]],
+            [
+                ["move_id", "in", landedCostMoveIds],
+                unifiedLotIdsForProduct ? ["lot_id", "in", unifiedLotIdsForProduct] : ["lot_id", "!=", false],
+            ],
             ["move_id", "lot_id"]
         );
         const lotNames = Array.from(
@@ -8744,8 +8863,13 @@ export async function getMarginAnalyticsBreakdown(
             if (multiplier === undefined) {
                 continue;
             }
-            const amount = Number(line.additional_landed_cost ?? 0) * multiplier;
-            const qty = Number(line.quantity ?? 0);
+            // Only the share of this receipt that went into the selected lot(s).
+            const moveFraction = lotFractions ? lotFractions.byMoveId.get(getRelationalId(line.move_id) ?? 0) ?? 0 : 1;
+            if (moveFraction <= 0) {
+                continue;
+            }
+            const amount = Number(line.additional_landed_cost ?? 0) * multiplier * moveFraction;
+            const qty = Number(line.quantity ?? 0) * moveFraction;
 
             landedCosts.push({
                 reference: toDisplayString(cost?.name) || `Landed cost #${costId ?? "?"}`,
@@ -8903,7 +9027,9 @@ export async function getMarginAnalyticsBreakdown(
                 const subtotal = Number(line.price_subtotal ?? 0);
                 orderTotalById.set(orderId, (orderTotalById.get(orderId) ?? 0) + subtotal);
                 if (getRelationalId(line.product_id) === productId) {
-                    productShareById.set(orderId, (productShareById.get(orderId) ?? 0) + subtotal);
+                    // With a Unified Lot, only the share of the line received into it.
+                    const lineFraction = lotFractions ? lotFractions.byLineId.get(Number(line.id ?? 0)) ?? 0 : 1;
+                    productShareById.set(orderId, (productShareById.get(orderId) ?? 0) + subtotal * lineFraction);
                 }
             }
 
