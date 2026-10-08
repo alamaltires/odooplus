@@ -4363,6 +4363,13 @@ function resolveAgingBucket(
     return getAgingBucketByMonth(referenceDateIso ? monthsElapsedBetween(referenceDateIso, asOfDateIso) : 0);
 }
 
+/** Whether a PDC cheque record's own state says it was cancelled. */
+function isPdcCancelled(pdcInfo: PdcModelInfo, record: Record<string, unknown>): boolean {
+    const raw = pdcInfo.stateField ? toDisplayString(record[pdcInfo.stateField]) : "";
+    const label = pdcInfo.stateFieldSelectionLabelByValue?.[raw] ?? raw;
+    return /cancel/i.test(raw) || /cancel/i.test(label);
+}
+
 type PdcReceivableMatch = { matched: boolean; unmatchedRatio: number; unmatchedLineIds: number[] };
 
 /**
@@ -5074,9 +5081,11 @@ async function buildPaymentFollowupReport(
             // instead) — "Pending" specifically means not yet handed to the
             // bank at all, so `totalPdcPending` never double-counts what
             // `totalPdcDeposited` already shows.
+            const isCancelled = isPdcCancelled(pdcInfo, record);
             const isPending =
                 (pdcInfo.pendingField ? !record[pdcInfo.pendingField] : lowerStateLabel.includes("regist")) &&
-                !isDeposited;
+                !isDeposited &&
+                !isCancelled;
             // Whether the cheque's receivable journal item is matched only drives the
             // deduction from what the customer owes (see `pdcUnmatchedCreditByCustomerId`);
             // it never changes whether the cheque counts as pending.
@@ -5090,7 +5099,13 @@ async function buildPaymentFollowupReport(
             const displayState = isDeposited ? "Registered & Deposited" : stateLabel || "-";
 
             const row = ensureRow(customerId);
-            if (receivableMatch && !receivableMatch.matched && !receivableMatch.unmatchedLineIds.some((id) => unappliedCreditLineIds.has(id))) {
+            // A cancelled cheque was never received, so it never reduces what the customer owes.
+            const deductedFromDue =
+                !isCancelled &&
+                Boolean(receivableMatch) &&
+                !receivableMatch!.matched &&
+                !receivableMatch!.unmatchedLineIds.some((id) => unappliedCreditLineIds.has(id));
+            if (receivableMatch && deductedFromDue) {
                 pdcUnmatchedCreditByCustomerId.set(
                     customerId,
                     Number(
@@ -5109,7 +5124,7 @@ async function buildPaymentFollowupReport(
                 isPending,
                 isDeposited,
                 pendingAmount: Number(pendingAmount.toFixed(2)),
-                receivableMatched: receivableMatch ? receivableMatch.matched : null,
+                receivableMatched: receivableMatch && !isCancelled ? receivableMatch.matched : null,
             });
 
             if (isPending) {

@@ -985,7 +985,7 @@ export default function PaymentFollowupPage() {
     const { user } = useAuth();
     const hasLoadedOptionsRef = useRef(false);
 
-    const [mode, setMode] = useState<Mode>("salesperson");
+    const [mode, setMode] = useState<Mode>("customer");
 
     const [salespeople, setSalespeople] = useState<OdooSalesperson[]>([]);
     const [customers, setCustomers] = useState<OdooCustomerOption[]>([]);
@@ -993,8 +993,8 @@ export default function PaymentFollowupPage() {
     const [optionsError, setOptionsError] = useState<string | null>(null);
 
     const [asOfDate, setAsOfDate] = useState(todayISO);
-    const [dateBasis, setDateBasis] = useState<"due" | "invoice">("due");
-    const [agingSystem, setAgingSystem] = useState<AgingSystem>("day");
+    const [dateBasis, setDateBasis] = useState<"due" | "invoice">("invoice");
+    const [agingSystem, setAgingSystem] = useState<AgingSystem>("month");
 
     const [selectedSalespersonId, setSelectedSalespersonId] = useState("");
     const [selectedCustomerId, setSelectedCustomerId] = useState("");

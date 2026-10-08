@@ -1,0 +1,12 @@
+[14:09:46 2026-10-08] FETCHING Version 2.45.3
+[14:09:46 2026-10-08] CREATING /Users/devalamal/.spicetify
+[14:09:46 2026-10-08] DOWNLOADING https://github.com/spicetify/cli/releases/download/v2.45.3/spicetify-2.45.3-darwin-arm64.tar.gz
+[14:09:48 2026-10-08] EXTRACTING /Users/devalamal/.spicetify/spicetify.tar.gz
+[14:09:48 2026-10-08] SETTING EXECUTABLE PERMISSIONS TO /Users/devalamal/.spicetify/spicetify
+[14:09:48 2026-10-08] REMOVING /Users/devalamal/.spicetify/spicetify.tar.gz
+[14:09:48 2026-10-08] CREATING /Users/devalamal/.zshrc
+[14:09:48 2026-10-08] APPENDING /Users/devalamal/.spicetify to PATH in /Users/devalamal/.zshrc
+[14:09:48 2026-10-08] spicetify v2.45.3 was installed successfully to /Users/devalamal/.spicetify
+[14:09:48 2026-10-08] Open a new terminal or reload your shell profile to use spicetify:
+[14:09:48 2026-10-08]   source "/Users/devalamal/.zshrc"
+[14:09:48 2026-10-08] Then run 'spicetify --help' to get started
