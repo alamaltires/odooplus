@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSalesTargetDetails, runWithCompanyIds } from "@/lib/server/odoo-client";
 import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
+import { resolveSalespersonId } from "@/lib/server/salesperson-scope";
 
 export async function POST(request: Request) {
     try {
@@ -13,9 +14,10 @@ export async function POST(request: Request) {
             brandId?: number;
         };
 
+        const scopedSalespersonId = await resolveSalespersonId(request, credentials, Number(body.salespersonId));
         const data = await runWithCompanyIds(companyIds, () =>
             getSalesTargetDetails(credentials, {
-                salespersonId: Number(body.salespersonId),
+                salespersonId: scopedSalespersonId,
                 year: Number(body.year),
                 month: Number(body.month),
                 brandId: Number(body.brandId),

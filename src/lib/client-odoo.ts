@@ -448,6 +448,10 @@ export function getMarginAnalyticsBreakdown(input: {
     return post<MarginBreakdown>("/api/odoo/margin-analytics-breakdown", input);
 }
 
+export function getSalesTeams() {
+    return post<{ teams: Array<{ id: number; name: string }> }>("/api/odoo/sales-teams", {});
+}
+
 export function getSalespeople() {
     return post<{ salespeople: OdooSalesperson[] }>("/api/odoo/salespeople", {});
 }

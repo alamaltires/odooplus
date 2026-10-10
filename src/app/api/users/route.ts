@@ -3,7 +3,7 @@ import { Timestamp } from "firebase-admin/firestore";
 import { getAdminAuth, getAdminDb } from "@/lib/server/firebase-admin";
 import { getUserIdFromRequest, getUserRoleFromRequest } from "@/lib/server/auth-helpers";
 
-type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "store" | "user";
+type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "accountant" | "manager" | "store" | "user";
 
 function normalizeRole(value: string | undefined): Role {
     if (
@@ -11,6 +11,8 @@ function normalizeRole(value: string | undefined): Role {
         value === "purchase" ||
         value === "salesperson" ||
         value === "sales_manager" ||
+        value === "accountant" ||
+        value === "manager" ||
         value === "store" ||
         value === "user"
     ) {
@@ -42,6 +44,7 @@ export async function GET(request: Request) {
                 role?: string;
                 createdAt?: Timestamp;
                 enabledApps?: string[];
+                salesTeamId?: number;
             } | undefined])
         );
 
@@ -92,6 +95,7 @@ export async function GET(request: Request) {
                     role: normalizeRole(String(profile?.role ?? "purchase")),
                     createdAt,
                     enabledApps: Array.isArray(profile?.enabledApps) ? profile.enabledApps : null,
+                    salesTeamId: typeof profile?.salesTeamId === "number" ? profile.salesTeamId : null,
                 };
             })
             .sort((left, right) => left.email.localeCompare(right.email));

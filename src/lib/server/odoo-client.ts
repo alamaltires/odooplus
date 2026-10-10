@@ -405,6 +405,10 @@ async function jsonRpc<T>(baseUrl: string, payload: RpcRequestBody): Promise<T> 
     return data.result;
 }
 
+export async function getOdooUserId(credentials: OdooCredentials) {
+    return authenticate(credentials);
+}
+
 async function authenticate(credentials: OdooCredentials) {
     let uid;
     try {
@@ -1433,7 +1437,30 @@ async function getCommercialPartner(
     return customer;
 }
 
-export async function getSalespeople(credentials: OdooCredentials): Promise<SalespersonOption[]> {
+export type SalesTeamOption = { id: number; name: string; memberIds: number[] };
+
+export async function getSalesTeams(credentials: OdooCredentials): Promise<SalesTeamOption[]> {
+    const uid = await authenticate(credentials);
+    const teams = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "crm.team",
+        "search_read",
+        [[]],
+        { fields: ["id", "name", "member_ids"], order: "name asc", limit: 500 }
+    );
+
+    return teams.map((team) => ({
+        id: Number(team.id),
+        name: toDisplayString(team.name),
+        memberIds: Array.isArray(team.member_ids) ? team.member_ids.map(Number) : [],
+    }));
+}
+
+export async function getSalespeople(
+    credentials: OdooCredentials,
+    onlyUserIds?: number[] | null
+): Promise<SalespersonOption[]> {
     const uid = await authenticate(credentials);
 
     const users = await executeKw<Array<Record<string, unknown>>>(
@@ -1444,6 +1471,7 @@ export async function getSalespeople(credentials: OdooCredentials): Promise<Sale
         [[
             ["active", "=", true],
             ["share", "=", false],
+            ...(onlyUserIds ? [["id", "in", onlyUserIds]] : []),
         ]],
         {
             fields: ["id", "name", "email"],
@@ -1459,7 +1487,30 @@ export async function getSalespeople(credentials: OdooCredentials): Promise<Sale
     }));
 }
 
-export async function getCustomers(credentials: OdooCredentials): Promise<CustomerOption[]> {
+export async function isCustomerAssignedToUser(
+    credentials: OdooCredentials,
+    customerId: number,
+    userId: number
+): Promise<boolean> {
+    const uid = await authenticate(credentials);
+    const ids = await executeKw<number[]>(
+        credentials,
+        uid,
+        "res.partner",
+        "search",
+        [[
+            ["id", "=", customerId],
+            ["user_id", "=", userId],
+        ]],
+        { limit: 1, context: { active_test: false } }
+    );
+    return ids.length > 0;
+}
+
+export async function getCustomers(
+    credentials: OdooCredentials,
+    assignedToUserId?: number | null
+): Promise<CustomerOption[]> {
     const uid = await authenticate(credentials);
     const partnerFields = await getAvailablePartnerFields(credentials, uid);
 
@@ -1470,6 +1521,8 @@ export async function getCustomers(credentials: OdooCredentials): Promise<Custom
         "search_read",
         [[
             ["is_company", "=", true],
+            ["category_id.name", "=", "Customer ACT"],
+            ...(assignedToUserId ? [["user_id", "=", assignedToUserId]] : []),
         ]],
         {
             fields: partnerFields,

@@ -4,7 +4,7 @@ import { getAdminAuth, getAdminDb } from "@/lib/server/firebase-admin";
 import { getUserIdFromRequest, getUserRoleFromRequest } from "@/lib/server/auth-helpers";
 import { APP_HREFS } from "@/lib/app-permissions";
 
-type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "store" | "user";
+type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "accountant" | "manager" | "store" | "user";
 
 function normalizeRole(value: string | undefined): Role {
     if (
@@ -12,6 +12,8 @@ function normalizeRole(value: string | undefined): Role {
         value === "purchase" ||
         value === "salesperson" ||
         value === "sales_manager" ||
+        value === "accountant" ||
+        value === "manager" ||
         value === "store" ||
         value === "user"
     ) {
@@ -36,6 +38,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
             password?: string;
             role?: string;
             enabledApps?: string[] | null;
+            salesTeamId?: number | null;
         };
 
         const adminAuth = getAdminAuth();
@@ -78,11 +81,17 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
             );
         }
 
+        if (body.salesTeamId === null) {
+            firestoreUpdate.salesTeamId = FieldValue.delete();
+        } else if (typeof body.salesTeamId === "number" && Number.isFinite(body.salesTeamId) && body.salesTeamId > 0) {
+            firestoreUpdate.salesTeamId = body.salesTeamId;
+        }
+
         await getAdminDb().collection("users").doc(id).set(firestoreUpdate, { merge: true });
 
         const updatedDoc = await getAdminDb().collection("users").doc(id).get();
         const data = updatedDoc.data() as
-            | { email?: string; role?: string; createdAt?: Timestamp; enabledApps?: string[] }
+            | { email?: string; role?: string; createdAt?: Timestamp; enabledApps?: string[]; salesTeamId?: number }
             | undefined;
 
         return NextResponse.json({
@@ -92,6 +101,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
                 role: normalizeRole(data?.role),
                 createdAt: data?.createdAt instanceof Timestamp ? data.createdAt.toDate().toISOString() : null,
                 enabledApps: Array.isArray(data?.enabledApps) ? data.enabledApps : null,
+                salesTeamId: typeof data?.salesTeamId === "number" ? data.salesTeamId : null,
             },
         });
     } catch (error) {

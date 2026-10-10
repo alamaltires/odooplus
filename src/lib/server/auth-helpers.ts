@@ -23,7 +23,7 @@ export async function getUserIdFromRequest(request: Request): Promise<string> {
     return getUserIdFromAuthHeader(request);
 }
 
-export type AppUserRole = "admin" | "purchase" | "salesperson" | "sales_manager" | "store" | "user";
+export type AppUserRole = "admin" | "purchase" | "salesperson" | "sales_manager" | "accountant" | "manager" | "store" | "user";
 
 export async function getUserRoleFromRequest(request: Request): Promise<AppUserRole> {
     const userId = await getUserIdFromAuthHeader(request);
@@ -35,6 +35,8 @@ export async function getUserRoleFromRequest(request: Request): Promise<AppUserR
         role === "purchase" ||
         role === "salesperson" ||
         role === "sales_manager" ||
+        role === "accountant" ||
+        role === "manager" ||
         role === "store"
     ) {
         return role;

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getPaymentFollowupForSalesperson, runWithCompanyIds } from "@/lib/server/odoo-client";
 import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
+import { resolveSalespersonId } from "@/lib/server/salesperson-scope";
 
 export async function POST(request: Request) {
     try {
@@ -13,8 +14,9 @@ export async function POST(request: Request) {
             agingSystem?: "day" | "month";
         };
 
+        const scopedSalespersonId = await resolveSalespersonId(request, credentials, salespersonId);
         const report = await runWithCompanyIds(companyIds, () =>
-            getPaymentFollowupForSalesperson(credentials, { salespersonId, asOfDate, dateBasis, agingSystem })
+            getPaymentFollowupForSalesperson(credentials, { salespersonId: scopedSalespersonId, asOfDate, dateBasis, agingSystem })
         );
 
         return NextResponse.json(report);

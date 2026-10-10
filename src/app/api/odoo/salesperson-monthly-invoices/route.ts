@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSalespersonMonthlyInvoices, runWithCompanyIds } from "@/lib/server/odoo-client";
 import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
+import { resolveSalespersonId } from "@/lib/server/salesperson-scope";
 
 export async function POST(request: Request) {
     try {
@@ -13,9 +14,10 @@ export async function POST(request: Request) {
             includeCreditNotes?: boolean;
         };
 
+        const scopedSalespersonId = await resolveSalespersonId(request, credentials, salespersonId);
         const report = await runWithCompanyIds(companyIds, () =>
             getSalespersonMonthlyInvoices(credentials, {
-                salespersonId,
+                salespersonId: scopedSalespersonId,
                 year,
                 month,
                 includeCreditNotes,

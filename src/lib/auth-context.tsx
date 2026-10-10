@@ -19,7 +19,7 @@ import { doc, getDoc } from "firebase/firestore";
 import { auth } from "@/lib/firebase";
 import { db } from "@/lib/firebase";
 
-export type UserRole = "admin" | "purchase" | "salesperson" | "sales_manager" | "store" | "user";
+export type UserRole = "admin" | "purchase" | "salesperson" | "sales_manager" | "accountant" | "manager" | "store" | "user";
 
 type AuthContextValue = {
     user: User | null;
@@ -66,6 +66,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                     nextRole === "purchase" ||
                     nextRole === "salesperson" ||
                     nextRole === "sales_manager" ||
+                    nextRole === "accountant" ||
+                    nextRole === "manager" ||
                     nextRole === "store"
                 ) {
                     setRole(nextRole);

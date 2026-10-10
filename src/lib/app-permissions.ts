@@ -1,4 +1,4 @@
-export type AppUserRole = "admin" | "purchase" | "salesperson" | "sales_manager" | "store" | "user";
+export type AppUserRole = "admin" | "purchase" | "salesperson" | "sales_manager" | "accountant" | "manager" | "store" | "user";
 
 /**
  * Every sidebar destination the app can grant access to. Shared between the
@@ -42,9 +42,13 @@ export function defaultAppHrefsForRole(role: AppUserRole): string[] {
                 "/product-requests",
             ];
         case "salesperson":
-            return ["/sales-targets", "/payment-followup", "/settings", "/product-requests"];
+            return ["/sales-targets", "/salesperson-activity", "/payment-followup", "/settings", "/product-requests"];
         case "sales_manager":
             return ["/sales-targets", "/salesperson-activity", "/customer-activity", "/payment-followup", "/settings", "/product-requests"];
+        case "manager":
+            return [...APP_HREFS];
+        case "accountant":
+            return ["/payment-followup", "/customer-activity", "/margin-analytics", "/settings", "/product-requests"];
         case "store":
             return ["/orders/pending", "/product-scanner", "/settings", "/product-requests"];
         case "user":

@@ -5,18 +5,20 @@ import { getAuth } from "firebase/auth";
 import { Pencil, Shield, Trash2, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { getOdooSettings, saveOdooSettings } from "@/lib/firestore-settings";
-import { getSystemOdooSettings, saveSystemOdooSettings } from "@/lib/client-odoo";
+import { getSalesTeams, getSystemOdooSettings, saveSystemOdooSettings } from "@/lib/client-odoo";
 import { OdooUserCredentials } from "@/types/odoo";
 import { APP_DEFINITIONS, defaultAppHrefsForRole } from "@/lib/app-permissions";
 import { Select2, type Select2Option } from "@/components/select2";
 
-type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "store" | "user";
+type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "accountant" | "manager" | "store" | "user";
 
 const ROLE_LABELS: Record<Role, string> = {
     admin: "admin",
     purchase: "purchase",
     salesperson: "salesperson",
     sales_manager: "sales manager",
+    accountant: "accountant",
+    manager: "manager",
     store: "store",
     user: "user (product requests only)",
 };
@@ -25,12 +27,14 @@ const ROLE_OPTIONS: Select2Option[] = [
     { value: "purchase", label: "Purchase" },
     { value: "salesperson", label: "Salesperson" },
     { value: "sales_manager", label: "Sales Manager" },
+    { value: "accountant", label: "Accountant" },
+    { value: "manager", label: "Manager" },
     { value: "store", label: "Store" },
     { value: "user", label: "User (Product Requests only)" },
     { value: "admin", label: "Admin" },
 ];
 
-type UserRow = { id: string; email: string; role: Role; createdAt: string | null; enabledApps: string[] | null };
+type UserRow = { id: string; email: string; role: Role; createdAt: string | null; enabledApps: string[] | null; salesTeamId: number | null };
 
 const initialState: OdooUserCredentials = {
     username: "",
@@ -63,6 +67,10 @@ export default function SettingsPage() {
 
     const [permissionsUser, setPermissionsUser] = useState<UserRow | null>(null);
     const [permissionsSelection, setPermissionsSelection] = useState<string[]>([]);
+    const [permissionsSalesTeamId, setPermissionsSalesTeamId] = useState("");
+    const [salesTeams, setSalesTeams] = useState<Array<{ id: number; name: string }>>([]);
+    const [salesTeamsLoading, setSalesTeamsLoading] = useState(false);
+    const [salesTeamsError, setSalesTeamsError] = useState<string | null>(null);
     const [permissionsSaving, setPermissionsSaving] = useState(false);
     const [permissionsError, setPermissionsError] = useState<string | null>(null);
 
@@ -239,6 +247,18 @@ export default function SettingsPage() {
         setPermissionsUser(target);
         setPermissionsSelection(target.enabledApps ?? defaultAppHrefsForRole(target.role));
         setPermissionsError(null);
+        setPermissionsSalesTeamId(target.salesTeamId ? String(target.salesTeamId) : "");
+
+        if (target.role === "sales_manager") {
+            setSalesTeamsLoading(true);
+            setSalesTeamsError(null);
+            getSalesTeams()
+                .then((data) => setSalesTeams(data.teams))
+                .catch((loadError) =>
+                    setSalesTeamsError(loadError instanceof Error ? loadError.message : "Failed to load sales teams.")
+                )
+                .finally(() => setSalesTeamsLoading(false));
+        }
     }
 
     function togglePermissionApp(href: string) {
@@ -261,7 +281,12 @@ export default function SettingsPage() {
                     "Content-Type": "application/json",
                     Authorization: `Bearer ${token}`,
                 },
-                body: JSON.stringify({ enabledApps }),
+                body: JSON.stringify({
+                    enabledApps,
+                    ...(permissionsUser.role === "sales_manager"
+                        ? { salesTeamId: permissionsSalesTeamId ? Number(permissionsSalesTeamId) : null }
+                        : {}),
+                }),
             });
 
             const result = (await response.json()) as { error?: string };
@@ -572,6 +597,11 @@ export default function SettingsPage() {
                     target={permissionsUser}
                     selection={permissionsSelection}
                     onToggle={togglePermissionApp}
+                    salesTeamId={permissionsSalesTeamId}
+                    onSalesTeamChange={setPermissionsSalesTeamId}
+                    salesTeams={salesTeams}
+                    salesTeamsLoading={salesTeamsLoading}
+                    salesTeamsError={salesTeamsError}
                     saving={permissionsSaving}
                     error={permissionsError}
                     onSave={() => void savePermissions(permissionsSelection)}
@@ -659,6 +689,11 @@ function PermissionsModal({
     target,
     selection,
     onToggle,
+    salesTeamId,
+    onSalesTeamChange,
+    salesTeams,
+    salesTeamsLoading,
+    salesTeamsError,
     saving,
     error,
     onSave,
@@ -668,6 +703,11 @@ function PermissionsModal({
     target: UserRow;
     selection: string[];
     onToggle: (href: string) => void;
+    salesTeamId: string;
+    onSalesTeamChange: (value: string) => void;
+    salesTeams: Array<{ id: number; name: string }>;
+    salesTeamsLoading: boolean;
+    salesTeamsError: string | null;
     saving: boolean;
     error: string | null;
     onSave: () => void;
@@ -699,6 +739,26 @@ function PermissionsModal({
                     </label>
                 ))}
             </div>
+
+            {target.role === "sales_manager" ? (
+                <div className="mt-4">
+                    <span className="mb-1 block text-sm font-medium">Sales Team</span>
+                    <Select2
+                        value={salesTeamId}
+                        onChange={onSalesTeamChange}
+                        options={[
+                            { value: "", label: "All salespeople (no team)" },
+                            ...salesTeams.map((team) => ({ value: String(team.id), label: team.name })),
+                        ]}
+                        loading={salesTeamsLoading}
+                        placeholder="All salespeople (no team)"
+                    />
+                    <p className="mt-1 text-xs text-(--ink-soft)">
+                        When a team is selected, this manager only sees that team&apos;s members in the Salesperson lists.
+                    </p>
+                    {salesTeamsError ? <p className="mt-1 text-xs text-red-600">{salesTeamsError}</p> : null}
+                </div>
+            ) : null}
 
             {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
 

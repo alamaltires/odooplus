@@ -179,7 +179,8 @@ function ProgressBar({
 }
 
 export default function SalesTargetsPage() {
-    const { user } = useAuth();
+    const { user, role } = useAuth();
+    const hideProfit = role === "salesperson";
     const hasLoadedSalespeopleRef = useRef(false);
     const hasRestoredReportStateRef = useRef(false);
 
@@ -921,12 +922,14 @@ export default function SalesTargetsPage() {
                     </p>
                 </div>
                 <div className="flex items-center gap-3">
+                    {role === "admin" || role === "sales_manager" ? (
                     <Link
                         href="/sales-targets/summary"
                         className="inline-flex items-center rounded-xl border border-(--line) bg-white px-4 py-2 text-sm font-medium text-(--ink)"
                     >
                         Targets Summary
                     </Link>
+                    ) : null}
                     <Target className="h-8 w-8 text-(--brand)" aria-hidden="true" />
                 </div>
             </div>
@@ -1150,7 +1153,7 @@ export default function SalesTargetsPage() {
                                                     {formatCurrency(Math.max(0, item.targetAmount - item.achieved), currencyCode)} remaining
                                                 </span>
                                             </div>
-                                            {!item.isGeneral && item.grossProfit !== null ? (
+                                            {!hideProfit && !item.isGeneral && item.grossProfit !== null ? (
                                                 <div className="flex items-center justify-between text-xs">
                                                     <span className="text-(--ink-soft)">Gross Profit (est.)</span>
                                                     <span className={`font-medium ${item.grossProfit < 0 ? "text-red-600" : "text-(--ink)"}`}>
@@ -1158,7 +1161,7 @@ export default function SalesTargetsPage() {
                                                     </span>
                                                 </div>
                                             ) : null}
-                                            {item.isGeneral && generalBreakdown ? (
+                                            {!hideProfit && item.isGeneral && generalBreakdown ? (
                                                 <div className="flex items-center justify-between text-xs">
                                                     <span className="text-(--ink-soft)">Gross Profit (est.)</span>
                                                     <span
@@ -1230,7 +1233,7 @@ export default function SalesTargetsPage() {
                                                                             <tr>
                                                                                 <th className="px-3 py-2 text-left font-medium">Brand</th>
                                                                                 <th className="px-3 py-2 text-right font-medium">Sales</th>
-                                                                                <th className="px-3 py-2 text-right font-medium">Gross Profit (est.)</th>
+                                                                                {!hideProfit ? <th className="px-3 py-2 text-right font-medium">Gross Profit (est.)</th> : null}
                                                                                 <th className="px-3 py-2 text-right font-medium">Share</th>
                                                                             </tr>
                                                                         </thead>
@@ -1261,6 +1264,7 @@ export default function SalesTargetsPage() {
                                                                                             <td className="px-3 py-2 text-right">
                                                                                                 {formatCurrency(row.amount, currencyCode)}
                                                                                             </td>
+                                                                                            {!hideProfit ? (
                                                                                             <td
                                                                                                 className={`px-3 py-2 text-right ${row.grossProfit !== null && row.grossProfit < 0 ? "text-red-600" : ""}`}
                                                                                             >
@@ -1268,6 +1272,7 @@ export default function SalesTargetsPage() {
                                                                                                     ? formatCurrency(row.grossProfit, currencyCode)
                                                                                                     : "-"}
                                                                                             </td>
+                                                                                            ) : null}
                                                                                             <td className="px-3 py-2 text-right text-(--ink-soft)">
                                                                                                 {generalBreakdown.total > 0
                                                                                                     ? `${((row.amount / generalBreakdown.total) * 100).toFixed(1)}%`
@@ -1286,11 +1291,13 @@ export default function SalesTargetsPage() {
                                                                                                     <td className="py-1.5 pr-3 text-right text-(--ink-soft)">
                                                                                                         {formatCurrency(category.amount, currencyCode)}
                                                                                                     </td>
+                                                                                                    {!hideProfit ? (
                                                                                                     <td
                                                                                                         className={`py-1.5 pr-3 text-right ${category.grossProfit < 0 ? "text-red-600" : "text-(--ink-soft)"}`}
                                                                                                     >
                                                                                                         {formatCurrency(category.grossProfit, currencyCode)}
                                                                                                     </td>
+                                                                                                    ) : null}
                                                                                                     <td className="py-1.5 pr-3 text-right text-(--ink-soft)">
                                                                                                         {row.amount !== 0
                                                                                                             ? `${((category.amount / row.amount) * 100).toFixed(1)}%`
@@ -1309,11 +1316,13 @@ export default function SalesTargetsPage() {
                                                                                 <td className="px-3 py-2 text-right">
                                                                                     {formatCurrency(generalBreakdown.total, currencyCode)}
                                                                                 </td>
+                                                                                {!hideProfit ? (
                                                                                 <td
                                                                                     className={`px-3 py-2 text-right ${generalBreakdown.totalGrossProfit < 0 ? "text-red-600" : ""}`}
                                                                                 >
                                                                                     {formatCurrency(generalBreakdown.totalGrossProfit, currencyCode)}
                                                                                 </td>
+                                                                                ) : null}
                                                                                 <td className="px-3 py-2" />
                                                                             </tr>
                                                                         </tfoot>
