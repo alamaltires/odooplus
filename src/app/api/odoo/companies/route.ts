@@ -5,8 +5,8 @@ import { getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
 export async function POST(request: Request) {
     try {
         const { credentials } = await getOdooCredentialsFromRequest(request);
-        const companies = await getCompanies(credentials);
-        return NextResponse.json({ companies });
+        const { companies, defaultCompanyId } = await getCompanies(credentials);
+        return NextResponse.json({ companies, defaultCompanyId });
     } catch (error) {
         return NextResponse.json(
             {

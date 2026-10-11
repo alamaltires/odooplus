@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Building2, ChevronDown } from "lucide-react";
 import { getCompanies } from "@/lib/client-odoo";
+import { useAuth } from "@/lib/auth-context";
 import {
     getSelectedCompanyIds,
     hasStoredCompanySelection,
@@ -13,6 +14,8 @@ import {
 type Company = { id: number; name: string };
 
 export function CompanySelector() {
+    const { role } = useAuth();
+    const isSalesperson = role === "salesperson";
     const [companies, setCompanies] = useState<Company[]>([]);
     const [loading, setLoading] = useState(true);
     const [open, setOpen] = useState(false);
@@ -34,8 +37,20 @@ export function CompanySelector() {
             .then((data) => {
                 if (cancelled) return;
                 setCompanies(data.companies);
-                if (!hasStoredCompanySelection() && data.companies.length > 0) {
-                    setSelectedCompanyIds(data.companies.map((company) => company.id));
+                if (data.companies.length === 0) return;
+
+                const allowedIds = data.companies.map((company) => company.id);
+                const stored = getSelectedCompanyIds().filter((id) => allowedIds.includes(id));
+                const needsReset = !hasStoredCompanySelection() || stored.length === 0;
+                if (needsReset) {
+                    // Salespeople start on their Odoo default company; everyone
+                    // else keeps the existing "all companies" default.
+                    setSelectedCompanyIds(
+                        isSalesperson && data.defaultCompanyId ? [data.defaultCompanyId] : allowedIds
+                    );
+                } else if (stored.length !== getSelectedCompanyIds().length) {
+                    // Drop any stored company this Odoo user is no longer allowed.
+                    setSelectedCompanyIds(stored);
                 }
             })
             .catch((error) => {
@@ -54,7 +69,7 @@ export function CompanySelector() {
         return () => {
             cancelled = true;
         };
-    }, []);
+    }, [isSalesperson]);
 
     function closeDropdown() {
         setOpen(false);
@@ -86,7 +101,7 @@ export function CompanySelector() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [open, selectedIds]);
 
-    if (loading || companies.length <= 1) {
+    if (loading || companies.length === 0 || (companies.length <= 1 && !isSalesperson)) {
         return null;
     }
 

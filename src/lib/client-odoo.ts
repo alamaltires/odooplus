@@ -278,6 +278,7 @@ export function getCompanies() {
             id: number;
             name: string;
         }>;
+        defaultCompanyId: number | null;
     }>("/api/odoo/companies", {});
 }
 

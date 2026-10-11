@@ -9467,19 +9467,49 @@ export async function getMarginAnalyticsBreakdown(
  * search_read as this uid already returns only the companies granted to
  * them — no need to cross-check against `res.users.company_ids` separately.
  */
-export async function getCompanies(credentials: OdooCredentials): Promise<Array<{ id: number; name: string }>> {
+/**
+ * The companies the signed-in Odoo user is allowed to use (their "Allowed
+ * Companies" on the user record) plus their default company, so the sidebar
+ * selector can offer exactly those and start on the right one.
+ */
+export async function getCompanies(
+    credentials: OdooCredentials
+): Promise<{ companies: Array<{ id: number; name: string }>; defaultCompanyId: number | null }> {
     const uid = await authenticate(credentials);
+
+    let allowedIds: number[] | null = null;
+    let defaultCompanyId: number | null = null;
+    try {
+        const [self] = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "res.users",
+            "read",
+            [[uid]],
+            { fields: ["company_id", "company_ids"] }
+        );
+        if (Array.isArray(self?.company_ids) && self.company_ids.length > 0) {
+            allowedIds = self.company_ids.map(Number);
+        }
+        defaultCompanyId = getRelationalId(self?.company_id);
+    } catch {
+        // Fall back to whatever res.company exposes to this login.
+    }
 
     const companies = await executeKw<Array<{ id: number; name: string }>>(
         credentials,
         uid,
         "res.company",
         "search_read",
-        [[]],
+        [allowedIds ? [["id", "in", allowedIds]] : []],
         { fields: ["id", "name"], order: "id asc", limit: 200 }
     );
 
-    return companies.map((company) => ({ id: company.id, name: company.name }));
+    const list = companies.map((company) => ({ id: company.id, name: company.name }));
+    return {
+        companies: list,
+        defaultCompanyId: defaultCompanyId && list.some((company) => company.id === defaultCompanyId) ? defaultCompanyId : null,
+    };
 }
 
 export async function getProductOrigins(credentials: OdooCredentials): Promise<Array<{ id: number; name: string }>> {
