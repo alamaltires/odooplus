@@ -2,16 +2,13 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
-    Boxes,
     CheckCircle2,
     ClipboardList,
     Eye,
     Link2,
-    Package,
     PackageSearch,
     Plus,
     Search,
-    Tag,
     Trash2,
     X,
 } from "lucide-react";
@@ -23,44 +20,32 @@ import {
     listProductRequests,
     ProductRequest,
     ProductRequestType,
-    searchProductCatalog,
     setProductRequestSeen,
+    type SalesStockRow,
 } from "@/lib/client-odoo";
-
-type ProductCard = {
-    id: number;
-    name: string;
-    sku: string;
-    brandName: string;
-    categoryName: string;
-    originName: string;
-    rimDiameterName: string;
-    currentStock: number;
-    stockByLot: Array<{ lotName: string; companyName: string; quantity: number }>;
-    pricelists: Array<{ pricelistName: string; currencyCode: string; price: number }>;
-};
+import { SalesStockBrowser } from "@/components/sales-stock-browser";
 
 type ReferenceProduct = { id: number; name: string; brandName: string };
-
-const MIN_SEARCH_QUERY_LENGTH = 2;
-const SEARCH_PAGE_SIZE = 24;
 
 const REQUEST_TYPE_OPTIONS: Array<{ value: ProductRequestType; label: string; hint: string }> = [
     { value: "new_product", label: "New Product", hint: "This product doesn't exist in the catalogue at all." },
     { value: "missing_size", label: "Missing Size", hint: "The brand/pattern exists, but not in this size." },
     { value: "missing_pattern", label: "Missing Pattern", hint: "The brand exists, but not this tread pattern." },
+    { value: "more_quantity", label: "More Quantity", hint: "It exists, but there isn't enough stock — say how many you need in Notes." },
 ];
 
 const REQUEST_TYPE_LABELS: Record<ProductRequestType, string> = {
     new_product: "New Product",
     missing_size: "Missing Size",
     missing_pattern: "Missing Pattern",
+    more_quantity: "More Quantity",
 };
 
 const REQUEST_TYPE_STYLES: Record<ProductRequestType, string> = {
     new_product: "bg-[rgba(229,26,39,0.12)] text-(--brand)",
     missing_size: "bg-amber-100 text-amber-800",
     missing_pattern: "bg-[rgba(109,40,217,0.1)] text-purple-700",
+    more_quantity: "bg-sky-100 text-sky-800",
 };
 
 function formatDateTime(value: string) {
@@ -95,6 +80,8 @@ function composeAutoNotes(input: {
         parts.push(`Missing size${input.brand ? ` for ${input.brand}` : ""}: ${input.size || "?"}`);
     } else if (input.requestType === "missing_pattern") {
         parts.push(`Missing pattern${input.brand ? ` for ${input.brand}` : ""}: ${input.pattern || "?"}`);
+    } else if (input.requestType === "more_quantity") {
+        parts.push(`Need more stock${input.searchQuery ? ` of ${input.searchQuery}` : ""}`);
     } else {
         const bits = [input.brand, input.size, input.pattern].filter(Boolean);
         if (bits.length > 0) {
@@ -114,13 +101,6 @@ export default function ProductRequestsPage() {
 
     // --- Search state ---
     const [query, setQuery] = useState("");
-    const [activated, setActivated] = useState(false);
-    const [results, setResults] = useState<ProductCard[]>([]);
-    const [searchLoading, setSearchLoading] = useState(false);
-    const [searchError, setSearchError] = useState<string | null>(null);
-    const [offset, setOffset] = useState(0);
-    const [hasMore, setHasMore] = useState(false);
-    const [loadingMore, setLoadingMore] = useState(false);
 
     // --- Request panel state ---
     const [panelOpen, setPanelOpen] = useState(false);
@@ -155,53 +135,6 @@ export default function ProductRequestsPage() {
     const [rowActionError, setRowActionError] = useState<string | null>(null);
     const [pendingRowId, setPendingRowId] = useState<string | null>(null);
     const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-
-    useEffect(() => {
-        if (!activated) {
-            return;
-        }
-        const trimmed = query.trim();
-        if (trimmed.length < MIN_SEARCH_QUERY_LENGTH) {
-            setResults([]);
-            setHasMore(false);
-            setOffset(0);
-            setSearchError(null);
-            return;
-        }
-        const debounceId = window.setTimeout(() => {
-            setSearchLoading(true);
-            setSearchError(null);
-            searchProductCatalog({ query: trimmed, limit: SEARCH_PAGE_SIZE, offset: 0 })
-                .then((data) => {
-                    setResults(data.products);
-                    setHasMore(data.hasMore);
-                    setOffset(data.products.length);
-                })
-                .catch((error) => {
-                    setSearchError(error instanceof Error ? error.message : "Failed to search products.");
-                    setResults([]);
-                    setHasMore(false);
-                })
-                .finally(() => setSearchLoading(false));
-        }, 300);
-        return () => window.clearTimeout(debounceId);
-    }, [query, activated]);
-
-    function loadMoreResults() {
-        const trimmed = query.trim();
-        if (searchLoading || loadingMore || !hasMore || trimmed.length < MIN_SEARCH_QUERY_LENGTH) {
-            return;
-        }
-        setLoadingMore(true);
-        searchProductCatalog({ query: trimmed, limit: SEARCH_PAGE_SIZE, offset })
-            .then((data) => {
-                setResults((current) => [...current, ...data.products]);
-                setHasMore(data.hasMore);
-                setOffset((current) => current + data.products.length);
-            })
-            .catch(() => setHasMore(false))
-            .finally(() => setLoadingMore(false));
-    }
 
     function loadMyRequests() {
         setRequestsLoading(true);
@@ -243,7 +176,10 @@ export default function ProductRequestsPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [requestType, brand, size, pattern, referenceProduct, notesTouched]);
 
-    function openRequestPanel() {
+    function openRequestPanel(type?: ProductRequestType) {
+        if (type) {
+            setRequestType(type);
+        }
         setSubmitSuccess(false);
         setPanelOpen(true);
     }
@@ -253,13 +189,13 @@ export default function ProductRequestsPage() {
     // becomes the Reference (so the admin sees exactly what it should look
     // like), and the only thing left to type is the one field that's
     // actually missing — usually just Size.
-    function openRequestPanelFromCard(product: ProductCard) {
+    function openRequestPanelFromRow(product: SalesStockRow) {
         setRequestType("missing_size");
-        setBrand(product.brandName !== "No Brand" ? product.brandName : "");
+        setBrand(product.brand && product.brand !== "No Brand" ? product.brand : "");
         setPattern("");
         setSize("");
         setNotesTouched(false);
-        setReferenceProduct({ id: product.id, name: product.name, brandName: product.brandName });
+        setReferenceProduct({ id: product.productId, name: product.productName, brandName: product.brand });
         setSubmitSuccess(false);
         setSubmitError(null);
         setPanelOpen(true);
@@ -352,10 +288,10 @@ export default function ProductRequestsPage() {
         <section>
             <div className="flex items-start justify-between gap-4">
                 <div>
-                    <h1 className="font-display text-3xl">Product Requests</h1>
+                    <h1 className="font-display text-3xl">Sales Orders</h1>
                     <p className="mt-1 text-sm text-(--ink-soft)">
-                        Search the catalogue for a product. If it isn&rsquo;t there — wrong size, wrong pattern, or
-                        entirely new — request it in a few clicks.
+                        Search stock, add products to the cart and create a quotation in Odoo. If what you need isn&rsquo;t
+                        there — wrong size, wrong pattern, not enough quantity, or entirely new — request it in a few clicks.
                     </p>
                 </div>
                 <PackageSearch className="h-8 w-8 text-(--brand)" aria-hidden="true" />
@@ -372,7 +308,7 @@ export default function ProductRequestsPage() {
                     }`}
                 >
                     <Search className="h-4 w-4" aria-hidden="true" />
-                    Search &amp; Request
+                    Search &amp; Order
                 </button>
                 <button
                     type="button"
@@ -390,33 +326,6 @@ export default function ProductRequestsPage() {
 
             {activeTab === "search" ? (
                 <div className="mt-6 space-y-4">
-                    <div className="flex flex-col gap-3 rounded-2xl border border-(--line) bg-(--card) p-5 sm:flex-row sm:items-center">
-                        <div className="relative flex-1">
-                            <Search
-                                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-(--ink-soft)"
-                                aria-hidden="true"
-                            />
-                            <input
-                                value={query}
-                                onChange={(event) => {
-                                    setQuery(event.target.value);
-                                    setActivated(true);
-                                }}
-                                onFocus={() => setActivated(true)}
-                                placeholder="Search by size, brand, pattern, or SKU (e.g. 265/65R17 Michelin)"
-                                className="w-full rounded-xl border border-(--line) bg-white py-2.5 pl-10 pr-3"
-                            />
-                        </div>
-                        <button
-                            type="button"
-                            onClick={openRequestPanel}
-                            className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-(--brand) px-4 py-2.5 text-sm font-medium text-white"
-                        >
-                            <Plus className="h-4 w-4" aria-hidden="true" />
-                            Request a Product
-                        </button>
-                    </div>
-
                     {panelOpen ? (
                         <div ref={panelRef} className="rounded-2xl border border-(--line) bg-(--card) p-5">
                             <div className="flex items-start justify-between gap-3">
@@ -550,138 +459,12 @@ export default function ProductRequestsPage() {
                         </div>
                     ) : null}
 
-                    {searchError ? <p className="text-sm text-red-600">{searchError}</p> : null}
-
-                    {!activated || query.trim().length < MIN_SEARCH_QUERY_LENGTH ? (
-                        <p className="rounded-2xl border border-dashed border-(--line) bg-(--card) p-8 text-center text-sm text-(--ink-soft)">
-                            Type at least {MIN_SEARCH_QUERY_LENGTH} characters to search the catalogue.
-                        </p>
-                    ) : searchLoading ? (
-                        <p className="rounded-2xl border border-dashed border-(--line) bg-(--card) p-8 text-center text-sm text-(--ink-soft)">
-                            Searching...
-                        </p>
-                    ) : results.length === 0 ? (
-                        <div className="rounded-2xl border border-dashed border-(--line) bg-(--card) p-8 text-center">
-                            <Package className="mx-auto h-8 w-8 text-(--ink-soft)" aria-hidden="true" />
-                            <p className="mt-3 text-sm font-medium">No products matched &ldquo;{query.trim()}&rdquo;.</p>
-                            <p className="mt-1 text-sm text-(--ink-soft)">
-                                Doesn&rsquo;t exist in the catalogue yet? Request it below.
-                            </p>
-                            <button
-                                type="button"
-                                onClick={openRequestPanel}
-                                className="mt-4 inline-flex items-center gap-2 rounded-xl bg-(--brand) px-4 py-2 text-sm font-medium text-white"
-                            >
-                                <Plus className="h-4 w-4" aria-hidden="true" />
-                                Request a Product
-                            </button>
-                        </div>
-                    ) : (
-                        <>
-                            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                                {results.map((product) => (
-                                    <article
-                                        key={product.id}
-                                        className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]"
-                                    >
-                                        <div className="flex items-start justify-between gap-2">
-                                            <h3 className="text-base font-bold leading-snug">{product.name}</h3>
-                                            <Boxes className="h-5 w-5 shrink-0 text-(--ink-soft)" aria-hidden="true" />
-                                        </div>
-                                        {product.sku ? (
-                                            <p className="mt-0.5 text-xs text-(--ink-soft)">SKU: {product.sku}</p>
-                                        ) : null}
-
-                                        <div className="mt-3 flex flex-wrap gap-1.5">
-                                            <span className="rounded-full bg-(--chip) px-2.5 py-1 text-xs font-semibold text-(--ink)">
-                                                {product.brandName}
-                                            </span>
-                                            <span className="rounded-full bg-(--chip) px-2.5 py-1 text-xs font-semibold text-(--ink)">
-                                                {product.originName}
-                                            </span>
-                                            <span className="rounded-full bg-(--chip) px-2.5 py-1 text-xs font-semibold text-(--ink)">
-                                                Rim {product.rimDiameterName}
-                                            </span>
-                                        </div>
-                                        <p className="mt-2 text-sm text-(--ink-soft)">{product.categoryName}</p>
-
-                                        <div className="mt-3 border-t border-(--line) pt-3">
-                                            {product.stockByLot.length > 0 ? (
-                                                <div className="space-y-1.5">
-                                                    <p className="text-lg font-bold text-(--accent)">
-                                                        In stock: {product.currentStock}
-                                                    </p>
-                                                    <div className="flex flex-wrap gap-2">
-                                                        {product.stockByLot.slice(0, 4).map((lot) => (
-                                                            <span
-                                                                key={`${lot.lotName}-${lot.companyName}`}
-                                                                className="rounded-full bg-[rgba(74,184,72,0.12)] px-3 py-1.5 text-sm font-semibold text-(--accent)"
-                                                            >
-                                                                {lot.lotName} · {lot.companyName}: {lot.quantity}
-                                                            </span>
-                                                        ))}
-                                                        {product.stockByLot.length > 4 ? (
-                                                            <span className="rounded-full bg-(--chip) px-3 py-1.5 text-sm font-medium text-(--ink-soft)">
-                                                                +{product.stockByLot.length - 4} more
-                                                            </span>
-                                                        ) : null}
-                                                    </div>
-                                                </div>
-                                            ) : (
-                                                <span className="inline-flex items-center gap-1.5 rounded-full bg-(--chip) px-3 py-1.5 text-sm font-semibold text-(--ink-soft)">
-                                                    Out of stock
-                                                </span>
-                                            )}
-                                        </div>
-
-                                        {product.pricelists.length > 0 ? (
-                                            <div className="mt-3 border-t border-(--line) pt-3">
-                                                <p className="mb-1.5 flex items-center gap-1 text-xs font-medium text-(--ink-soft)">
-                                                    <Tag className="h-3.5 w-3.5" aria-hidden="true" />
-                                                    Pricelists
-                                                </p>
-                                                <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
-                                                    {product.pricelists.map((entry, index) => (
-                                                        <div
-                                                            key={`${entry.pricelistName}-${entry.currencyCode}-${index}`}
-                                                            className="min-w-0"
-                                                        >
-                                                            <p className="truncate text-xs text-(--ink-soft)">{entry.pricelistName}</p>
-                                                            <p className="text-sm font-semibold">
-                                                                {entry.currencyCode} {entry.price.toFixed(2)}
-                                                            </p>
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        ) : null}
-
-                                        <button
-                                            type="button"
-                                            onClick={() => openRequestPanelFromCard(product)}
-                                            className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-(--line) py-1.5 text-xs font-medium text-(--ink-soft) hover:border-(--brand) hover:text-(--brand)"
-                                        >
-                                            <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                                            Request a different size/pattern
-                                        </button>
-                                    </article>
-                                ))}
-                            </div>
-
-                            {hasMore ? (
-                                <div className="flex justify-center">
-                                    <button
-                                        type="button"
-                                        onClick={loadMoreResults}
-                                        disabled={loadingMore}
-                                        className="rounded-xl border border-(--line) bg-white px-5 py-2 text-sm font-medium text-(--ink) disabled:cursor-not-allowed disabled:opacity-70"
-                                    >
-                                        {loadingMore ? "Loading..." : "Load more"}
-                                    </button>
-                                </div>
-                            ) : null}
-                        </>
-                    )}
+                    <SalesStockBrowser
+                        query={query}
+                        onQueryChange={setQuery}
+                        onRequest={openRequestPanel}
+                        onRequestFromRow={openRequestPanelFromRow}
+                    />
                 </div>
             ) : (
                 <div className="mt-6 rounded-2xl border border-(--line) bg-(--card) p-5">

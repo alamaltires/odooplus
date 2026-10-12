@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import {
     AlertCircle,
     CalendarClock,
@@ -8,6 +9,8 @@ import {
     CheckCircle2,
     ChevronDown,
     Container,
+    List,
+    Map as MapIcon,
     Package,
     RefreshCw,
     Search,
@@ -17,6 +20,7 @@ import {
 import {
     diagnosePoTracking,
     getPoTrackingOrders,
+    getSeaRoutes,
     getSavedShipmentTracking,
     getTrackingCarriers,
     trackShipmentByBl,
@@ -27,6 +31,14 @@ import {
     type ShipmentEvent,
     type ShipmentTracking,
 } from "@/lib/client-odoo";
+import type { MapShipment } from "@/components/shipment-map";
+import { buildRoute, lookupPort } from "@/lib/shipment-route";
+
+// Leaflet touches `window`, so the map is only ever loaded in the browser.
+const ShipmentMap = dynamic(() => import("@/components/shipment-map").then((module) => module.ShipmentMap), {
+    ssr: false,
+    loading: () => <p className="mt-6 text-sm text-(--ink-soft)">Loading map...</p>,
+});
 
 type BlGroup = {
     blNumber: string;
@@ -169,6 +181,10 @@ export default function PoTrackingPage() {
 
     const [search, setSearch] = useState("");
     const [filter, setFilter] = useState<FilterKey>("all");
+    const [view, setView] = useState<"list" | "map">("list");
+    // Sea routes by route key; "failed" keys fall back to a rough lane so they're not retried.
+    const [seaRouteError, setSeaRouteError] = useState<string | null>(null);
+    const [seaPaths, setSeaPaths] = useState<Record<string, Array<[number, number]> | null>>({});
     const [transitSort, setTransitSort] = useState<TransitSort>("arrival-asc");
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
     const [highlighted, setHighlighted] = useState<string | null>(null);
@@ -425,6 +441,23 @@ export default function PoTrackingPage() {
                                         <p className="mt-0.5 text-sm text-(--ink-soft)">
                                             {Array.from(new Set(group.orders.map((order) => order.vendorName))).join(", ")}
                                         </p>
+                                        <p className="mt-2 inline-flex items-center gap-2 rounded-lg bg-(--chip) px-2.5 py-1 text-sm">
+                                            <span className="text-(--ink-soft)">B/L</span>
+                                            <span className="font-semibold tracking-wide">{group.blNumber}</span>
+                                        </p>
+                                        {(() => {
+                                            const brands = Array.from(new Set(group.orders.flatMap((order) => order.brands ?? []))).sort((a, b) => a.localeCompare(b));
+                                            return brands.length > 0 ? (
+                                                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                                    <span className="text-xs text-(--ink-soft)">Brands</span>
+                                                    {brands.map((brand) => (
+                                                        <span key={brand} className="rounded-full border border-(--line) bg-white px-2.5 py-0.5 text-xs font-medium">
+                                                            {brand}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            ) : null;
+                                        })()}
                                         <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-2">
                                             <Fact icon={<Container className="h-4 w-4" />} label="Containers" value={String(group.containers.length)} />
                                             {group.totalQty > 0 ? (
@@ -533,6 +566,93 @@ export default function PoTrackingPage() {
         );
     };
 
+    // Shipments for the map: only tracked ones (they carry the ports and dates).
+    // Position is an estimate — how far through departure → arrival we are now.
+    const baseMapShipments = useMemo<Array<MapShipment & { routeKey: string; stops: Array<[number, number]> }>>(() => {
+        const now = Date.now();
+        const items: Array<MapShipment & { routeKey: string; stops: Array<[number, number]> }> = [];
+        for (const { group, tracking, stage, eta } of visible) {
+            if (!tracking?.origin?.name || !tracking.destination?.name) continue;
+            const via = tracking.transshipments.map((stop) => stop.name);
+            const route = buildRoute({ origin: tracking.origin.name, via, destination: tracking.destination.name });
+            if (!route) continue;
+            const departure = toDate(tracking.origin.departure)?.getTime() ?? null;
+            const arrival = eta.date?.getTime() ?? null;
+            let progress = 0;
+            if (stage === "arrived" || stage === "delivered") progress = 1;
+            else if (stage === "departed") {
+                progress = departure !== null && arrival !== null && arrival > departure ? (now - departure) / (arrival - departure) : 0.5;
+                progress = Math.min(0.97, Math.max(0.03, progress));
+            }
+            items.push({
+                blNumber: group.blNumber,
+                title: group.orders.map((order) => order.name).join(" · "),
+                vendor: group.orders[0]?.vendorName ?? "",
+                carrier: tracking.carrierName,
+                origin: tracking.origin.name,
+                destination: tracking.destination.name,
+                via,
+                stage,
+                progress,
+                etaText: etaChip(eta.days, stage).text,
+                routeKey: route.stops.map((stop) => stop.at.join(",")).join(">"),
+                stops: route.stops.map((stop) => stop.at),
+            });
+        }
+        return items;
+    }, [visible]);
+
+    // Real sea routes are computed on the server (they route round land); fetched
+    // once per distinct port sequence while the map is open.
+    useEffect(() => {
+        if (view !== "map") return;
+        const missing = new Map<string, Array<[number, number]>>();
+        for (const item of baseMapShipments) {
+            if (seaPaths[item.routeKey] === undefined) missing.set(item.routeKey, item.stops);
+        }
+        if (missing.size === 0) return;
+        let cancelled = false;
+        getSeaRoutes(Array.from(missing, ([id, stops]) => ({ id, stops })))
+            .then((data) => {
+                if (cancelled) return;
+                setSeaPaths((current) => {
+                    const next = { ...current };
+                    for (const id of missing.keys()) next[id] = data.paths[id] ?? null;
+                    return next;
+                });
+            })
+            .catch((error) => {
+                if (cancelled) return;
+                setSeaRouteError(error instanceof Error ? error.message : "Sea routing failed.");
+                setSeaPaths((current) => {
+                    const next = { ...current };
+                    for (const id of missing.keys()) next[id] = null;
+                    return next;
+                });
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [view, baseMapShipments, seaPaths]);
+
+    const routesLoading = baseMapShipments.some((item) => seaPaths[item.routeKey] === undefined);
+    const mapShipments = useMemo<MapShipment[]>(
+        () => baseMapShipments.map((item) => ({ ...item, path: seaPaths[item.routeKey] ?? undefined })),
+        [baseMapShipments, seaPaths]
+    );
+
+    // Port names on tracked shipments that the map couldn't place.
+    const unknownPorts = useMemo(() => {
+        const names = new Set<string>();
+        for (const { tracking } of visible) {
+            if (!tracking) continue;
+            for (const name of [tracking.origin?.name, tracking.destination?.name, ...tracking.transshipments.map((stop) => stop.name)]) {
+                if (name && !lookupPort(name)) names.add(name);
+            }
+        }
+        return Array.from(names);
+    }, [visible]);
+
     return (
         <section>
             <div className="flex items-start justify-between gap-4">
@@ -595,6 +715,27 @@ export default function PoTrackingPage() {
                         placeholder="Search PO, vendor, B/L, container or seal"
                         className="w-full rounded-xl border border-(--line) bg-white py-2 pl-9 pr-3 text-sm"
                     />
+                </div>
+
+                <div className="inline-flex overflow-hidden rounded-xl border border-(--line) bg-white" role="group" aria-label="View">
+                    <button
+                        type="button"
+                        onClick={() => setView("list")}
+                        aria-pressed={view === "list"}
+                        className={`inline-flex items-center gap-1.5 px-3 py-2 text-sm ${view === "list" ? "bg-(--chip) font-medium text-(--brand)" : "text-(--ink-soft)"}`}
+                    >
+                        <List className="h-4 w-4" aria-hidden="true" />
+                        List view
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setView("map")}
+                        aria-pressed={view === "map"}
+                        className={`inline-flex items-center gap-1.5 border-l border-(--line) px-3 py-2 text-sm ${view === "map" ? "bg-(--chip) font-medium text-(--brand)" : "text-(--ink-soft)"}`}
+                    >
+                        <MapIcon className="h-4 w-4" aria-hidden="true" />
+                        Map view
+                    </button>
                 </div>
 
                 <label className="flex items-center gap-2 text-sm">
@@ -667,7 +808,39 @@ export default function PoTrackingPage() {
             ) : null}
 
             {/* Shipments */}
-            <div className="mt-5 space-y-4">{visible.map((item) => renderCard(item))}</div>
+            {view === "map" ? (
+                <div className="mt-5">
+                    {seaRouteError ? (
+                        <p className="mb-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                            Sea routing is unavailable ({seaRouteError}), so routes are drawn as rough straight lines and may cross land.
+                            If you just updated the app, restart the server.
+                        </p>
+                    ) : null}
+                    {routesLoading ? <p className="mb-2 text-xs text-(--ink-soft)">Plotting sea routes...</p> : null}
+                    <ShipmentMap
+                        shipments={routesLoading ? [] : mapShipments}
+                        onOpen={(blNumber) => {
+                            setView("list");
+                            const item = enriched.find((entry) => entry.group.blNumber === blNumber);
+                            if (item) showInList(item);
+                        }}
+                    />
+                    <p className="mt-2 text-xs text-(--ink-soft)">
+                        Positions are estimates from the departure and arrival dates, drawn along typical sea lanes — not live vessel positions.
+                        {visible.length - mapShipments.length > 0
+                            ? ` ${visible.length - mapShipments.length} shipment${visible.length - mapShipments.length === 1 ? "" : "s"} can't be shown (not tracked yet, or a port isn't recognised).`
+                            : ""}
+                    </p>
+                    {unknownPorts.length > 0 ? (
+                        <p className="mt-1 text-xs text-amber-700">
+                            Ports not recognised: {unknownPorts.slice(0, 12).join(" · ")}
+                            {unknownPorts.length > 12 ? ` · +${unknownPorts.length - 12} more` : ""}
+                        </p>
+                    ) : null}
+                </div>
+            ) : (
+                <div className="mt-5 space-y-4">{visible.map((item) => renderCard(item))}</div>
+            )}
 
         </section>
     );

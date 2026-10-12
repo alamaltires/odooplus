@@ -20,7 +20,7 @@ const ROLE_LABELS: Record<Role, string> = {
     accountant: "accountant",
     manager: "manager",
     store: "store",
-    user: "user (product requests only)",
+    user: "user (sales orders only)",
 };
 
 const ROLE_OPTIONS: Select2Option[] = [
@@ -30,7 +30,7 @@ const ROLE_OPTIONS: Select2Option[] = [
     { value: "accountant", label: "Accountant" },
     { value: "manager", label: "Manager" },
     { value: "store", label: "Store" },
-    { value: "user", label: "User (Product Requests only)" },
+    { value: "user", label: "User (Sales Orders only)" },
     { value: "admin", label: "Admin" },
 ];
 

@@ -1951,6 +1951,520 @@ export async function searchProductCatalog(
     return { products: cards, totalCount };
 }
 
+type OdooFieldMeta = { string?: string; type?: string; relation?: string; selection?: Array<[string, string]> };
+
+const fieldsMetaCache = new Map<string, Record<string, OdooFieldMeta>>();
+
+async function getModelFieldsMeta(
+    credentials: OdooCredentials,
+    uid: number,
+    model: string
+): Promise<Record<string, OdooFieldMeta>> {
+    const cacheKey = `${credentials.url}|${credentials.db}|${model}`;
+    const cached = fieldsMetaCache.get(cacheKey);
+    if (cached) {
+        return cached;
+    }
+
+    const meta = await executeKw<Record<string, OdooFieldMeta>>(
+        credentials,
+        uid,
+        model,
+        "fields_get",
+        [],
+        { attributes: ["string", "type", "relation", "selection"] }
+    );
+    fieldsMetaCache.set(cacheKey, meta);
+    return meta;
+}
+
+export type SalesStockRow = {
+    id: number;
+    productId: number;
+    productName: string;
+    location: string;
+    lotId: number | null;
+    lotName: string;
+    companyId: number | null;
+    companyName: string;
+    categoryName: string;
+    brand: string;
+    country: string;
+    pattern: string;
+    patternId: number | null;
+    lotYear: string;
+    copyName: string;
+    availableQty: number;
+    incomingQty: number | null;
+    forecastedQty: number | null;
+    reservedQty: number;
+    onHandQty: number;
+    realCostLot: number | null;
+    lotAverageCost: number | null;
+    retailPrice: number | null;
+    wholesalePrice: number | null;
+    specialPrice: number | null;
+};
+
+type SalesStockSource = "quant" | "lot" | "product";
+type SalesStockSpec = { key: string; tech: string[]; labels: string[]; type: "text" | "number" };
+
+// Several of these columns are custom fields on this Odoo instance whose
+// technical names can't be known up front, so each is located by its
+// technical name (when standard) or its on-screen label via `fields_get`,
+// looking on the stock line first, then its lot, then the product.
+const SALES_STOCK_SPECS: SalesStockSpec[] = [
+    { key: "copyName", tech: [], labels: ["copy name"], type: "text" },
+    { key: "country", tech: [], labels: ["country", "country of origin"], type: "text" },
+    { key: "brand", tech: ["tire_brand"], labels: ["brand", "tire brand"], type: "text" },
+    { key: "pattern", tech: [], labels: ["pattern", "tire pattern", "tread pattern"], type: "text" },
+    { key: "lotYear", tech: [], labels: ["lot year"], type: "text" },
+    { key: "incomingQty", tech: ["incoming_qty"], labels: ["incoming", "incoming quantity"], type: "number" },
+    { key: "forecastedQty", tech: ["virtual_available"], labels: ["forecasted quantity", "forecasted qty", "forecasted"], type: "number" },
+    { key: "realCostLot", tech: [], labels: ["real cost lot"], type: "number" },
+    { key: "lotAverageCost", tech: [], labels: ["lot average cost", "lot avg cost"], type: "number" },
+    { key: "retailPrice", tech: [], labels: ["retail price"], type: "number" },
+    { key: "wholesalePrice", tech: [], labels: ["wholesales price", "wholesale price"], type: "number" },
+    { key: "specialPrice", tech: [], labels: ["special price"], type: "number" },
+];
+
+function normalizeFieldValue(value: unknown, meta: OdooFieldMeta | undefined, type: "text" | "number") {
+    if (type === "number") {
+        const numeric = Number(value);
+        return value === false || value === null || value === undefined || !Number.isFinite(numeric) ? null : numeric;
+    }
+    if (value === false || value === null || value === undefined) {
+        return "";
+    }
+    if (Array.isArray(value)) {
+        return toDisplayString(value[1]);
+    }
+    if (meta?.type === "selection" && Array.isArray(meta.selection)) {
+        return meta.selection.find(([key]) => key === value)?.[1] ?? toDisplayString(value);
+    }
+    return toDisplayString(value);
+}
+
+export type SalesStockFilters = {
+    categoryId?: number | null;
+    brandId?: number | null;
+    rimId?: number | null;
+    originId?: number | null;
+    patternId?: number | null;
+    patternName?: string | null;
+    lotName?: string | null;
+};
+
+export async function searchSalesStock(
+    credentials: OdooCredentials,
+    input?: { query?: string; limit?: number; offset?: number; filters?: SalesStockFilters }
+): Promise<{ rows: SalesStockRow[]; totalCount: number; unresolvedFields: string[] }> {
+    const uid = await authenticate(credentials);
+    const query = (input?.query ?? "").trim();
+    const limit = Number.isFinite(input?.limit) ? Math.max(1, Math.min(100, Number(input?.limit))) : 30;
+    const offset = Number.isFinite(input?.offset) ? Math.max(0, Number(input?.offset)) : 0;
+
+    // The search keyword is matched against the template's `second_name`
+    // ("Search Name") only. That field is stored without spaces/slashes
+    // (e.g. "215/55R17 Austone" -> "2155517Austone"), so each typed word is
+    // normalized the same way, and every word must match.
+    const productDomain: unknown[] = [];
+    for (const token of query.split(/\s+/).filter(Boolean)) {
+        const sizeMatch = token.match(/^(\d{3})\/?(\d{2})\s*[A-Za-z]?\s*(\d{2})$/);
+        const keyword = sizeMatch ? `${sizeMatch[1]}${sizeMatch[2]}${sizeMatch[3]}` : token.replace(/[\/\-_.]/g, "");
+        if (keyword) {
+            productDomain.push(["product_tmpl_id.second_name", "ilike", keyword]);
+        }
+    }
+
+    // With no typed keyword the stock lines aren't narrowed by product at all
+    // (only the Smart Search filters apply), so the product pre-search is skipped.
+    const matchingProductIds = query
+        ? await executeKw<number[]>(
+              credentials,
+              uid,
+              "product.product",
+              "search",
+              [productDomain],
+              { limit: PRODUCT_CATALOG_SEARCH_MAX_MATCHES, context: { active_test: false } }
+          )
+        : null;
+    if (matchingProductIds && matchingProductIds.length === 0) {
+        return { rows: [], totalCount: 0, unresolvedFields: [] };
+    }
+
+    const [quantMeta, lotMeta, productMeta] = await Promise.all([
+        getModelFieldsMeta(credentials, uid, "stock.quant"),
+        getModelFieldsMeta(credentials, uid, "stock.lot").catch(() => ({} as Record<string, OdooFieldMeta>)),
+        getModelFieldsMeta(credentials, uid, "product.product"),
+    ]);
+    const metaBySource: Record<SalesStockSource, Record<string, OdooFieldMeta>> = {
+        quant: quantMeta,
+        lot: lotMeta,
+        product: productMeta,
+    };
+
+    const resolved = new Map<string, { source: SalesStockSource; field: string }>();
+    for (const spec of SALES_STOCK_SPECS) {
+        for (const source of ["quant", "lot", "product"] as SalesStockSource[]) {
+            const meta = metaBySource[source];
+            const techHit = spec.tech.find((name) => meta[name]);
+            const labelHit = Object.entries(meta).find(
+                ([, fieldMeta]) => spec.labels.includes(toDisplayString(fieldMeta?.string).trim().toLowerCase())
+            )?.[0];
+            // Pattern is best found by what it points at (the tire.pattern
+            // model, which also holds the pattern images), not just its label.
+            const relationHit = spec.key === "pattern"
+                ? Object.entries(meta).find(([, fieldMeta]) => fieldMeta?.type === "many2one" && fieldMeta?.relation === "tire.pattern")?.[0]
+                : undefined;
+            const field = relationHit ?? techHit ?? labelHit;
+            if (field) {
+                resolved.set(spec.key, { source, field });
+                break;
+            }
+        }
+    }
+
+    const patternHitForFilter = resolved.get("pattern");
+    const activeCompanyIds = companyContextStorage.getStore();
+    const quantDomain: unknown[] = [
+        ...(matchingProductIds ? [["product_id", "in", matchingProductIds]] : []),
+        ["location_id.usage", "=", "internal"],
+        ["quantity", ">", 0],
+    ];
+
+    // Smart Search filters: OR-ed with each other, then AND-ed with the
+    // keyword and the base conditions above.
+    const filters = input?.filters ?? {};
+    const filterConditions: unknown[][] = [];
+    if (filters.categoryId) filterConditions.push(["product_id.categ_id", "child_of", Number(filters.categoryId)]);
+    if (filters.brandId) filterConditions.push(["product_id.tire_brand", "=", Number(filters.brandId)]);
+    if (filters.rimId) filterConditions.push(["product_id.rim_diameter", "=", Number(filters.rimId)]);
+    if (filters.originId) filterConditions.push(["product_id.origin", "=", Number(filters.originId)]);
+    if (filters.lotName) filterConditions.push(["lot_id.name", "=", String(filters.lotName)]);
+    if ((filters.patternId || filters.patternName) && patternHitForFilter) {
+        const prefix = patternHitForFilter.source === "quant" ? "" : patternHitForFilter.source === "lot" ? "lot_id." : "product_id.";
+        const path = `${prefix}${patternHitForFilter.field}`;
+        const isRelation = metaBySource[patternHitForFilter.source][patternHitForFilter.field]?.relation === "tire.pattern";
+        if (isRelation && filters.patternId) {
+            filterConditions.push([path, "=", Number(filters.patternId)]);
+        } else if (filters.patternName) {
+            filterConditions.push([path, "ilike", String(filters.patternName)]);
+        }
+    }
+    if (filterConditions.length > 0) {
+        quantDomain.push(...Array(filterConditions.length - 1).fill("|"), ...filterConditions);
+    }
+    if (activeCompanyIds && activeCompanyIds.length > 0) {
+        quantDomain.push(["company_id", "in", activeCompanyIds]);
+    }
+
+    const totalCount = await executeKw<number>(credentials, uid, "stock.quant", "search_count", [quantDomain]);
+
+    const quantFields = new Set(
+        ["product_id", "location_id", "lot_id", "company_id", "quantity", "reserved_quantity", "available_quantity", "product_categ_id"].filter(
+            (name) => quantMeta[name]
+        )
+    );
+    for (const { source, field } of resolved.values()) {
+        if (source === "quant") quantFields.add(field);
+    }
+
+    const quants = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "stock.quant",
+        "search_read",
+        [quantDomain],
+        { fields: Array.from(quantFields), order: "quantity desc, id asc", limit, offset }
+    );
+
+    const lotIds = Array.from(new Set(quants.map((quant) => getRelationalId(quant.lot_id)).filter((id): id is number => Boolean(id))));
+    const productIds = Array.from(new Set(quants.map((quant) => getRelationalId(quant.product_id)).filter((id): id is number => Boolean(id))));
+
+    const lotFields = Array.from(new Set(Array.from(resolved.values()).filter((item) => item.source === "lot").map((item) => item.field)));
+    const productFields = Array.from(
+        new Set(["display_name", ...Array.from(resolved.values()).filter((item) => item.source === "product").map((item) => item.field)])
+    );
+
+    const [lots, products] = await Promise.all([
+        lotIds.length > 0 && lotFields.length > 0
+            ? executeKw<Array<Record<string, unknown>>>(credentials, uid, "stock.lot", "read", [lotIds], { fields: lotFields })
+            : Promise.resolve([] as Array<Record<string, unknown>>),
+        executeKw<Array<Record<string, unknown>>>(credentials, uid, "product.product", "read", [productIds], {
+            fields: productFields,
+            context: { active_test: false },
+        }),
+    ]);
+    const lotById = new Map(lots.map((lot) => [Number(lot.id), lot]));
+    const productById = new Map(products.map((product) => [Number(product.id), product]));
+
+    // Pattern id per row: direct when the field is a many2one to tire.pattern,
+    // otherwise looked up by the pattern's name.
+    const patternHit = resolved.get("pattern");
+    const patternIsRelation = patternHit
+        ? metaBySource[patternHit.source][patternHit.field]?.relation === "tire.pattern"
+        : false;
+    const patternIdByName = new Map<string, number>();
+    if (patternHit && !patternIsRelation) {
+        const names = Array.from(
+            new Set(
+                quants
+                    .map((quant) => {
+                        const record = patternHit.source === "quant" ? quant : patternHit.source === "lot" ? lotById.get(getRelationalId(quant.lot_id) ?? 0) : productById.get(getRelationalId(quant.product_id) ?? 0);
+                        return toDisplayString(normalizeFieldValue(record?.[patternHit.field], undefined, "text")).trim();
+                    })
+                    .filter(Boolean)
+            )
+        );
+        if (names.length > 0) {
+            try {
+                const patterns = await executeKw<Array<Record<string, unknown>>>(
+                    credentials,
+                    uid,
+                    "tire.pattern",
+                    "search_read",
+                    [[["name", "in", names]]],
+                    { fields: ["id", "name"], limit: 500 }
+                );
+                for (const pattern of patterns) {
+                    const name = toDisplayString(pattern.name).trim();
+                    if (name && !patternIdByName.has(name)) {
+                        patternIdByName.set(name, Number(pattern.id));
+                    }
+                }
+            } catch {
+                // tire.pattern not readable — rows just show no image.
+            }
+        }
+    }
+
+    const rows = quants.map((quant): SalesStockRow => {
+        const productId = getRelationalId(quant.product_id) ?? 0;
+        const lotId = getRelationalId(quant.lot_id);
+        const product = productById.get(productId);
+        const lot = lotId ? lotById.get(lotId) : undefined;
+
+        const pick = (key: string, type: "text" | "number") => {
+            const hit = resolved.get(key);
+            if (!hit) return normalizeFieldValue(undefined, undefined, type);
+            const record = hit.source === "quant" ? quant : hit.source === "lot" ? lot : product;
+            return normalizeFieldValue(record?.[hit.field], metaBySource[hit.source][hit.field], type);
+        };
+
+        const onHand = Number(quant.quantity ?? 0);
+        const reserved = Number(quant.reserved_quantity ?? 0);
+        const patternName = pick("pattern", "text") as string;
+        let patternId: number | null = null;
+        if (patternHit) {
+            const record = patternHit.source === "quant" ? quant : patternHit.source === "lot" ? lot : product;
+            patternId = patternIsRelation
+                ? getRelationalId(record?.[patternHit.field])
+                : patternIdByName.get(patternName.trim()) ?? null;
+        }
+
+        return {
+            id: Number(quant.id),
+            productId,
+            productName: toDisplayString(product?.display_name) || getRelationalName(quant.product_id),
+            location: getRelationalName(quant.location_id),
+            lotId,
+            lotName: getRelationalName(quant.lot_id),
+            companyId: getRelationalId(quant.company_id),
+            companyName: getRelationalName(quant.company_id),
+            categoryName: getRelationalName(quant.product_categ_id),
+            brand: pick("brand", "text") as string,
+            country: pick("country", "text") as string,
+            pattern: patternName,
+            patternId,
+            lotYear: pick("lotYear", "text") as string,
+            copyName: pick("copyName", "text") as string,
+            availableQty: Number(quant.available_quantity ?? onHand - reserved),
+            incomingQty: pick("incomingQty", "number") as number | null,
+            forecastedQty: pick("forecastedQty", "number") as number | null,
+            reservedQty: reserved,
+            onHandQty: onHand,
+            realCostLot: pick("realCostLot", "number") as number | null,
+            lotAverageCost: pick("lotAverageCost", "number") as number | null,
+            retailPrice: pick("retailPrice", "number") as number | null,
+            wholesalePrice: pick("wholesalePrice", "number") as number | null,
+            specialPrice: pick("specialPrice", "number") as number | null,
+        };
+    });
+
+    const unresolvedFields = SALES_STOCK_SPECS.filter((spec) => !resolved.has(spec.key)).map((spec) => spec.key);
+    return { rows, totalCount, unresolvedFields };
+}
+
+/** Every tire pattern (with its brand when the model links one), for the Smart Search dropdown. */
+export async function getTirePatterns(
+    credentials: OdooCredentials
+): Promise<Array<{ id: number; name: string; brandName: string }>> {
+    const uid = await authenticate(credentials);
+    const [patternMeta, productMeta] = await Promise.all([
+        getModelFieldsMeta(credentials, uid, "tire.pattern"),
+        getModelFieldsMeta(credentials, uid, "product.product"),
+    ]);
+
+    const brandRelation = productMeta.tire_brand?.relation;
+    const brandField = brandRelation
+        ? Object.entries(patternMeta).find(([, meta]) => meta.type === "many2one" && meta.relation === brandRelation)?.[0]
+        : undefined;
+
+    const patterns = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "tire.pattern",
+        "search_read",
+        [[]],
+        { fields: ["id", "name", ...(brandField ? [brandField] : [])], order: "name asc", limit: 5000 }
+    );
+
+    return patterns.map((pattern) => ({
+        id: Number(pattern.id),
+        name: toDisplayString(pattern.name),
+        brandName: brandField ? getRelationalName(pattern[brandField]) : "",
+    }));
+}
+
+/** Distinct lot names (lots are reused across products), for the Smart Search dropdown. */
+export async function getLotNames(credentials: OdooCredentials): Promise<string[]> {
+    const uid = await authenticate(credentials);
+    const grouped = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "stock.lot",
+        "read_group",
+        [[], ["name"], ["name"]],
+        { lazy: false, limit: 3000 }
+    );
+    return grouped
+        .map((row) => toDisplayString(row.name))
+        .filter(Boolean)
+        .sort((left, right) => left.localeCompare(right));
+}
+
+function detectImageMime(base64: string) {
+    if (base64.startsWith("/9j/")) return "image/jpeg";
+    if (base64.startsWith("iVBOR")) return "image/png";
+    if (base64.startsWith("UklGR")) return "image/webp";
+    if (base64.startsWith("R0lGOD")) return "image/gif";
+    if (base64.startsWith("PHN2Zy") || base64.startsWith("PD94bW")) return "image/svg+xml";
+    return "image/png";
+}
+
+/** Pattern images (smallest `tire.pattern.image_*` available) as data URLs, keyed by pattern id. */
+export async function getPatternImages(
+    credentials: OdooCredentials,
+    patternIds: number[]
+): Promise<Record<number, string>> {
+    const ids = Array.from(new Set(patternIds.map(Number).filter((id) => Number.isFinite(id) && id > 0))).slice(0, 100);
+    if (ids.length === 0) {
+        return {};
+    }
+
+    const uid = await authenticate(credentials);
+
+    // Smallest resolution this model offers — the images are only shown as
+    // small thumbnails, so the 512px original would just be wasted bandwidth.
+    const meta = await getModelFieldsMeta(credentials, uid, "tire.pattern");
+    const imageField = ["image_128", "image_256", "image_512"].find((name) => meta[name]);
+    if (!imageField) {
+        return {};
+    }
+
+    const patterns = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "tire.pattern",
+        "read",
+        [ids],
+        { fields: [imageField] }
+    );
+
+    const images: Record<number, string> = {};
+    for (const pattern of patterns) {
+        const data = pattern[imageField];
+        if (typeof data === "string" && data.length > 0) {
+            images[Number(pattern.id)] = `data:${detectImageMime(data)};base64,${data}`;
+        }
+    }
+    return images;
+}
+
+export type SalesQuotationLine = {
+    productId: number;
+    quantity: number;
+    description?: string;
+    companyId: number | null;
+};
+
+/**
+ * Creates one draft quotation (`sale.order`) per company present in the cart —
+ * an Odoo sale order belongs to a single company, so a cart spanning several
+ * companies can't be a single order.
+ */
+export async function createSalesQuotations(
+    credentials: OdooCredentials,
+    input: { customerId: number; lines: SalesQuotationLine[] }
+): Promise<Array<{ id: number; name: string; companyName: string }>> {
+    const uid = await authenticate(credentials);
+
+    const lines = input.lines.filter((line) => line.productId > 0 && Number.isFinite(line.quantity) && line.quantity > 0);
+    if (lines.length === 0) {
+        throw new Error("The cart is empty.");
+    }
+
+    const linesByCompany = new Map<number, SalesQuotationLine[]>();
+    for (const line of lines) {
+        const key = line.companyId ?? 0;
+        linesByCompany.set(key, [...(linesByCompany.get(key) ?? []), line]);
+    }
+
+    const created: Array<{ id: number; name: string; companyName: string }> = [];
+    for (const [companyId, companyLines] of linesByCompany) {
+        const context = companyId > 0 ? { allowed_company_ids: [companyId], force_company: companyId } : {};
+        const orderValues: Record<string, unknown> = {
+            partner_id: input.customerId,
+            user_id: uid,
+            ...(companyId > 0 ? { company_id: companyId } : {}),
+        };
+
+        const orderId = await executeKw<number>(credentials, uid, "sale.order", "create", [orderValues], { context });
+        for (const line of companyLines) {
+            await executeKw<number>(
+                credentials,
+                uid,
+                "sale.order.line",
+                "create",
+                [{
+                    order_id: orderId,
+                    product_id: line.productId,
+                    product_uom_qty: line.quantity,
+                    ...(line.description ? { name: line.description } : {}),
+                }],
+                { context }
+            );
+        }
+
+        const [order] = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "sale.order",
+            "read",
+            [[orderId]],
+            { fields: ["name", "company_id"], context }
+        );
+        created.push({
+            id: orderId,
+            name: toDisplayString(order?.name),
+            companyName: getRelationalName(order?.company_id),
+        });
+    }
+
+    return created;
+}
+
 export async function getProductCategoriesByProductIds(
     credentials: OdooCredentials,
     productIds: number[]
@@ -9973,6 +10487,8 @@ export type PoTrackingOrder = {
     fullyReceived: boolean;
     /** Total ordered quantity on the PO (the container text doesn't say how it splits). */
     totalQty: number;
+    /** Tyre brands on the PO's product lines. */
+    brands: string[];
     containers: PoTrackingContainer[];
 };
 
@@ -10235,14 +10751,13 @@ export async function getImportedPurchaseOrdersForTracking(
     const readFields = ["name", "partner_id", "partner_ref", ...noteFields, "date_order", "date_planned", "currency_id", typeField.fieldName]
         .filter((name, index, all) => all.indexOf(name) === index && hasField(name));
 
-    const orders = await executeKw<Array<Record<string, unknown>>>(
-        credentials,
-        uid,
-        "purchase.order",
-        "search_read",
-        [domain],
-        { fields: readFields, order: "date_order desc, id desc", limit: 300 }
-    );
+    // Not capped: a fixed limit here silently kept only the newest N orders
+    // across *all* selected companies, so an older company's orders vanished
+    // whenever several companies (or "include fully received") were selected.
+    const orders = await searchReadAll(credentials, uid, "purchase.order", domain, readFields, {
+        order: "date_order desc, id desc",
+        maxRecords: 20000,
+    });
     if (orders.length === 0) {
         return { orders: [], importedTypeNames: importedTypes.map((option) => option.label) };
     }
@@ -10254,8 +10769,24 @@ export async function getImportedPurchaseOrdersForTracking(
         uid,
         "purchase.order.line",
         [["order_id", "in", orderIds]],
-        ["order_id", "display_type", "product_qty", "qty_received"]
+        ["order_id", "display_type", "product_qty", "qty_received", "product_id"]
     );
+
+    // Brands per order, from the products on its lines.
+    const lineProductIds = Array.from(
+        new Set(lines.map((line) => getRelationalId(line.product_id)).filter((id): id is number => Boolean(id)))
+    );
+    const brandByProductId = new Map<number, string>();
+    if (lineProductIds.length > 0) {
+        const productBrands = await readInBatches(credentials, uid, "product.product", lineProductIds, ["tire_brand"]).catch(
+            () => [] as Array<Record<string, unknown>>
+        );
+        for (const product of productBrands) {
+            const brand = getRelationalName(product.tire_brand);
+            if (brand) brandByProductId.set(Number(product.id), brand);
+        }
+    }
+    const brandsByOrderId = new Map<number, Set<string>>();
 
     // The B/L (and any containers written with it) come from the PO's Notes —
     // the product lines are only used for quantities and to tell whether the
@@ -10267,6 +10798,11 @@ export async function getImportedPurchaseOrdersForTracking(
         const orderId = getRelationalId(line.order_id);
         if (!orderId || line.display_type) {
             continue;
+        }
+
+        const lineBrand = brandByProductId.get(getRelationalId(line.product_id) ?? 0);
+        if (lineBrand) {
+            brandsByOrderId.set(orderId, (brandsByOrderId.get(orderId) ?? new Set<string>()).add(lineBrand));
         }
 
         const qty = Number(line.product_qty ?? 0);
@@ -10317,6 +10853,7 @@ export async function getImportedPurchaseOrdersForTracking(
             types,
             fullyReceived,
             totalQty: Number((declaredUnits > 0 ? declaredUnits : totalQtyByOrderId.get(id) ?? 0).toFixed(2)),
+            brands: Array.from(brandsByOrderId.get(id) ?? []).sort((left, right) => left.localeCompare(right)),
             containers,
         });
     }

@@ -282,6 +282,75 @@ export function getCompanies() {
     }>("/api/odoo/companies", {});
 }
 
+export type SalesStockRow = {
+    id: number;
+    productId: number;
+    productName: string;
+    location: string;
+    lotId: number | null;
+    lotName: string;
+    companyId: number | null;
+    companyName: string;
+    categoryName: string;
+    brand: string;
+    country: string;
+    pattern: string;
+    patternId: number | null;
+    lotYear: string;
+    copyName: string;
+    availableQty: number;
+    incomingQty: number | null;
+    forecastedQty: number | null;
+    reservedQty: number;
+    onHandQty: number;
+    realCostLot: number | null;
+    lotAverageCost: number | null;
+    retailPrice: number | null;
+    wholesalePrice: number | null;
+    specialPrice: number | null;
+};
+
+export type SalesStockFilters = {
+    categoryId?: number | null;
+    brandId?: number | null;
+    rimId?: number | null;
+    originId?: number | null;
+    patternId?: number | null;
+    patternName?: string | null;
+    lotName?: string | null;
+};
+
+export function getTirePatterns() {
+    return post<{ patterns: Array<{ id: number; name: string; brandName: string }> }>("/api/odoo/tire-patterns", {});
+}
+
+export function getLotNames() {
+    return post<{ lots: string[] }>("/api/odoo/lot-names", {});
+}
+
+export function searchSalesStock(input: { query: string; limit?: number; offset?: number; filters?: SalesStockFilters }) {
+    return post<{
+        rows: SalesStockRow[];
+        totalCount: number;
+        unresolvedFields: string[];
+        hasMore: boolean;
+    }>("/api/odoo/sales-stock", input);
+}
+
+export function getPatternImages(ids: number[]) {
+    return post<{ images: Record<string, string> }>("/api/odoo/pattern-images", { ids });
+}
+
+export function createSalesQuotation(input: {
+    customerId: number;
+    lines: Array<{ productId: number; quantity: number; description?: string; companyId: number | null }>;
+}) {
+    return post<{ quotations: Array<{ id: number; name: string; companyName: string }> }>(
+        "/api/odoo/sales-quotation",
+        input
+    );
+}
+
 export function getProductOrigins() {
     return post<{
         origins: Array<{
@@ -492,7 +561,7 @@ export function searchProductCatalog(input?: { query?: string; limit?: number; o
     }>("/api/odoo/product-catalog-search", input ?? {});
 }
 
-export type ProductRequestType = "new_product" | "missing_size" | "missing_pattern";
+export type ProductRequestType = "new_product" | "missing_size" | "missing_pattern" | "more_quantity";
 
 export type ProductRequest = {
     id: string;
@@ -696,6 +765,7 @@ export type PoTrackingOrder = {
     types: string[];
     fullyReceived: boolean;
     totalQty: number;
+    brands: string[];
     containers: PoTrackingContainer[];
 };
 
@@ -733,6 +803,10 @@ export function getPoTrackingOrders(input?: { includeReceived?: boolean }) {
     return post<{ orders: PoTrackingOrder[]; importedTypeNames: string[] }>("/api/odoo/po-tracking", {
         includeReceived: Boolean(input?.includeReceived),
     });
+}
+
+export function getSeaRoutes(routes: Array<{ id: string; stops: Array<[number, number]> }>) {
+    return post<{ paths: Record<string, Array<[number, number]>> }>("/api/po-tracking/sea-route", { routes });
 }
 
 export function trackShipmentByBl(blNumber: string, carrierCode?: string) {

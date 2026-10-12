@@ -2,7 +2,7 @@ import { getAdminDb } from "@/lib/server/firebase-admin";
 
 const COLLECTION = "product-requests";
 
-export type ProductRequestType = "new_product" | "missing_size" | "missing_pattern";
+export type ProductRequestType = "new_product" | "missing_size" | "missing_pattern" | "more_quantity";
 
 export type ProductRequestRecord = {
     id: string;
@@ -31,7 +31,7 @@ export type ProductRequestRecord = {
 };
 
 function normalizeRequestType(value: unknown): ProductRequestType {
-    if (value === "missing_size" || value === "missing_pattern") {
+    if (value === "missing_size" || value === "missing_pattern" || value === "more_quantity") {
         return value;
     }
     return "new_product";
