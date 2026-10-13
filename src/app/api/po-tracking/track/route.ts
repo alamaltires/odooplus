@@ -21,12 +21,16 @@ type ShipmentTracking = {
     blNumber: string;
     carrierName: string;
     carrierCode: string;
+    /** "BL" or "BK" — what kind of reference number was tracked. */
+    referenceType?: string;
     status: string;
     updatedAt: string;
     vessels: string[];
     origin: { name: string; departure: string; at?: LatLng } | null;
     destination: { name: string; arrival: string; at?: LatLng } | null;
     transshipments: Array<{ name: string; arrival: string; departure: string; at?: LatLng }>;
+    /** The final delivery place when it is beyond the port of discharge (e.g. an inland depot). */
+    finalDestination?: { name: string; at?: LatLng };
     containers: Array<{
         number: string;
         size: string;
@@ -129,16 +133,22 @@ function normalize(blNumber: string, body: Raw): ShipmentTracking {
 
     const origin = route.first_port_of_loading;
     const destination = route.final_port_of_discharge;
+    const delivery = route.place_of_delivery;
+    const deliveryName = placeName(delivery);
+    const portName = placeName(destination);
+    const hasFinalDestination = Boolean(deliveryName) && deliveryName.trim().toLowerCase() !== portName.trim().toLowerCase();
 
     return {
         blNumber,
         carrierName: pickText(shipment.carrier?.name),
         carrierCode: str(shipment.carrier?.code),
+        referenceType: str(shipment.reference_type) || undefined,
         status: pickText(shipment.status),
         updatedAt: pickDate(shipment.updated_at),
         vessels: ((data.transports ?? []) as Raw[]).map((transport) => str(transport.name)).filter(Boolean),
         origin: origin ? { name: placeName(origin), departure: pickDate(origin.departure), at: placeAt(origin) } : null,
         destination: destination ? { name: placeName(destination), arrival: pickDate(destination.arrival), at: placeAt(destination) } : null,
+        ...(hasFinalDestination ? { finalDestination: { name: deliveryName, at: placeAt(delivery) } } : {}),
         transshipments: ((route.transshipments ?? []) as Raw[]).map((stop) => ({
             name: placeName(stop),
             arrival: pickDate(stop.arrival),
@@ -199,7 +209,7 @@ export async function POST(request: Request) {
         // Saved so the page can show the last known status without asking
         // Qubictron again. A save failure must not hide a successful lookup.
         try {
-            await getAdminDb().collection("po-tracking").doc(bl.replace(/[^A-Za-z0-9_-]/g, "_")).set(tracking);
+            await getAdminDb().collection("po-tracking").doc(bl.replace(/[^A-Za-z0-9_-]/g, "_")).set(JSON.parse(JSON.stringify(tracking))); // JSON round-trip drops undefined fields, which Firestore rejects
             // The shipping line that worked is remembered so later updates need no choice.
             const usedCarrier = carrier || tracking.carrierCode;
             if (usedCarrier) {

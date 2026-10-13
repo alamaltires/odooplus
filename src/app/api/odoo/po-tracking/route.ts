@@ -6,10 +6,10 @@ export async function POST(request: Request) {
     try {
         const { credentials } = await getOdooCredentialsFromRequest(request);
         const companyIds = await getCompanyIdsFromRequest(request);
-        const body = (await request.json().catch(() => ({}))) as { includeReceived?: boolean };
+        const body = (await request.json().catch(() => ({}))) as { includeReceived?: boolean; fresh?: boolean };
 
         const data = await runWithCompanyIds(companyIds, () =>
-            getImportedPurchaseOrdersForTracking(credentials, { includeReceived: Boolean(body.includeReceived) })
+            getImportedPurchaseOrdersForTracking(credentials, { includeReceived: Boolean(body.includeReceived), fresh: Boolean(body.fresh) })
         );
         return NextResponse.json(data);
     } catch (error) {

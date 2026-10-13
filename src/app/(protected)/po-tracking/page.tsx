@@ -8,9 +8,13 @@ import {
     Building2,
     CheckCircle2,
     ChevronDown,
+    ChevronLeft,
+    ChevronRight,
     Container,
+    Download,
     List,
     Map as MapIcon,
+    MapPin,
     Package,
     RefreshCw,
     Search,
@@ -20,6 +24,8 @@ import {
 import {
     diagnosePoTracking,
     geocodePorts,
+    exportPoTrackingExcel,
+    getPoBrands,
     getPoTrackingOrders,
     getSeaRoutes,
     getSavedShipmentTracking,
@@ -69,6 +75,7 @@ const STAGES: Array<{ key: Stage; label: string }> = [
 ];
 
 const DAY = 86_400_000;
+const PAGE_SIZE = 20;
 
 /** B/Ls from the same shipping line share their first characters (e.g. 177GAT…). */
 function seriesOf(blNumber: string) {
@@ -139,6 +146,28 @@ function stageOf(tracking: ShipmentTracking | undefined): Stage {
     return "waiting";
 }
 
+/**
+ * Where the cargo ended up when that is beyond the port of discharge. Uses the
+ * carrier's delivery place when it was saved, and otherwise the place of the
+ * consignee-delivery / empty-return events (e.g. unloaded at Khor al Fakkan, but
+ * the empty container came back at Jebel Ali).
+ */
+function finalDestinationOf(tracking: ShipmentTracking | undefined): string {
+    if (!tracking) return "";
+    const place = (name: string) => name.trim().toLowerCase().split(",")[0].trim();
+    const port = place(tracking.destination?.name ?? "");
+    const differs = (name: string) => Boolean(name.trim()) && place(name) !== port;
+
+    if (tracking.finalDestination?.name && differs(tracking.finalDestination.name)) {
+        return tracking.finalDestination.name;
+    }
+    const delivered = allEvents(tracking)
+        .filter((event) => event.isActual && event.location && toDate(event.datetime) && /Delivery to Consignee|Empty Container Return|Container Returned|\bDelivered\b/i.test(event.description))
+        .sort((a, b) => b.datetime.localeCompare(a.datetime));
+    const hit = delivered.find((event) => differs(event.location));
+    return hit ? hit.location : "";
+}
+
 function latestActualEvent(tracking: ShipmentTracking | undefined): ShipmentEvent | null {
     if (!tracking) return null;
     const actual = allEvents(tracking).filter((event) => event.isActual && toDate(event.datetime));
@@ -183,6 +212,12 @@ export default function PoTrackingPage() {
     const [search, setSearch] = useState("");
     const [filter, setFilter] = useState<FilterKey>("all");
     const [view, setView] = useState<"list" | "map">("list");
+    const [page, setPage] = useState(1);
+    // Tyre brands per PO, fetched only for the shipments on the visible page (or when exporting).
+    const [brandsByOrder, setBrandsByOrder] = useState<Record<number, string[]>>({});
+    const [scrollTarget, setScrollTarget] = useState<string | null>(null);
+    const [exporting, setExporting] = useState(false);
+    const [exportError, setExportError] = useState<string | null>(null);
     // Sea routes by route key; "failed" keys fall back to a rough lane so they're not retried.
     const [seaRouteError, setSeaRouteError] = useState<string | null>(null);
     const [seaPaths, setSeaPaths] = useState<Record<string, LatLng[][] | null>>({});
@@ -294,15 +329,11 @@ export default function PoTrackingPage() {
     const resultItem = resultBl ? enriched.find((item) => item.group.blNumber === resultBl) ?? null : null;
 
     // Jump to the shipment's normal place in the list (switching to the view it now belongs to).
+    // The list is paged, so the page holding it is opened first (see the scrollTarget effect).
     function showInList(item: (typeof enriched)[number]) {
-        const target = item.group.blNumber;
         setSearch("");
         setFilter(item.stage === "arrived" || item.stage === "delivered" ? "arrived" : "transit");
-        window.setTimeout(() => {
-            document.getElementById(`bl-${target}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
-            setHighlighted(target);
-            window.setTimeout(() => setHighlighted((current) => (current === target ? null : current)), 2500);
-        }, 150);
+        setScrollTarget(item.group.blNumber);
     }
 
     const visible = useMemo(() => {
@@ -355,6 +386,61 @@ export default function PoTrackingPage() {
             });
     }, [enriched, filter, search, transitSort]);
 
+    const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
+    const currentPage = Math.min(page, pageCount);
+    const pagedVisible = useMemo(() => visible.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE), [visible, currentPage]);
+
+    // A new filter / search / sort starts again from the first page.
+    useEffect(() => {
+        setPage(1);
+    }, [filter, search, transitSort, includeReceived]);
+
+    // Open the page that holds the requested shipment, then scroll to it and flash it.
+    useEffect(() => {
+        if (!scrollTarget || view !== "list") return;
+        const index = visible.findIndex((item) => item.group.blNumber === scrollTarget);
+        if (index < 0) return;
+        const targetPage = Math.floor(index / PAGE_SIZE) + 1;
+        if (currentPage !== targetPage) {
+            setPage(targetPage);
+            return;
+        }
+        const target = scrollTarget;
+        const timer = window.setTimeout(() => {
+            document.getElementById(`bl-${target}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+            setHighlighted(target);
+            window.setTimeout(() => setHighlighted((current) => (current === target ? null : current)), 2500);
+            setScrollTarget(null);
+        }, 150);
+        return () => window.clearTimeout(timer);
+    }, [scrollTarget, visible, currentPage, view]);
+
+    // Brands are read from Odoo only for the shipments on screen.
+    useEffect(() => {
+        const need = new Set<number>();
+        const pinned = resultBl ? enriched.find((item) => item.group.blNumber === resultBl) : undefined;
+        for (const { group } of [...pagedVisible, ...(pinned ? [pinned] : [])]) {
+            for (const order of group.orders) {
+                if (brandsByOrder[order.id] === undefined) need.add(order.id);
+            }
+        }
+        if (need.size === 0) return;
+        let cancelled = false;
+        getPoBrands(Array.from(need))
+            .then((data) => {
+                if (cancelled) return;
+                setBrandsByOrder((current) => {
+                    const next = { ...current };
+                    for (const id of need) next[id] = data.brands[String(id)] ?? [];
+                    return next;
+                });
+            })
+            .catch(() => undefined);
+        return () => {
+            cancelled = true;
+        };
+    }, [pagedVisible, brandsByOrder, resultBl, enriched]);
+
     // Tracking re-sorts the list, so once the new order has rendered, scroll to the
     // card that was just tracked and open its results.
     const updateOne = useCallback(async (blNumber: string, chosenCarrier?: string, reveal = true) => {
@@ -383,9 +469,6 @@ export default function PoTrackingPage() {
             });
         }
     }, [carrierByBl, ensureCarriers, revealResult]);
-
-    // Delivered shipments never change again, so "Update all" skips them to save requests.
-    const bulkTargets = visible.filter(({ stage, tracking }) => !(tracking && stage === "delivered")).map(({ group }) => group.blNumber);
 
     async function updateAll() {
         setConfirmBulk(false);
@@ -454,7 +537,7 @@ export default function PoTrackingPage() {
                                             <span className="font-semibold tracking-wide">{group.blNumber}</span>
                                         </p>
                                         {(() => {
-                                            const brands = Array.from(new Set(group.orders.flatMap((order) => order.brands ?? []))).sort((a, b) => a.localeCompare(b));
+                                            const brands = Array.from(new Set(group.orders.flatMap((order) => brandsByOrder[order.id] ?? []))).sort((a, b) => a.localeCompare(b));
                                             return brands.length > 0 ? (
                                                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
                                                     <span className="text-xs text-(--ink-soft)">Brands</span>
@@ -498,6 +581,13 @@ export default function PoTrackingPage() {
                                             <span className="h-px flex-1 bg-(--line)" />
                                             <span>{tracking.destination?.name || "Destination"}</span>
                                         </div>
+                                        {finalDestinationOf(tracking) ? (
+                                            <p className="mt-1.5 flex items-center justify-end gap-1.5 text-sm">
+                                                <MapPin className="h-4 w-4 text-(--brand)" aria-hidden="true" />
+                                                <span className="text-(--ink-soft)">Final destination</span>
+                                                <span className="font-semibold">{finalDestinationOf(tracking)}</span>
+                                            </p>
+                                        ) : null}
                                         <div className="mt-3 grid grid-cols-4 gap-1.5">
                                             {STAGES.map((item, index) => (
                                                 <div key={item.key}>
@@ -719,6 +809,76 @@ export default function PoTrackingPage() {
             : mapShipments;
     }, [mapShipments, mapListSearch]);
 
+    // On the map the update button follows the ticked shipments; in the list it follows the current filter.
+    // Delivered shipments never change again, so they are skipped to save requests.
+    const selectionActive = view === "map" && hiddenBls.size > 0;
+    const bulkTargets =
+        view === "map"
+            ? shownOnMap.filter((item) => item.stage !== "delivered").map((item) => item.blNumber)
+            : visible.filter(({ stage, tracking }) => !(tracking && stage === "delivered")).map(({ group }) => group.blNumber);
+
+    // The Excel export covers what the current view is showing (all pages, or the ticked map shipments).
+    async function exportToExcel() {
+        setExporting(true);
+        setExportError(null);
+        try {
+            const mapBls = new Set(shownOnMap.map((item) => item.blNumber));
+            const items = view === "map" ? visible.filter((item) => mapBls.has(item.group.blNumber)) : visible;
+            if (items.length === 0) throw new Error("There are no shipments to export.");
+
+            // Brands for every exported PO (the page only loaded the ones on screen).
+            const brands: Record<number, string[]> = { ...brandsByOrder };
+            const missing = Array.from(new Set(items.flatMap((item) => item.group.orders.map((order) => order.id)))).filter((id) => brands[id] === undefined);
+            for (let index = 0; index < missing.length; index += 300) {
+                const chunk = missing.slice(index, index + 300);
+                const data = await getPoBrands(chunk);
+                for (const id of chunk) brands[id] = data.brands[String(id)] ?? [];
+            }
+            setBrandsByOrder(brands);
+
+            const city = (name: string | undefined) => (name ?? "").split(",")[0].trim();
+            const rows = items.map(({ group, tracking }) => {
+                // A PO split over several B/Ls: this B/L carries its share of the PO's value.
+                const amount = group.orders.reduce((sum, order) => {
+                    const blCount = new Set(order.containers.map((container) => container.blNumber)).size || 1;
+                    const declared = order.containers.filter((container) => container.blNumber === group.blNumber).reduce((total, container) => total + container.quantity, 0);
+                    const share = declared > 0 && order.totalQty > 0 ? declared / order.totalQty : 1 / blCount;
+                    return sum + order.amountTotal * Math.min(1, share);
+                }, 0);
+                return {
+                    bl: group.blNumber,
+                    sealine: tracking?.carrierCode ?? "",
+                    type: tracking?.referenceType === "BK" ? "BK" : "BL",
+                    // Dates are sent exactly as the carrier / Odoo wrote them (no time-zone shift).
+                    eta: (tracking?.destination?.arrival || group.orders[0]?.expectedArrival || "").slice(0, 10) || null,
+                    etd: (tracking?.origin?.departure || "").slice(0, 10) || null,
+                    brand: Array.from(new Set(group.orders.flatMap((order) => brands[order.id] ?? []))).sort((a, b) => a.localeCompare(b)).join(", "),
+                    customer: Array.from(new Set(group.orders.map((order) => order.companyName).filter(Boolean))).join(", "),
+                    pol: city(tracking?.origin?.name),
+                    pod: city(tracking?.destination?.name),
+                    vol: group.containers.length,
+                    qty: Math.round(group.totalQty),
+                    amount: amount > 0 ? Number(amount.toFixed(2)) : null,
+                    factory: Array.from(new Set(group.orders.map((order) => order.vendorName).filter(Boolean))).join(", "),
+                };
+            });
+
+            const blob = await exportPoTrackingExcel(rows);
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = `PO-Tracking-${new Date().toISOString().slice(0, 10)}.xlsx`;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+        } catch (error) {
+            setExportError(error instanceof Error ? error.message : "Export failed.");
+        } finally {
+            setExporting(false);
+        }
+    }
+
     function setMapListVisibility(rows: MapShipment[], visibleOnMap: boolean) {
         setHiddenBls((current) => {
             const next = new Set(current);
@@ -858,17 +1018,34 @@ export default function PoTrackingPage() {
                         className="inline-flex items-center gap-2 rounded-xl bg-(--brand) px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
                     >
                         <RefreshCw className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} />
-                        {busy ? `Updating ${bulkProgress.done} of ${bulkProgress.total}` : `Update all (${bulkTargets.length})`}
+                        {busy ? `Updating ${bulkProgress.done} of ${bulkProgress.total}` : `${selectionActive ? "Update selected" : "Update all"} (${bulkTargets.length})`}
                     </button>
                 )}
+
+                <button
+                    type="button"
+                    onClick={() => void exportToExcel()}
+                    disabled={exporting || (view === "map" ? shownOnMap.length === 0 : visible.length === 0)}
+                    className="inline-flex items-center gap-2 rounded-xl border border-(--line) bg-white px-4 py-2 text-sm font-medium text-(--ink) disabled:opacity-60"
+                    title={view === "map" ? "Export the shipments ticked on the map" : "Export every shipment in the current filter"}
+                >
+                    <Download className={`h-4 w-4 ${exporting ? "animate-pulse" : ""}`} />
+                    {exporting ? "Preparing..." : "Export to Excel"}
+                </button>
             </div>
+            {exportError ? <p className="mt-2 text-sm text-red-600">{exportError}</p> : null}
 
             <PoCheck />
 
             {ordersError ? (
                 <p className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{ordersError}</p>
             ) : null}
-            {ordersLoading && orders.length === 0 ? <p className="mt-6 text-sm text-(--ink-soft)">Loading purchase orders from Odoo...</p> : null}
+            {ordersLoading ? (
+                <p className="mt-6 flex items-center gap-2 text-sm text-(--ink-soft)" role="status">
+                    <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
+                    {orders.length === 0 ? "Loading purchase orders from Odoo..." : "Refreshing the list from Odoo..."}
+                </p>
+            ) : null}
             {!ordersLoading && !ordersError && visible.length === 0 ? (
                 <p className="mt-6 rounded-2xl border border-dashed border-(--line) px-4 py-10 text-center text-sm text-(--ink-soft)">
                     Nothing to show for this view.
@@ -1019,7 +1196,55 @@ export default function PoTrackingPage() {
                     ) : null}
                 </div>
             ) : (
-                <div className="mt-5 space-y-4">{visible.map((item) => renderCard(item))}</div>
+                <div className="mt-5">
+                    {pageCount > 1 ? (
+                        <nav className="mt-5 flex flex-wrap items-center justify-between gap-3" aria-label="Pages">
+                            <p className="text-sm text-(--ink-soft)">
+                                Showing {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, visible.length)} of {visible.length} shipments
+                            </p>
+                            <div className="flex items-center gap-1">
+                                <button
+                                    type="button"
+                                    onClick={() => setPage(currentPage - 1)}
+                                    disabled={currentPage <= 1}
+                                    className="inline-flex items-center gap-1 rounded-lg border border-(--line) bg-white px-2.5 py-1.5 text-sm disabled:opacity-50"
+                                >
+                                    <ChevronLeft className="h-4 w-4" aria-hidden="true" />
+                                    Prev
+                                </button>
+                                {Array.from({ length: pageCount }, (_, index) => index + 1)
+                                    .filter((number) => number === 1 || number === pageCount || Math.abs(number - currentPage) <= 1)
+                                    .map((number, index, shown) => (
+                                        <span key={number} className="flex items-center gap-1">
+                                            {index > 0 && number - shown[index - 1] > 1 ? <span className="px-1 text-(--ink-soft)">…</span> : null}
+                                            <button
+                                                type="button"
+                                                onClick={() => setPage(number)}
+                                                aria-current={number === currentPage ? "page" : undefined}
+                                                className={`min-w-9 rounded-lg border px-2.5 py-1.5 text-sm ${
+                                                    number === currentPage ? "border-(--brand) bg-(--brand) font-medium text-white" : "border-(--line) bg-white"
+                                                }`}
+                                            >
+                                                {number}
+                                            </button>
+                                        </span>
+                                    ))}
+                                <button
+                                    type="button"
+                                    onClick={() => setPage(currentPage + 1)}
+                                    disabled={currentPage >= pageCount}
+                                    className="inline-flex items-center gap-1 rounded-lg border border-(--line) bg-white px-2.5 py-1.5 text-sm disabled:opacity-50"
+                                >
+                                    Next
+                                    <ChevronRight className="h-4 w-4" aria-hidden="true" />
+                                </button>
+                            </div>
+                        </nav>
+                    ) : null}
+                    <div className={`${pageCount > 1 ? "mt-4 " : ""}space-y-4 transition-opacity ${ordersLoading ? "pointer-events-none opacity-50" : ""}`}>
+                        {pagedVisible.map((item) => renderCard(item))}
+                    </div>
+                </div>
             )}
 
         </section>

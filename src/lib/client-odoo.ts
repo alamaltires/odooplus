@@ -766,6 +766,8 @@ export type PoTrackingOrder = {
     fullyReceived: boolean;
     totalQty: number;
     brands: string[];
+    amountTotal: number;
+    companyName: string;
     containers: PoTrackingContainer[];
 };
 
@@ -782,12 +784,15 @@ export type ShipmentTracking = {
     blNumber: string;
     carrierName: string;
     carrierCode: string;
+    referenceType?: string;
     status: string;
     updatedAt: string;
     vessels: string[];
     origin: { name: string; departure: string; at?: [number, number] } | null;
     destination: { name: string; arrival: string; at?: [number, number] } | null;
     transshipments: Array<{ name: string; arrival: string; departure: string; at?: [number, number] }>;
+    /** The final delivery place when it is beyond the port of discharge. */
+    finalDestination?: { name: string; at?: [number, number] };
     containers: Array<{
         number: string;
         size: string;
@@ -799,14 +804,51 @@ export type ShipmentTracking = {
     fetchedAt: string;
 };
 
-export function getPoTrackingOrders(input?: { includeReceived?: boolean }) {
+export function getPoTrackingOrders(input?: { includeReceived?: boolean; fresh?: boolean }) {
     return post<{ orders: PoTrackingOrder[]; importedTypeNames: string[] }>("/api/odoo/po-tracking", {
         includeReceived: Boolean(input?.includeReceived),
+        fresh: Boolean(input?.fresh),
     });
+}
+
+/** Tyre brands per PO id — fetched only for the orders being shown (or exported). */
+export function getPoBrands(orderIds: number[]) {
+    return post<{ brands: Record<string, string[]> }>("/api/odoo/po-tracking/brands", { orderIds });
 }
 
 export function geocodePorts(names: string[]) {
     return post<{ points: Record<string, [number, number] | null> }>("/api/po-tracking/geocode", { names });
+}
+
+export type PoTrackingExportRow = {
+    bl: string;
+    sealine: string;
+    type: string;
+    eta: string | null;
+    etd: string | null;
+    brand: string;
+    customer: string;
+    pol: string;
+    pod: string;
+    vol: number;
+    qty: number;
+    amount: number | null;
+    factory: string;
+};
+
+/** Builds the Excel workbook (from the saved template) on the server and returns it as a file. */
+export async function exportPoTrackingExcel(rows: PoTrackingExportRow[]): Promise<Blob> {
+    const token = await getAuthToken();
+    const response = await fetch("/api/po-tracking/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ rows }),
+    });
+    if (!response.ok) {
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error ?? "Failed to build the Excel file");
+    }
+    return response.blob();
 }
 
 export function getSeaRoutes(routes: Array<{ id: string; stops: Array<[number, number]> }>) {

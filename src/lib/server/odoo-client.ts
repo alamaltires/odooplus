@@ -10487,8 +10487,11 @@ export type PoTrackingOrder = {
     fullyReceived: boolean;
     /** Total ordered quantity on the PO (the container text doesn't say how it splits). */
     totalQty: number;
-    /** Tyre brands on the PO's product lines. */
+    /** Tyre brands on the PO's product lines (filled by `getPoBrands`, empty in the list load). */
     brands: string[];
+    /** The PO's Total (`amount_total`) in `currencyCode`. */
+    amountTotal: number;
+    companyName: string;
     containers: PoTrackingContainer[];
 };
 
@@ -10702,17 +10705,39 @@ function parsePoTrackingNotes(text: string): ParsedTrackingEntry[] {
     return found;
 }
 
+// The list is the same for every viewer of a company selection, and building it
+// reads every imported PO, its notes and its lines — so it's kept for a minute
+// instead of being rebuilt on each page turn / filter click.
+const PO_TRACKING_CACHE_TTL_MS = 60_000;
+const poTrackingCache = new Map<string, { at: number; value: { orders: PoTrackingOrder[]; importedTypeNames: string[] } }>();
+
 /**
  * Confirmed purchase orders whose Purchase Type name contains "Import",
- * with the container / seal / B/L read from the section rows on their
- * product lines. By default only orders still awaiting receipt are returned.
+ * with the container / seal / B/L read from the PO's notes. By default only
+ * orders still awaiting receipt are returned. This is the light load: brands
+ * are fetched separately, per page, with `getPoBrands`.
  */
 export async function getImportedPurchaseOrdersForTracking(
     credentials: OdooCredentials,
-    input?: { includeReceived?: boolean }
+    input?: { includeReceived?: boolean; fresh?: boolean }
+): Promise<{ orders: PoTrackingOrder[]; importedTypeNames: string[] }> {
+    const includeReceived = Boolean(input?.includeReceived);
+    const cacheKey = `${credentials.url}|${credentials.db}|${(companyContextStorage.getStore() ?? []).join(",")}|${includeReceived}`;
+    const cached = poTrackingCache.get(cacheKey);
+    if (!input?.fresh && cached && Date.now() - cached.at < PO_TRACKING_CACHE_TTL_MS) {
+        return cached.value;
+    }
+
+    const value = await loadImportedPurchaseOrdersForTracking(credentials, includeReceived);
+    poTrackingCache.set(cacheKey, { at: Date.now(), value });
+    return value;
+}
+
+async function loadImportedPurchaseOrdersForTracking(
+    credentials: OdooCredentials,
+    includeReceived: boolean
 ): Promise<{ orders: PoTrackingOrder[]; importedTypeNames: string[] }> {
     const uid = await authenticate(credentials);
-    const includeReceived = Boolean(input?.includeReceived);
 
     const typeField = await discoverTypeField(credentials, uid, "purchase.order", PURCHASE_TYPE_FIELD_SPEC);
     if (!typeField) {
@@ -10739,17 +10764,24 @@ export async function getImportedPurchaseOrdersForTracking(
     );
     const hasField = (name: string) => Object.prototype.hasOwnProperty.call(orderFields, name);
     const noteFields = findPoNoteFields(orderFields);
+    // The "Total Qty" field on the PO — preferred over adding up the lines.
+    const totalQtyField = hasField("total_qty")
+        ? "total_qty"
+        : Object.entries(orderFields).find(([, meta]) => toDisplayString(meta?.string).trim().toLowerCase() === "total qty")?.[0] ?? null;
 
+    // `receipt_status` is deliberately not used to hide orders: Odoo marks a PO
+    // "full" once its receipts are all closed, even when a receipt was cancelled
+    // or short and units are still missing (seen live: "full" with 0 of 19 units
+    // received). Whether an order is fully received is judged from its lines below.
     const domain: unknown[] = [
         ["state", "in", ["purchase", "done"]],
         [typeField.fieldName, "in", typeValues],
     ];
-    if (!includeReceived && hasField("receipt_status")) {
-        domain.push(["receipt_status", "!=", "full"]);
-    }
 
-    const readFields = ["name", "partner_id", "partner_ref", ...noteFields, "date_order", "date_planned", "currency_id", typeField.fieldName]
-        .filter((name, index, all) => all.indexOf(name) === index && hasField(name));
+    const readFields = [
+        "name", "partner_id", "partner_ref", ...noteFields, "date_order", "date_planned", "currency_id",
+        "amount_total", "company_id", typeField.fieldName, ...(totalQtyField ? [totalQtyField] : []),
+    ].filter((name, index, all) => all.indexOf(name) === index && hasField(name));
 
     // Not capped: a fixed limit here silently kept only the newest N orders
     // across *all* selected companies, so an older company's orders vanished
@@ -10769,29 +10801,12 @@ export async function getImportedPurchaseOrdersForTracking(
         uid,
         "purchase.order.line",
         [["order_id", "in", orderIds]],
-        ["order_id", "display_type", "product_qty", "qty_received", "product_id"]
+        ["order_id", "display_type", "product_qty", "qty_received"]
     );
 
-    // Brands per order, from the products on its lines.
-    const lineProductIds = Array.from(
-        new Set(lines.map((line) => getRelationalId(line.product_id)).filter((id): id is number => Boolean(id)))
-    );
-    const brandByProductId = new Map<number, string>();
-    if (lineProductIds.length > 0) {
-        const productBrands = await readInBatches(credentials, uid, "product.product", lineProductIds, ["tire_brand"]).catch(
-            () => [] as Array<Record<string, unknown>>
-        );
-        for (const product of productBrands) {
-            const brand = getRelationalName(product.tire_brand);
-            if (brand) brandByProductId.set(Number(product.id), brand);
-        }
-    }
-    const brandsByOrderId = new Map<number, Set<string>>();
-
-    // The B/L (and any containers written with it) come from the PO's Notes —
-    // the product lines are only used for quantities and to tell whether the
-    // order has been received.
-    const totalQtyByOrderId = new Map<number, number>();
+    // Quantities on the lines only decide whether an order is fully received
+    // (and are the fallback when the PO has no Total Qty field).
+    const lineQtyByOrderId = new Map<number, number>();
     const fullyReceivedByOrderId = new Map<number, boolean>();
 
     for (const line of lines) {
@@ -10800,14 +10815,9 @@ export async function getImportedPurchaseOrdersForTracking(
             continue;
         }
 
-        const lineBrand = brandByProductId.get(getRelationalId(line.product_id) ?? 0);
-        if (lineBrand) {
-            brandsByOrderId.set(orderId, (brandsByOrderId.get(orderId) ?? new Set<string>()).add(lineBrand));
-        }
-
         const qty = Number(line.product_qty ?? 0);
-        totalQtyByOrderId.set(orderId, (totalQtyByOrderId.get(orderId) ?? 0) + qty);
-        if (Number(line.qty_received ?? 0) < qty) {
+        lineQtyByOrderId.set(orderId, (lineQtyByOrderId.get(orderId) ?? 0) + qty);
+        if (Number(line.qty_received ?? 0) < qty - 1e-6) {
             fullyReceivedByOrderId.set(orderId, false);
         } else if (!fullyReceivedByOrderId.has(orderId)) {
             fullyReceivedByOrderId.set(orderId, true);
@@ -10828,10 +10838,9 @@ export async function getImportedPurchaseOrdersForTracking(
             seen.add(key);
             return true;
         });
-        // Units written in the text win over the PO's own line total.
+        // Units written in the text win over the PO's own total.
         const declaredUnits = containers.reduce((sum, container) => sum + container.quantity, 0);
         const fullyReceived = fullyReceivedByOrderId.get(id) ?? false;
-        // Without the receipt_status field, awaiting-receipt is judged from the lines.
         if (!includeReceived && fullyReceived) {
             continue;
         }
@@ -10841,6 +10850,8 @@ export async function getImportedPurchaseOrdersForTracking(
             ? (rawTypes as number[]).map(String)
             : typeof rawTypes === "string" ? [rawTypes] : [];
         const types = typeKeys.map((key) => typeLabelByValue.get(key)).filter((label): label is string => Boolean(label));
+
+        const poTotalQty = totalQtyField ? Number(order[totalQtyField] ?? 0) : lineQtyByOrderId.get(id) ?? 0;
 
         result.push({
             id,
@@ -10852,13 +10863,51 @@ export async function getImportedPurchaseOrdersForTracking(
             currencyCode: getRelationalName(order.currency_id),
             types,
             fullyReceived,
-            totalQty: Number((declaredUnits > 0 ? declaredUnits : totalQtyByOrderId.get(id) ?? 0).toFixed(2)),
-            brands: Array.from(brandsByOrderId.get(id) ?? []).sort((left, right) => left.localeCompare(right)),
+            totalQty: Number((declaredUnits > 0 ? declaredUnits : poTotalQty).toFixed(2)),
+            brands: [],
+            amountTotal: Number(order.amount_total ?? 0),
+            companyName: getRelationalName(order.company_id),
             containers,
         });
     }
 
     return { orders: result, importedTypeNames: importedTypes.map((option) => option.label) };
+}
+
+/** Tyre brands per purchase order (from its lines' products) — only asked for the orders on screen. */
+export async function getPoBrands(credentials: OdooCredentials, orderIds: number[]): Promise<Record<number, string[]>> {
+    const ids = Array.from(new Set(orderIds.map(Number).filter((id) => Number.isFinite(id) && id > 0)));
+    if (ids.length === 0) {
+        return {};
+    }
+
+    const uid = await authenticate(credentials);
+    const lines = await searchReadAll(credentials, uid, "purchase.order.line", [["order_id", "in", ids], ["display_type", "=", false]], ["order_id", "product_id"]);
+
+    const productIds = Array.from(new Set(lines.map((line) => getRelationalId(line.product_id)).filter((id): id is number => Boolean(id))));
+    const brandByProductId = new Map<number, string>();
+    if (productIds.length > 0) {
+        const products = await readInBatches(credentials, uid, "product.product", productIds, ["tire_brand"]).catch(
+            () => [] as Array<Record<string, unknown>>
+        );
+        for (const product of products) {
+            const brand = getRelationalName(product.tire_brand);
+            if (brand) brandByProductId.set(Number(product.id), brand);
+        }
+    }
+
+    const brands = new Map<number, Set<string>>();
+    for (const line of lines) {
+        const orderId = getRelationalId(line.order_id);
+        const brand = brandByProductId.get(getRelationalId(line.product_id) ?? 0);
+        if (orderId && brand) brands.set(orderId, (brands.get(orderId) ?? new Set<string>()).add(brand));
+    }
+
+    const result: Record<number, string[]> = {};
+    for (const [orderId, set] of brands) {
+        result[orderId] = Array.from(set).sort((left, right) => left.localeCompare(right));
+    }
+    return result;
 }
 
 export type PoTrackingDiagnosis = {

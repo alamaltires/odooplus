@@ -14,6 +14,11 @@ function getBasePath() {
 
 const nextConfig: NextConfig = {
   basePath: getBasePath(),
+  // The Excel export fills a template workbook read from disk at request time,
+  // so it has to be shipped with the deployed route.
+  outputFileTracingIncludes: {
+    "/api/po-tracking/export": ["./src/lib/server/templates/**/*"],
+  },
 };
 
 export default nextConfig;
