@@ -20,9 +20,21 @@ jobs:
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SERVER_IP }} << 'EOF'
             cd ~/odoo++
+
+            # Free disk space first: the server has a disk quota, and the npm cache
+            # (in the home folder) and the old build/cache grow with every deploy.
+            npm cache clean --force || true
+            rm -rf ~/.npm/_cacache .next
+
             git pull origin main
-            npm install
+            npm install --no-audit --no-fund
+            # Browser-only bundles of exceljs (~21 MB) are never used on the server.
+            rm -rf node_modules/exceljs/dist
             npm run build
+
+            # The build is done; its cache is only useful to the next build, which starts clean anyway.
+            rm -rf .next/cache ~/.npm/_cacache
+
             pm2 restart "odoo++" || PORT=3050 pm2 start npm --name "odoo++" -- start -- -p 3050
             pm2 save
           EOF
