@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import {
     AlertCircle,
@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import {
     diagnosePoTracking,
+    geocodePorts,
     getPoTrackingOrders,
     getSeaRoutes,
     getSavedShipmentTracking,
@@ -32,7 +33,7 @@ import {
     type ShipmentTracking,
 } from "@/lib/client-odoo";
 import type { MapShipment } from "@/components/shipment-map";
-import { buildRoute, lookupPort } from "@/lib/shipment-route";
+import { lookupPort, positionBySchedule, type LatLng } from "@/lib/shipment-route";
 
 // Leaflet touches `window`, so the map is only ever loaded in the browser.
 const ShipmentMap = dynamic(() => import("@/components/shipment-map").then((module) => module.ShipmentMap), {
@@ -184,7 +185,14 @@ export default function PoTrackingPage() {
     const [view, setView] = useState<"list" | "map">("list");
     // Sea routes by route key; "failed" keys fall back to a rough lane so they're not retried.
     const [seaRouteError, setSeaRouteError] = useState<string | null>(null);
-    const [seaPaths, setSeaPaths] = useState<Record<string, Array<[number, number]> | null>>({});
+    const [seaPaths, setSeaPaths] = useState<Record<string, LatLng[][] | null>>({});
+    // Port coordinates for names the built-in list doesn't know (geocoded once on the server, then remembered).
+    const [portPoints, setPortPoints] = useState<Record<string, LatLng | null>>({});
+    const geocodingRef = useRef(false);
+    // Map side panel: shipments the user hid from the map (none hidden = all shown).
+    const [hiddenBls, setHiddenBls] = useState<Set<string>>(new Set());
+    const [mapListSearch, setMapListSearch] = useState("");
+    const [mapFocus, setMapFocus] = useState<{ blNumber: string; n: number } | null>(null);
     const [transitSort, setTransitSort] = useState<TransitSort>("arrival-asc");
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
     const [highlighted, setHighlighted] = useState<string | null>(null);
@@ -566,49 +574,66 @@ export default function PoTrackingPage() {
         );
     };
 
-    // Shipments for the map: only tracked ones (they carry the ports and dates).
-    // Position is an estimate — how far through departure → arrival we are now.
-    const baseMapShipments = useMemo<Array<MapShipment & { routeKey: string; stops: Array<[number, number]> }>>(() => {
-        const now = Date.now();
-        const items: Array<MapShipment & { routeKey: string; stops: Array<[number, number]> }> = [];
-        for (const { group, tracking, stage, eta } of visible) {
-            if (!tracking?.origin?.name || !tracking.destination?.name) continue;
-            const via = tracking.transshipments.map((stop) => stop.name);
-            const route = buildRoute({ origin: tracking.origin.name, via, destination: tracking.destination.name });
-            if (!route) continue;
-            const departure = toDate(tracking.origin.departure)?.getTime() ?? null;
-            const arrival = eta.date?.getTime() ?? null;
-            let progress = 0;
-            if (stage === "arrived" || stage === "delivered") progress = 1;
-            else if (stage === "departed") {
-                progress = departure !== null && arrival !== null && arrival > departure ? (now - departure) / (arrival - departure) : 0.5;
-                progress = Math.min(0.97, Math.max(0.03, progress));
+    // Map data comes entirely from what's already saved — no tracking requests.
+    const stopsOf = useCallback(
+        (tracking: ShipmentTracking) => {
+            const raw = [
+                { name: tracking.origin?.name ?? "", at: tracking.origin?.at, arrive: null as string | null, depart: tracking.origin?.departure ?? null },
+                ...tracking.transshipments.map((stop) => ({ name: stop.name, at: stop.at, arrive: stop.arrival || null, depart: stop.departure || null })),
+                { name: tracking.destination?.name ?? "", at: tracking.destination?.at, arrive: tracking.destination?.arrival ?? null, depart: null as string | null },
+            ];
+            return raw.map((stop) => ({
+                ...stop,
+                at: (stop.at ?? lookupPort(stop.name) ?? portPoints[stop.name] ?? null) as LatLng | null,
+            }));
+        },
+        [portPoints]
+    );
+
+    const mapCandidates = useMemo(
+        () =>
+            visible.filter(
+                (item): item is typeof item & { tracking: ShipmentTracking } => Boolean(item.tracking?.origin?.name && item.tracking.destination?.name)
+            ),
+        [visible]
+    );
+
+    // Look up the ports the built-in list doesn't know (the server remembers every answer).
+    useEffect(() => {
+        if (view !== "map" || geocodingRef.current) return;
+        const unknown = new Set<string>();
+        for (const { tracking } of mapCandidates) {
+            for (const stop of stopsOf(tracking)) {
+                if (stop.name && !stop.at && portPoints[stop.name] === undefined) unknown.add(stop.name);
             }
-            items.push({
-                blNumber: group.blNumber,
-                title: group.orders.map((order) => order.name).join(" · "),
-                vendor: group.orders[0]?.vendorName ?? "",
-                carrier: tracking.carrierName,
-                origin: tracking.origin.name,
-                destination: tracking.destination.name,
-                via,
-                stage,
-                progress,
-                etaText: etaChip(eta.days, stage).text,
-                routeKey: route.stops.map((stop) => stop.at.join(",")).join(">"),
-                stops: route.stops.map((stop) => stop.at),
+        }
+        if (unknown.size === 0) return;
+        geocodingRef.current = true;
+        geocodePorts(Array.from(unknown))
+            .then((data) => setPortPoints((current) => ({ ...current, ...data.points })))
+            .catch(() => setPortPoints((current) => ({ ...current, ...Object.fromEntries(Array.from(unknown, (name) => [name, null])) })))
+            .finally(() => {
+                geocodingRef.current = false;
             });
+    }, [view, mapCandidates, stopsOf, portPoints]);
+
+    const resolvedCandidates = useMemo(() => {
+        const items: Array<{ item: (typeof mapCandidates)[number]; stops: Array<{ name: string; at: LatLng; arrive: string | null; depart: string | null }>; routeKey: string }> = [];
+        for (const item of mapCandidates) {
+            const stops = stopsOf(item.tracking);
+            if (stops.some((stop) => !stop.at)) continue;
+            const resolved = stops as Array<{ name: string; at: LatLng; arrive: string | null; depart: string | null }>;
+            items.push({ item, stops: resolved, routeKey: resolved.map((stop) => stop.at.join(",")).join(">") });
         }
         return items;
-    }, [visible]);
+    }, [mapCandidates, stopsOf]);
 
-    // Real sea routes are computed on the server (they route round land); fetched
-    // once per distinct port sequence while the map is open.
+    // Sea routes between the ports are computed on the server (they route round land).
     useEffect(() => {
         if (view !== "map") return;
-        const missing = new Map<string, Array<[number, number]>>();
-        for (const item of baseMapShipments) {
-            if (seaPaths[item.routeKey] === undefined) missing.set(item.routeKey, item.stops);
+        const missing = new Map<string, LatLng[]>();
+        for (const { routeKey, stops } of resolvedCandidates) {
+            if (seaPaths[routeKey] === undefined) missing.set(routeKey, stops.map((stop) => stop.at));
         }
         if (missing.size === 0) return;
         let cancelled = false;
@@ -633,25 +658,97 @@ export default function PoTrackingPage() {
         return () => {
             cancelled = true;
         };
-    }, [view, baseMapShipments, seaPaths]);
+    }, [view, resolvedCandidates, seaPaths]);
 
-    const routesLoading = baseMapShipments.some((item) => seaPaths[item.routeKey] === undefined);
-    const mapShipments = useMemo<MapShipment[]>(
-        () => baseMapShipments.map((item) => ({ ...item, path: seaPaths[item.routeKey] ?? undefined })),
-        [baseMapShipments, seaPaths]
-    );
+    const routesLoading = resolvedCandidates.some(({ routeKey }) => seaPaths[routeKey] === undefined);
+    const portsLoading = mapCandidates.some(({ tracking }) => stopsOf(tracking).some((stop) => stop.name && !stop.at && portPoints[stop.name] === undefined));
 
-    // Port names on tracked shipments that the map couldn't place.
+    const mapShipments = useMemo<MapShipment[]>(() => {
+        const now = Date.now();
+        const shipments: MapShipment[] = [];
+        for (const { item, stops, routeKey } of resolvedCandidates) {
+            const { group, tracking, stage, eta } = item;
+            const sea = seaPaths[routeKey];
+            if (sea === undefined) continue;
+            // If sea routing failed, fall back to straight port-to-port lines.
+            const legs: LatLng[][] = sea ?? stops.slice(0, -1).map((stop, index) => [stop.at, stops[index + 1].at]);
+
+            const time = (value: string | null) => toDate(value)?.getTime() ?? null;
+            const schedule = stops.map((stop, index) => ({
+                at: stop.at,
+                arrive: index === stops.length - 1 ? eta.date?.getTime() ?? time(stop.arrive) : time(stop.arrive),
+                depart: time(stop.depart),
+            }));
+            const finished = stage === "arrived" || stage === "delivered";
+            const where = positionBySchedule(legs, schedule, now, finished);
+
+            const legName = `${stops[where.legIndex]?.name ?? ""} → ${stops[where.legIndex + 1]?.name ?? ""}`;
+            const positionNote = finished
+                ? "Arrived at the destination port."
+                : !where.exact
+                  ? "Rough estimate: some dates are missing, so progress is spread over the whole voyage."
+                  : where.atPort === "port"
+                    ? `Waiting at ${stops[where.legIndex]?.name ?? "port"} — leaves ${formatDate(stops[where.legIndex]?.depart)}.`
+                    : `Estimated from the saved schedule, sailing ${legName}.`;
+
+            shipments.push({
+                blNumber: group.blNumber,
+                title: group.orders.map((order) => order.name).join(" · "),
+                vendor: group.orders[0]?.vendorName ?? "",
+                carrier: tracking.carrierName,
+                vessel: tracking.vessels[Math.min(where.legIndex, Math.max(0, tracking.vessels.length - 1))] ?? "",
+                origin: tracking.origin?.name ?? "",
+                destination: tracking.destination?.name ?? "",
+                stage,
+                etaText: etaChip(eta.days, stage).text,
+                stops: stops.map((stop) => ({ name: stop.name, at: stop.at })),
+                legs,
+                at: where.at,
+                travelled: where.travelled,
+                positionNote,
+            });
+        }
+        return shipments;
+    }, [resolvedCandidates, seaPaths]);
+
+    const shownOnMap = useMemo(() => mapShipments.filter((item) => !hiddenBls.has(item.blNumber)), [mapShipments, hiddenBls]);
+    const mapListRows = useMemo(() => {
+        const query = mapListSearch.trim().toLowerCase();
+        return query
+            ? mapShipments.filter((item) => [item.title, item.blNumber, item.vendor, item.origin, item.destination, item.vessel].some((text) => text.toLowerCase().includes(query)))
+            : mapShipments;
+    }, [mapShipments, mapListSearch]);
+
+    function setMapListVisibility(rows: MapShipment[], visibleOnMap: boolean) {
+        setHiddenBls((current) => {
+            const next = new Set(current);
+            for (const row of rows) {
+                if (visibleOnMap) next.delete(row.blNumber);
+                else next.add(row.blNumber);
+            }
+            return next;
+        });
+    }
+
+    function toggleOnMap(blNumber: string) {
+        setHiddenBls((current) => {
+            const next = new Set(current);
+            if (next.has(blNumber)) next.delete(blNumber);
+            else next.add(blNumber);
+            return next;
+        });
+    }
+
+    // Port names that couldn't be placed even after looking them up.
     const unknownPorts = useMemo(() => {
         const names = new Set<string>();
-        for (const { tracking } of visible) {
-            if (!tracking) continue;
-            for (const name of [tracking.origin?.name, tracking.destination?.name, ...tracking.transshipments.map((stop) => stop.name)]) {
-                if (name && !lookupPort(name)) names.add(name);
+        for (const { tracking } of mapCandidates) {
+            for (const stop of stopsOf(tracking)) {
+                if (stop.name && !stop.at && portPoints[stop.name] === null) names.add(stop.name);
             }
         }
         return Array.from(names);
-    }, [visible]);
+    }, [mapCandidates, stopsOf, portPoints]);
 
     return (
         <section>
@@ -816,24 +913,107 @@ export default function PoTrackingPage() {
                             If you just updated the app, restart the server.
                         </p>
                     ) : null}
-                    {routesLoading ? <p className="mb-2 text-xs text-(--ink-soft)">Plotting sea routes...</p> : null}
-                    <ShipmentMap
-                        shipments={routesLoading ? [] : mapShipments}
-                        onOpen={(blNumber) => {
-                            setView("list");
-                            const item = enriched.find((entry) => entry.group.blNumber === blNumber);
-                            if (item) showInList(item);
-                        }}
-                    />
+                    {routesLoading || portsLoading ? <p className="mb-2 text-xs text-(--ink-soft)">Plotting routes...</p> : null}
+                    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_21rem]">
+                        <ShipmentMap
+                            shipments={routesLoading || portsLoading ? [] : shownOnMap}
+                            focus={mapFocus}
+                            onOpen={(blNumber) => {
+                                setView("list");
+                                const item = enriched.find((entry) => entry.group.blNumber === blNumber);
+                                if (item) showInList(item);
+                            }}
+                        />
+
+                        <aside className="flex h-[34rem] flex-col overflow-hidden rounded-2xl border border-(--line) bg-(--card)" aria-label="Shipments on the map">
+                            <div className="border-b border-(--line) p-3">
+                                <div className="flex items-center justify-between gap-2">
+                                    <p className="text-sm font-semibold">
+                                        Shipments <span className="font-normal text-(--ink-soft)">· {shownOnMap.length} of {mapShipments.length} on map</span>
+                                    </p>
+                                </div>
+                                <div className="relative mt-2">
+                                    <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-(--ink-soft)" />
+                                    <input
+                                        value={mapListSearch}
+                                        onChange={(event) => setMapListSearch(event.target.value)}
+                                        placeholder="Filter by PO, B/L, vendor, port"
+                                        className="w-full rounded-lg border border-(--line) bg-white py-1.5 pl-8 pr-2 text-xs"
+                                    />
+                                </div>
+                                <div className="mt-2 flex gap-2 text-xs">
+                                    <button type="button" onClick={() => setMapListVisibility(mapListRows, true)} className="rounded-lg border border-(--line) bg-white px-2.5 py-1 font-medium">
+                                        Show all
+                                    </button>
+                                    <button type="button" onClick={() => setMapListVisibility(mapListRows, false)} className="rounded-lg border border-(--line) bg-white px-2.5 py-1 font-medium">
+                                        Hide all
+                                    </button>
+                                </div>
+                            </div>
+
+                            <ul className="flex-1 divide-y divide-(--line) overflow-y-auto">
+                                {mapListRows.length === 0 ? (
+                                    <li className="p-4 text-center text-xs text-(--ink-soft)">No shipments match.</li>
+                                ) : (
+                                    mapListRows.map((item) => {
+                                        const onMap = !hiddenBls.has(item.blNumber);
+                                        return (
+                                            <li key={item.blNumber} className={`flex items-start gap-2.5 px-3 py-2.5 ${onMap ? "" : "opacity-55"}`}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={onMap}
+                                                    onChange={() => toggleOnMap(item.blNumber)}
+                                                    className="mt-1 h-4 w-4 shrink-0"
+                                                    aria-label={`Show ${item.title} on the map`}
+                                                />
+                                                <div className="min-w-0 flex-1">
+                                                    <button
+                                                        type="button"
+                                                        disabled={!onMap}
+                                                        onClick={() => setMapFocus((current) => ({ blNumber: item.blNumber, n: (current?.n ?? 0) + 1 }))}
+                                                        className="block w-full text-left disabled:cursor-default"
+                                                        title={onMap ? "Zoom to this shipment" : "Tick it to show it on the map"}
+                                                    >
+                                                        <span className="block truncate text-sm font-semibold">{item.title}</span>
+                                                        <span className="block truncate text-xs text-(--ink-soft)">{item.vendor}</span>
+                                                    </button>
+                                                    <p className="mt-0.5 truncate text-xs">
+                                                        {item.origin.split(",")[0]} → {item.destination.split(",")[0]}
+                                                    </p>
+                                                    <p className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[11px] text-(--ink-soft)">
+                                                        <span>B/L {item.blNumber}</span>
+                                                        <span className="font-medium text-(--ink)">{item.etaText}</span>
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setHiddenBls(new Set(mapShipments.filter((other) => other.blNumber !== item.blNumber).map((other) => other.blNumber)));
+                                                        setMapFocus((current) => ({ blNumber: item.blNumber, n: (current?.n ?? 0) + 1 }));
+                                                    }}
+                                                    className="shrink-0 rounded-md border border-(--line) px-1.5 py-0.5 text-[11px] text-(--ink-soft) hover:text-(--brand)"
+                                                    title="Show only this shipment"
+                                                >
+                                                    Only
+                                                </button>
+                                            </li>
+                                        );
+                                    })
+                                )}
+                            </ul>
+                        </aside>
+                    </div>
                     <p className="mt-2 text-xs text-(--ink-soft)">
-                        Positions are estimates from the departure and arrival dates, drawn along typical sea lanes — not live vessel positions.
-                        {visible.length - mapShipments.length > 0
-                            ? ` ${visible.length - mapShipments.length} shipment${visible.length - mapShipments.length === 1 ? "" : "s"} can't be shown (not tracked yet, or a port isn't recognised).`
+                        Estimated from the schedule already saved for each shipment (departure, transshipment and arrival dates) along real sea
+                        lanes — nothing is requested from the tracking service, and these aren&rsquo;t live vessel positions. Click a ship for its
+                        details and a VesselFinder link.
+                        {visible.length - mapShipments.length > 0 && !routesLoading && !portsLoading
+                            ? ` ${visible.length - mapShipments.length} shipment${visible.length - mapShipments.length === 1 ? "" : "s"} can't be shown (not tracked yet, or a port couldn't be located).`
                             : ""}
                     </p>
                     {unknownPorts.length > 0 ? (
                         <p className="mt-1 text-xs text-amber-700">
-                            Ports not recognised: {unknownPorts.slice(0, 12).join(" · ")}
+                            Couldn&rsquo;t locate: {unknownPorts.slice(0, 12).join(" · ")}
                             {unknownPorts.length > 12 ? ` · +${unknownPorts.length - 12} more` : ""}
                         </p>
                     ) : null}

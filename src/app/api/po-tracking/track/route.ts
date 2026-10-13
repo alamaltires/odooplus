@@ -4,6 +4,8 @@ import { getAdminDb } from "@/lib/server/firebase-admin";
 
 const QUBICTRON_OCEAN_URL = "https://api.qubictron.com/tracking/v1/ocean";
 
+type LatLng = [number, number];
+
 type Raw = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 type ShipmentEvent = {
@@ -22,9 +24,9 @@ type ShipmentTracking = {
     status: string;
     updatedAt: string;
     vessels: string[];
-    origin: { name: string; departure: string } | null;
-    destination: { name: string; arrival: string } | null;
-    transshipments: Array<{ name: string; arrival: string; departure: string }>;
+    origin: { name: string; departure: string; at?: LatLng } | null;
+    destination: { name: string; arrival: string; at?: LatLng } | null;
+    transshipments: Array<{ name: string; arrival: string; departure: string; at?: LatLng }>;
     containers: Array<{
         number: string;
         size: string;
@@ -93,6 +95,14 @@ function normalize(blNumber: string, body: Raw): ShipmentTracking {
     }
     const placeName = (ref: Raw | undefined | null) => (ref?.location_id !== undefined ? locations.get(str(ref.location_id)) ?? "" : "");
 
+    const coordinates = new Map<string, LatLng>();
+    for (const location of (data.locations ?? []) as Raw[]) {
+        const lat = Number(location.coordinates?.lat);
+        const lng = Number(location.coordinates?.lng);
+        if (Number.isFinite(lat) && Number.isFinite(lng)) coordinates.set(str(location.id), [lat, lng]);
+    }
+    const placeAt = (ref: Raw | undefined | null) => (ref?.location_id !== undefined ? coordinates.get(str(ref.location_id)) : undefined);
+
     const toEvent = (event: Raw): ShipmentEvent => ({
         description: pickText(event.description),
         datetime: pickDate(event.datetime),
@@ -127,12 +137,13 @@ function normalize(blNumber: string, body: Raw): ShipmentTracking {
         status: pickText(shipment.status),
         updatedAt: pickDate(shipment.updated_at),
         vessels: ((data.transports ?? []) as Raw[]).map((transport) => str(transport.name)).filter(Boolean),
-        origin: origin ? { name: placeName(origin), departure: pickDate(origin.departure) } : null,
-        destination: destination ? { name: placeName(destination), arrival: pickDate(destination.arrival) } : null,
+        origin: origin ? { name: placeName(origin), departure: pickDate(origin.departure), at: placeAt(origin) } : null,
+        destination: destination ? { name: placeName(destination), arrival: pickDate(destination.arrival), at: placeAt(destination) } : null,
         transshipments: ((route.transshipments ?? []) as Raw[]).map((stop) => ({
             name: placeName(stop),
             arrival: pickDate(stop.arrival),
             departure: pickDate(stop.departure),
+            at: placeAt(stop),
         })),
         containers,
         fetchedAt: new Date().toISOString(),

@@ -785,9 +785,9 @@ export type ShipmentTracking = {
     status: string;
     updatedAt: string;
     vessels: string[];
-    origin: { name: string; departure: string } | null;
-    destination: { name: string; arrival: string } | null;
-    transshipments: Array<{ name: string; arrival: string; departure: string }>;
+    origin: { name: string; departure: string; at?: [number, number] } | null;
+    destination: { name: string; arrival: string; at?: [number, number] } | null;
+    transshipments: Array<{ name: string; arrival: string; departure: string; at?: [number, number] }>;
     containers: Array<{
         number: string;
         size: string;
@@ -805,8 +805,12 @@ export function getPoTrackingOrders(input?: { includeReceived?: boolean }) {
     });
 }
 
+export function geocodePorts(names: string[]) {
+    return post<{ points: Record<string, [number, number] | null> }>("/api/po-tracking/geocode", { names });
+}
+
 export function getSeaRoutes(routes: Array<{ id: string; stops: Array<[number, number]> }>) {
-    return post<{ paths: Record<string, Array<[number, number]>> }>("/api/po-tracking/sea-route", { routes });
+    return post<{ paths: Record<string, Array<Array<[number, number]>>> }>("/api/po-tracking/sea-route", { routes });
 }
 
 export function trackShipmentByBl(blNumber: string, carrierCode?: string) {

@@ -17,6 +17,7 @@ const PORTS: PortEntry[] = [
     { keys: ["guangzhou", "nansha", "huangpu", "cngzg", "cnnsa"], at: [22.75, 113.6] },
     { keys: ["lianyungang"], at: [34.75, 119.45] },
     { keys: ["fuzhou", "cnfoc"], at: [26.05, 119.45] },
+    { keys: ["quanzhou", "cnqzj"], at: [24.88, 118.65] },
     { keys: ["zhongshan", "jiangmen", "zhuhai"], at: [22.5, 113.5] },
     { keys: ["hong kong", "hkhkg"], at: [22.3, 114.17] },
     { keys: ["kaohsiung", "twkhh"], at: [22.6, 120.28] },
@@ -33,7 +34,7 @@ const PORTS: PortEntry[] = [
     { keys: ["haiphong", "hai phong", "vnhph"], at: [20.85, 106.7] },
     { keys: ["ho chi minh", "cat lai", "saigon", "vnsgn", "vncla"], at: [10.77, 106.78] },
     { keys: ["da nang", "danang"], at: [16.1, 108.22] },
-    { keys: ["port klang", "port kelang", "mypkg", "westport", "northport"], at: [3.0, 101.4] },
+    { keys: ["port klang", "port kelang", "pelabuhan klang", "mypkg", "westport", "northport"], at: [3.0, 101.4] },
     { keys: ["tanjung pelepas", "mytpp", "pasir gudang"], at: [1.36, 103.55] },
     { keys: ["penang", "mypen"], at: [5.42, 100.35] },
     { keys: ["singapore", "sgsin"], at: [1.26, 103.84] },
@@ -59,7 +60,7 @@ const PORTS: PortEntry[] = [
     { keys: ["abu dhabi"], at: [24.5, 54.37] },
     { keys: ["sharjah", "khalid", "aesha"], at: [25.36, 55.38] },
     { keys: ["fujairah", "aefjr"], at: [25.15, 56.35] },
-    { keys: ["khor fakkan"], at: [25.35, 56.37] },
+    { keys: ["khor fakkan", "khawr fakkan", "khor al fakkan", "khawr al fakkan"], at: [25.35, 56.37] },
     { keys: ["sohar", "omsoh"], at: [24.5, 56.62] },
     { keys: ["salalah", "omsLL", "omsll"], at: [16.95, 54.0] },
     { keys: ["muscat", "sultan qaboos"], at: [23.63, 58.57] },
@@ -269,4 +270,58 @@ export function pointAlong(path: LatLng[], fraction: number): { at: LatLng; trav
         travelled.push(path[index + 1]);
     }
     return { at: path[path.length - 1], travelled };
+}
+
+export type ScheduleStop = { at: LatLng; arrive: number | null; depart: number | null };
+
+function joinLegs(legs: LatLng[][]): LatLng[] {
+    return legs.flatMap((leg, index) => (index === 0 ? leg : leg.slice(1)));
+}
+
+/**
+ * Where a ship is *now*, estimated from the saved schedule: it sits at a port
+ * until that port's departure time, then moves along the next sea leg in
+ * proportion to the time elapsed between that departure and the next port's
+ * arrival. When some dates are missing it falls back to progress along the
+ * whole route between first departure and final arrival.
+ */
+export function positionBySchedule(
+    legs: LatLng[][],
+    stops: ScheduleStop[],
+    now: number,
+    finished: boolean
+): { at: LatLng; travelled: LatLng[]; legIndex: number; atPort: string | null; exact: boolean } {
+    const full = joinLegs(legs);
+    const end = full[full.length - 1];
+    if (finished || legs.length === 0) {
+        return { at: end, travelled: full, legIndex: Math.max(0, legs.length - 1), atPort: "destination", exact: true };
+    }
+
+    // A transshipment port often has no departure time; assume the ship leaves as it arrives.
+    stops = stops.map((stop, index) => (index > 0 && stop.depart === null ? { ...stop, depart: stop.arrive } : stop));
+    const timed = legs.every((_, index) => stops[index]?.depart !== null && stops[index + 1]?.arrive !== null);
+    if (!timed) {
+        const departed = stops[0]?.depart ?? null;
+        const arrives = stops[stops.length - 1]?.arrive ?? null;
+        const fraction = departed !== null && arrives !== null && arrives > departed ? (now - departed) / (arrives - departed) : 0.5;
+        const moved = pointAlong(full, fraction);
+        return { at: moved.at, travelled: moved.travelled, legIndex: 0, atPort: null, exact: false };
+    }
+
+    for (let index = 0; index < legs.length; index += 1) {
+        const departs = stops[index].depart as number;
+        const arrives = stops[index + 1].arrive as number;
+        const before = joinLegs(legs.slice(0, index));
+        if (now < departs) {
+            // Still at (or loading in) port `index`.
+            const here = legs[index][0];
+            return { at: here, travelled: before.length > 0 ? [...before, here] : [here], legIndex: index, atPort: "port", exact: true };
+        }
+        if (now <= arrives) {
+            const fraction = arrives > departs ? (now - departs) / (arrives - departs) : 1;
+            const moved = pointAlong(legs[index], fraction);
+            return { at: moved.at, travelled: [...before, ...moved.travelled], legIndex: index, atPort: null, exact: true };
+        }
+    }
+    return { at: end, travelled: full, legIndex: legs.length - 1, atPort: "destination", exact: true };
 }
