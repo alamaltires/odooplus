@@ -1184,10 +1184,13 @@ export default function PoTrackingPage() {
                         Estimated from the schedule already saved for each shipment (departure, transshipment and arrival dates) along real sea
                         lanes — nothing is requested from the tracking service, and these aren&rsquo;t live vessel positions. Click a ship for its
                         details and a VesselFinder link.
-                        {visible.length - mapShipments.length > 0 && !routesLoading && !portsLoading
-                            ? ` ${visible.length - mapShipments.length} shipment${visible.length - mapShipments.length === 1 ? "" : "s"} can't be shown (not tracked yet, or a port couldn't be located).`
-                            : ""}
                     </p>
+                    {!routesLoading && !portsLoading && visible.length - mapShipments.length > 0 ? (
+                        <p className="mt-1 text-xs text-(--ink-soft)">
+                            Not on the map: {visible.length - mapCandidates.length} not tracked yet (no saved ports — press Update on them) and{" "}
+                            {mapCandidates.length - mapShipments.length} tracked but with a port that couldn&rsquo;t be located.
+                        </p>
+                    ) : null}
                     {unknownPorts.length > 0 ? (
                         <p className="mt-1 text-xs text-amber-700">
                             Couldn&rsquo;t locate: {unknownPorts.slice(0, 12).join(" · ")}

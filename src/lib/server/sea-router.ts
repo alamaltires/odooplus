@@ -1,12 +1,9 @@
-import * as PathFinderModule from "geojson-path-finder";
-
 type LatLng = [number, number];
 type LonLat = [number, number];
 type NetworkLine = { geometry: { type: string; coordinates: LonLat[] | LonLat[][] } };
 type Network = { type: string; features: NetworkLine[] };
 
 const key = ([lng, lat]: LonLat) => `${lng},${lat}`;
-const point = (at: LonLat) => ({ type: "Feature" as const, properties: {}, geometry: { type: "Point" as const, coordinates: at } });
 
 function distanceKm([lng1, lat1]: LonLat, [lng2, lat2]: LonLat) {
     const dLat = lat2 - lat1;
@@ -65,12 +62,77 @@ export function createSeaRouter(network: Network) {
         .filter(([id]) => find(id) === mainRoot)
         .map(([, vertex]) => vertex);
 
-    // The package ships both ESM and CJS builds, which expose the class differently.
-    const exported = PathFinderModule as unknown as { default?: unknown };
-    const PathFinderClass = (typeof exported.default === "function" ? exported.default : (exported.default as { default: unknown }).default) as new (
-        network: unknown
-    ) => { findPath(a: unknown, b: unknown): { path: LonLat[] } | undefined };
-    const finder = new PathFinderClass(network);
+    // Lane graph: consecutive vertices of a lane are joined, weighted by their distance.
+    const edges = new Map<string, Array<{ to: string; km: number }>>();
+    const link = (from: string, to: string, km: number) => {
+        const list = edges.get(from);
+        if (list) list.push({ to, km });
+        else edges.set(from, [{ to, km }]);
+    };
+    for (const line of lines) {
+        for (let index = 1; index < line.length; index += 1) {
+            const km = distanceKm(line[index - 1], line[index]);
+            link(key(line[index - 1]), key(line[index]), km);
+            link(key(line[index]), key(line[index - 1]), km);
+        }
+    }
+
+    /** Dijkstra's shortest path between two lane vertices (a binary heap keeps it fast). */
+    const shortestPath = (startId: string, endId: string): LonLat[] | null => {
+        const best = new Map<string, number>([[startId, 0]]);
+        const previous = new Map<string, string>();
+        const heap: Array<[number, string]> = [[0, startId]];
+        const push = (item: [number, string]) => {
+            heap.push(item);
+            let index = heap.length - 1;
+            while (index > 0) {
+                const parentIndex = (index - 1) >> 1;
+                if (heap[parentIndex][0] <= heap[index][0]) break;
+                [heap[parentIndex], heap[index]] = [heap[index], heap[parentIndex]];
+                index = parentIndex;
+            }
+        };
+        const pop = (): [number, string] => {
+            const top = heap[0];
+            const last = heap.pop() as [number, string];
+            if (heap.length > 0) {
+                heap[0] = last;
+                let index = 0;
+                for (;;) {
+                    const left = index * 2 + 1;
+                    const right = left + 1;
+                    let smallest = index;
+                    if (left < heap.length && heap[left][0] < heap[smallest][0]) smallest = left;
+                    if (right < heap.length && heap[right][0] < heap[smallest][0]) smallest = right;
+                    if (smallest === index) break;
+                    [heap[smallest], heap[index]] = [heap[index], heap[smallest]];
+                    index = smallest;
+                }
+            }
+            return top;
+        };
+
+        while (heap.length > 0) {
+            const [cost, id] = pop();
+            if (id === endId) {
+                const path: LonLat[] = [];
+                for (let at: string | undefined = endId; at !== undefined; at = previous.get(at)) {
+                    path.push(vertices.get(at) as LonLat);
+                }
+                return path.reverse();
+            }
+            if (cost > (best.get(id) ?? Infinity)) continue;
+            for (const edge of edges.get(id) ?? []) {
+                const next = cost + edge.km;
+                if (next < (best.get(edge.to) ?? Infinity)) {
+                    best.set(edge.to, next);
+                    previous.set(edge.to, id);
+                    push([next, edge.to]);
+                }
+            }
+        }
+        return null;
+    };
 
     const snap = (at: LonLat): LonLat => {
         let best = mainVertices[0];
@@ -93,11 +155,11 @@ export function createSeaRouter(network: Network) {
             if (key(origin) === key(destination)) {
                 return { path: [from, [origin[1], origin[0]], to], routed: true };
             }
-            const result = finder.findPath(point(origin), point(destination)) as { path: LonLat[] } | undefined;
-            if (!result || result.path.length < 2) {
+            const result = shortestPath(key(origin), key(destination));
+            if (!result || result.length < 2) {
                 return { path: [from, to], routed: false };
             }
-            return { path: [from, ...result.path.map(([lng, lat]): LatLng => [lat, lng]), to], routed: true };
+            return { path: [from, ...result.map(([lng, lat]): LatLng => [lat, lng]), to], routed: true };
         },
     };
 }
