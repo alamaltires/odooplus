@@ -1,12 +1,15 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ExternalLink, Plus, Search, Tag, Trash2, X } from "lucide-react";
+import { Download, ExternalLink, Plus, Search, Tag, Trash2, X } from "lucide-react";
 import { getMsrpRetailers, saveMsrpRetailers, searchProductCatalog } from "@/lib/client-odoo";
 import { checkMarketPrices, type MarketProductResult } from "@/lib/market-price";
 import { ExtensionState, fetchViaExtension, getExtensionState } from "@/lib/msrp-extension";
 
 type CatalogProduct = Awaited<ReturnType<typeof searchProductCatalog>>["products"][number];
+
+const BASE_PATH = (process.env.NEXT_PUBLIC_BASE_PATH ?? "").trim().replace(/\/$/, "");
+const EXTENSION_ZIP_URL = `${BASE_PATH && !BASE_PATH.startsWith("/") ? "/" : ""}${BASE_PATH}/msrp-finder-helper.zip`;
 
 const aed = new Intl.NumberFormat("en-AE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -183,16 +186,43 @@ export default function MsrpFinderPage() {
                 <Tag className="h-8 w-8 text-(--brand)" aria-hidden="true" />
             </div>
 
+            {extensionState === "ready" ? (
+                <p className="mt-3 text-xs text-(--ink-soft)">
+                    Helper extension is active.{" "}
+                    <a href={EXTENSION_ZIP_URL} download className="underline">
+                        Download it for another computer
+                    </a>
+                </p>
+            ) : null}
+
             {extensionState === "missing" || extensionState === "not-allowed" ? (
                 <div className="mt-4 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
                     {extensionState === "missing" ? (
                         <>
-                            <p className="font-medium">Install the MSRP Finder Helper extension</p>
+                            <p className="font-medium">Install the MSRP Finder Helper extension (one time, about 1 minute)</p>
                             <p className="mt-1">
-                                Prices are read through your own Chrome so protected shops work. In Chrome open{" "}
-                                <code>chrome://extensions</code>, turn on Developer mode, click &quot;Load unpacked&quot; and pick
-                                the <code>extension</code> folder from the project. Then reload this page.
+                                It reads retailer prices through your own Chrome, so protected shops work. Works in Chrome and Edge on a computer.
                             </p>
+                            <a
+                                href={EXTENSION_ZIP_URL}
+                                download
+                                className="mt-3 inline-flex items-center gap-2 rounded-xl bg-(--brand) px-4 py-2 font-medium text-white"
+                            >
+                                <Download className="h-4 w-4" aria-hidden="true" />
+                                Download extension (.zip)
+                            </a>
+                            <ol className="mt-3 list-decimal space-y-1 pl-5">
+                                <li>Unzip the downloaded file into a folder you will keep (Chrome loads it from there).</li>
+                                <li>
+                                    Open <code>chrome://extensions</code> and switch on <strong>Developer mode</strong> (top right).
+                                </li>
+                                <li>
+                                    Click <strong>Load unpacked</strong> and select the unzipped folder.
+                                </li>
+                                <li>
+                                    Come back to this page, click the extension icon (puzzle piece) and press <strong>Allow this site</strong>, then reload.
+                                </li>
+                            </ol>
                         </>
                     ) : (
                         <p>

@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "build:extension": "sh scripts/build-extension.sh"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.1",
