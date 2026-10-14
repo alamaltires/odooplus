@@ -565,8 +565,12 @@ export function getMsrpRetailers() {
     return post<{ urls: string[] }>("/api/msrp/retailers", {}, "GET");
 }
 
-export function saveMsrpRetailers(urls: string[]) {
-    return post<{ urls: string[] }>("/api/msrp/retailers", { urls }, "PUT");
+export function addMsrpRetailer(url: string) {
+    return post<{ urls: string[] }>("/api/msrp/retailers", { add: url });
+}
+
+export function removeMsrpRetailer(url: string) {
+    return post<{ urls: string[] }>("/api/msrp/retailers", { remove: url });
 }
 
 export type ProductRequestType = "new_product" | "missing_size" | "missing_pattern" | "more_quantity";

@@ -1,4 +1,4 @@
-const MAX_BODY_CHARS = 2_000_000;
+const MAX_BODY_CHARS = 8_000_000;
 const FETCH_TIMEOUT_MS = 15_000;
 const DEFAULT_ALLOWED = ["http://localhost:3000"];
 

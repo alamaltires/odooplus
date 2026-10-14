@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Download, ExternalLink, Plus, Search, Tag, Trash2, X } from "lucide-react";
-import { getMsrpRetailers, saveMsrpRetailers, searchProductCatalog } from "@/lib/client-odoo";
+import { addMsrpRetailer, getMsrpRetailers, removeMsrpRetailer, searchProductCatalog } from "@/lib/client-odoo";
 import { checkMarketPrices, type MarketProductResult } from "@/lib/market-price";
 import { ExtensionState, fetchViaExtension, getExtensionState } from "@/lib/msrp-extension";
 
@@ -10,6 +10,8 @@ type CatalogProduct = Awaited<ReturnType<typeof searchProductCatalog>>["products
 
 const BASE_PATH = (process.env.NEXT_PUBLIC_BASE_PATH ?? "").trim().replace(/\/$/, "");
 const EXTENSION_ZIP_URL = `${BASE_PATH && !BASE_PATH.startsWith("/") ? "/" : ""}${BASE_PATH}/msrp-finder-helper.zip`;
+
+const DISABLED_RETAILERS_KEY = "msrp-disabled-retailers";
 
 const aed = new Intl.NumberFormat("en-AE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -41,6 +43,37 @@ export default function MsrpFinderPage() {
     const [retailerInput, setRetailerInput] = useState("");
     const [retailerError, setRetailerError] = useState<string | null>(null);
     const [retailersLoaded, setRetailersLoaded] = useState(false);
+    // Which retailers are switched off. Kept per browser, so each person chooses what they fetch
+    // without changing the shared list for everyone else.
+    const [disabledRetailers, setDisabledRetailers] = useState<string[]>([]);
+
+    useEffect(() => {
+        try {
+            const saved = JSON.parse(localStorage.getItem(DISABLED_RETAILERS_KEY) ?? "[]") as unknown;
+            if (Array.isArray(saved)) setDisabledRetailers(saved.map(String));
+        } catch {
+            // Storage unavailable — everything just stays switched on.
+        }
+    }, []);
+
+    function saveDisabled(next: string[]) {
+        try {
+            localStorage.setItem(DISABLED_RETAILERS_KEY, JSON.stringify(next));
+        } catch {
+            // Not persisted, but the toggle still applies for this visit.
+        }
+        return next;
+    }
+
+    function toggleRetailer(url: string) {
+        setDisabledRetailers((current) =>
+            saveDisabled(current.includes(url) ? current.filter((entry) => entry !== url) : [...current, url])
+        );
+    }
+
+    function setAllRetailers(enabled: boolean) {
+        setDisabledRetailers(saveDisabled(enabled ? [] : [...retailers]));
+    }
 
     const [checking, setChecking] = useState(false);
     const [results, setResults] = useState<MarketProductResult[] | null>(null);
@@ -50,6 +83,24 @@ export default function MsrpFinderPage() {
     const [extensionState, setExtensionState] = useState<ExtensionState | "checking">("checking");
     const [error, setError] = useState<string | null>(null);
     const searchSeq = useRef(0);
+    const [listOpen, setListOpen] = useState(false);
+    const searchBoxRef = useRef<HTMLDivElement>(null);
+
+    // The results list closes when you click anywhere outside the search box, or press Escape.
+    useEffect(() => {
+        function onPointerDown(event: MouseEvent) {
+            if (searchBoxRef.current && !searchBoxRef.current.contains(event.target as Node)) setListOpen(false);
+        }
+        function onKeyDown(event: KeyboardEvent) {
+            if (event.key === "Escape") setListOpen(false);
+        }
+        document.addEventListener("mousedown", onPointerDown);
+        document.addEventListener("keydown", onKeyDown);
+        return () => {
+            document.removeEventListener("mousedown", onPointerDown);
+            document.removeEventListener("keydown", onKeyDown);
+        };
+    }, []);
 
     useEffect(() => {
         void getExtensionState().then(setExtensionState);
@@ -107,15 +158,12 @@ export default function MsrpFinderPage() {
         });
     }
 
-    async function persistRetailers(next: string[]) {
-        const previous = retailers;
-        setRetailers(next);
+    async function updateRetailers(change: () => Promise<{ urls: string[] }>) {
         setRetailerError(null);
         try {
-            const saved = await saveMsrpRetailers(next);
+            const saved = await change();
             setRetailers(saved.urls);
         } catch (saveError) {
-            setRetailers(previous);
             setRetailerError(saveError instanceof Error ? saveError.message : "Failed to save retailers.");
         }
     }
@@ -125,7 +173,7 @@ export default function MsrpFinderPage() {
         const value = retailerInput.trim();
         if (!value) return;
         setRetailerInput("");
-        void persistRetailers([...retailers, value]);
+        void updateRetailers(() => addMsrpRetailer(value));
     }
 
     async function handleCheck() {
@@ -142,11 +190,11 @@ export default function MsrpFinderPage() {
 
         setChecking(true);
         setError(null);
-        setProgress({ done: 0, total: selectedProducts.length * retailers.length });
+        setProgress({ done: 0, total: selectedProducts.length * enabledRetailers.length });
         try {
             const response = await checkMarketPrices(
-                selectedProducts.map((product) => ({ id: product.id, name: product.name, sku: product.sku })),
-                retailers,
+                selectedProducts.map((product) => ({ id: product.id, name: product.name, sku: product.sku, brand: product.brandName })),
+                enabledRetailers,
                 async (url, accept) => {
                     const host = hostLabel(url);
                     setActiveHosts((current) => [...current, host]);
@@ -172,7 +220,8 @@ export default function MsrpFinderPage() {
         }
     }
 
-    const canCheck = selectedProducts.length > 0 && retailers.length > 0 && !checking;
+    const enabledRetailers = retailers.filter((url) => !disabledRetailers.includes(url));
+    const canCheck = selectedProducts.length > 0 && enabledRetailers.length > 0 && !checking;
 
     return (
         <section>
@@ -237,42 +286,60 @@ export default function MsrpFinderPage() {
                 <div className="min-w-0 space-y-6">
                     <div className="rounded-2xl border border-(--line) bg-(--card) p-5">
                         <h2 className="font-display text-xl">1. Select products</h2>
-                        <div className="relative mt-3">
-                            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-(--ink-soft)" aria-hidden="true" />
-                            <input
-                                value={query}
-                                onChange={(event) => setQuery(event.target.value)}
-                                placeholder="Search by name, size or SKU (min. 2 characters)"
-                                className="w-full rounded-xl border border-(--line) bg-white py-2 pl-9 pr-3"
-                            />
+                        <div ref={searchBoxRef} className="mt-3">
+                            <div className="relative">
+                                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-(--ink-soft)" aria-hidden="true" />
+                                <input
+                                    value={query}
+                                    onChange={(event) => {
+                                        setQuery(event.target.value);
+                                        setListOpen(true);
+                                    }}
+                                    onFocus={() => setListOpen(true)}
+                                    placeholder="Search by name, size or SKU (min. 2 characters)"
+                                    className="w-full rounded-xl border border-(--line) bg-white py-2 pl-9 pr-3"
+                                />
+                            </div>
+
+                            {listOpen && searching ? <p className="mt-3 text-sm text-(--ink-soft)">Searching...</p> : null}
+                            {listOpen && !searching && query.trim().length >= 2 && searchResults.length === 0 ? (
+                                <p className="mt-3 text-sm text-(--ink-soft)">No products found.</p>
+                            ) : null}
+
+                            {listOpen && searchResults.length > 0 ? (
+                                <div className="mt-3 overflow-hidden rounded-xl border border-(--line) bg-white">
+                                    <ul className="max-h-72 divide-y divide-(--line) overflow-y-auto">
+                                        {searchResults.map((product) => (
+                                            <li key={product.id}>
+                                                <label className="flex cursor-pointer items-center gap-3 px-3 py-2 text-sm hover:bg-(--brand-soft)/30">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={selected.has(product.id)}
+                                                        onChange={() => toggleProduct(product)}
+                                                    />
+                                                    <span className="min-w-0 flex-1">
+                                                        <span className="block truncate font-medium">{product.name}</span>
+                                                        <span className="block truncate text-xs text-(--ink-soft)">
+                                                            {[product.brandName, product.sku].filter(Boolean).join(" · ")}
+                                                        </span>
+                                                    </span>
+                                                </label>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                    <div className="flex items-center justify-between border-t border-(--line) bg-(--chip) px-3 py-2 text-xs text-(--ink-soft)">
+                                        <span>{selectedProducts.length} selected</span>
+                                        <button
+                                            type="button"
+                                            onClick={() => setListOpen(false)}
+                                            className="rounded-lg bg-(--brand) px-3 py-1 font-medium text-white"
+                                        >
+                                            Done
+                                        </button>
+                                    </div>
+                                </div>
+                            ) : null}
                         </div>
-
-                        {searching ? <p className="mt-3 text-sm text-(--ink-soft)">Searching...</p> : null}
-                        {!searching && query.trim().length >= 2 && searchResults.length === 0 ? (
-                            <p className="mt-3 text-sm text-(--ink-soft)">No products found.</p>
-                        ) : null}
-
-                        {searchResults.length > 0 ? (
-                            <ul className="mt-3 max-h-72 divide-y divide-(--line) overflow-y-auto rounded-xl border border-(--line)">
-                                {searchResults.map((product) => (
-                                    <li key={product.id}>
-                                        <label className="flex cursor-pointer items-center gap-3 px-3 py-2 text-sm hover:bg-(--brand-soft)/30">
-                                            <input
-                                                type="checkbox"
-                                                checked={selected.has(product.id)}
-                                                onChange={() => toggleProduct(product)}
-                                            />
-                                            <span className="min-w-0 flex-1">
-                                                <span className="block truncate font-medium">{product.name}</span>
-                                                <span className="block truncate text-xs text-(--ink-soft)">
-                                                    {[product.brandName, product.sku].filter(Boolean).join(" · ")}
-                                                </span>
-                                            </span>
-                                        </label>
-                                    </li>
-                                ))}
-                            </ul>
-                        ) : null}
 
                         {selectedProducts.length > 0 ? (
                             <div className="mt-4">
@@ -322,8 +389,10 @@ export default function MsrpFinderPage() {
                                     </select>
                                 </label>
                             ) : null}
-                            {retailersLoaded && retailers.length === 0 ? (
-                                <p className="text-sm text-(--ink-soft)">Add at least one retailer on the right.</p>
+                            {retailersLoaded && enabledRetailers.length === 0 ? (
+                                <p className="text-sm text-(--ink-soft)">
+                                    {retailers.length === 0 ? "Add at least one retailer on the right." : "Switch on at least one retailer on the right."}
+                                </p>
                             ) : null}
                         </div>
                         {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
@@ -462,7 +531,7 @@ export default function MsrpFinderPage() {
                                                                                 <span className="truncate">{quote.title}</span>
                                                                                 <ExternalLink className="h-3 w-3 shrink-0" aria-hidden="true" />
                                                                             </a>
-                                                                            {quote.matchScore < 1 ? (
+                                                                            {quote.matchScore < 0.9 ? (
                                                                                 <span className="mt-0.5 block text-xs text-amber-700">
                                                                                     Partial match — pattern/details differ, verify
                                                                                 </span>
@@ -518,6 +587,9 @@ export default function MsrpFinderPage() {
 
                 <aside className="h-fit rounded-2xl border border-(--line) bg-(--card) p-5">
                     <h2 className="font-display text-xl">Retailers</h2>
+                    <p className="mt-1 text-xs font-medium text-(--ink-soft)">
+                        Shared list — everyone sees the same retailers. Switch a retailer off to skip it ({enabledRetailers.length} of {retailers.length} on, saved in this browser).
+                    </p>
                     <p className="mt-1 text-xs text-(--ink-soft)">
                         Paste a retailer&apos;s website. If its search isn&apos;t auto-detected, use a search URL with{" "}
                         <code>{"{query}"}</code>, e.g. <code>{"https://shop.ae/search?q={query}"}</code>.
@@ -540,19 +612,56 @@ export default function MsrpFinderPage() {
                     </form>
                     {retailerError ? <p className="mt-2 text-sm text-red-600">{retailerError}</p> : null}
 
+                    {retailers.length > 1 ? (
+                        <div className="mt-3 flex gap-2 text-xs">
+                            <button
+                                type="button"
+                                onClick={() => setAllRetailers(true)}
+                                disabled={enabledRetailers.length === retailers.length}
+                                className="rounded-lg border border-(--line) bg-white px-3 py-1 font-medium disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                                Enable all
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setAllRetailers(false)}
+                                disabled={enabledRetailers.length === 0}
+                                className="rounded-lg border border-(--line) bg-white px-3 py-1 font-medium disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                                Disable all
+                            </button>
+                        </div>
+                    ) : null}
+
                     <ul className="mt-3 space-y-2">
                         {retailers.map((url) => (
                             <li
                                 key={url}
                                 className="flex items-center justify-between gap-2 rounded-xl border border-(--line) bg-white px-3 py-2 text-sm"
                             >
-                                <span className="min-w-0">
+                                <button
+                                    type="button"
+                                    role="switch"
+                                    aria-checked={!disabledRetailers.includes(url)}
+                                    aria-label={`Fetch from ${hostLabel(url)}`}
+                                    onClick={() => toggleRetailer(url)}
+                                    className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+                                        disabledRetailers.includes(url) ? "bg-gray-300" : "bg-green-500"
+                                    }`}
+                                >
+                                    <span
+                                        className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${
+                                            disabledRetailers.includes(url) ? "left-0.5" : "left-[1.125rem]"
+                                        }`}
+                                    />
+                                </button>
+                                <span className={`min-w-0 flex-1 ${disabledRetailers.includes(url) ? "opacity-50" : ""}`}>
                                     <span className="block truncate font-medium">{hostLabel(url)}</span>
                                     <span className="block truncate text-xs text-(--ink-soft)">{url}</span>
                                 </span>
                                 <button
                                     type="button"
-                                    onClick={() => void persistRetailers(retailers.filter((entry) => entry !== url))}
+                                    onClick={() => void updateRetailers(() => removeMsrpRetailer(url))}
                                     aria-label={`Remove ${hostLabel(url)}`}
                                     className="text-(--ink-soft) hover:text-red-600"
                                 >
