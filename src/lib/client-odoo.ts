@@ -31,7 +31,7 @@ async function getAuthToken(): Promise<string> {
     return user.getIdToken();
 }
 
-async function post<T>(path: string, body: Record<string, unknown>) {
+async function post<T>(path: string, body: Record<string, unknown>, method: "POST" | "PUT" | "GET" = "POST") {
     const token = await getAuthToken();
 
     const selectedCompanyIds = getSelectedCompanyIds();
@@ -40,12 +40,12 @@ async function post<T>(path: string, body: Record<string, unknown>) {
         : body;
 
     const response = await fetch(path, {
-        method: "POST",
+        method,
         headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify(requestBody),
+        body: method === "GET" ? undefined : JSON.stringify(requestBody),
     });
 
     const data = (await response.json()) as T & { error?: string };
@@ -540,7 +540,7 @@ export function getProducts(input?: { query?: string; limit?: number; offset?: n
     }>("/api/odoo/products", input ?? {});
 }
 
-export function searchProductCatalog(input?: { query?: string; limit?: number; offset?: number }) {
+export function searchProductCatalog(input?: { query?: string; limit?: number; offset?: number; evaluatePricelists?: boolean }) {
     return post<{
         products: Array<{
             id: number;
@@ -552,13 +552,21 @@ export function searchProductCatalog(input?: { query?: string; limit?: number; o
             rimDiameterName: string;
             currentStock: number;
             stockByLot: Array<{ lotName: string; companyName: string; quantity: number }>;
-            pricelists: Array<{ pricelistName: string; currencyCode: string; price: number }>;
+            pricelists: Array<{ pricelistName: string; currencyCode: string; price: number; lotName?: string }>;
         }>;
         totalCount: number;
         limit: number;
         offset: number;
         hasMore: boolean;
     }>("/api/odoo/product-catalog-search", input ?? {});
+}
+
+export function getMsrpRetailers() {
+    return post<{ urls: string[] }>("/api/msrp/retailers", {}, "GET");
+}
+
+export function saveMsrpRetailers(urls: string[]) {
+    return post<{ urls: string[] }>("/api/msrp/retailers", { urls }, "PUT");
 }
 
 export type ProductRequestType = "new_product" | "missing_size" | "missing_pattern" | "more_quantity";

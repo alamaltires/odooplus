@@ -10,13 +10,14 @@ export async function POST(request: Request) {
             query?: string;
             limit?: number;
             offset?: number;
+            evaluatePricelists?: boolean;
         };
         const limit = Number.isFinite(body.limit) ? Number(body.limit) : 24;
         const offset = Number.isFinite(body.offset) ? Number(body.offset) : 0;
         const query = typeof body.query === "string" ? body.query : "";
 
         const result = await runWithCompanyIds(companyIds, () =>
-            searchProductCatalog(credentials, { query, limit, offset })
+            searchProductCatalog(credentials, { query, limit, offset, evaluatePricelists: body.evaluatePricelists === true })
         );
 
         return NextResponse.json({

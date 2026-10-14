@@ -1624,7 +1624,7 @@ export type ProductCatalogCard = {
     rimDiameterName: string;
     currentStock: number;
     stockByLot: Array<{ lotName: string; companyName: string; quantity: number }>;
-    pricelists: Array<{ pricelistName: string; currencyCode: string; price: number }>;
+    pricelists: Array<{ pricelistName: string; currencyCode: string; price: number; lotName?: string }>;
 };
 
 /**
@@ -1646,6 +1646,12 @@ export async function searchProductCatalog(
         query?: string;
         limit?: number;
         offset?: number;
+        /**
+         * Ask Odoo's own pricing engine for each product's price on every pricelist
+         * (covers percentage/formula/category/global rules, not just fixed per-product
+         * rules). One extra RPC per pricelist, so only the MSRP Finder opts in.
+         */
+        evaluatePricelists?: boolean;
     }
 ): Promise<{ products: ProductCatalogCard[]; totalCount: number }> {
     const uid = await authenticate(credentials);
@@ -1878,6 +1884,22 @@ export async function searchProductCatalog(
         });
     }
 
+    // Rules can be set on the product variant (`product_id`) or on its whole
+    // template (`product_tmpl_id`, "applied on Product") — both are read, and a
+    // variant-specific rule wins over the template one for the same pricelist.
+    // Some rules are tied to a lot/serial number (a custom many2one on the item) —
+    // find that field by its relation instead of hard-coding the module's name.
+    let lotFieldName: string | null = null;
+    try {
+        const itemFields = await getModelFieldsMeta(credentials, uid, "product.pricelist.item");
+        lotFieldName =
+            Object.entries(itemFields).find(
+                ([, meta]) => meta.type === "many2one" && /^stock\.(production\.)?lot$/.test(meta.relation ?? "")
+            )?.[0] ?? null;
+    } catch {
+        lotFieldName = null;
+    }
+
     const pricelistItems = pricelistIds.length > 0 && productIds.length > 0
         ? await executeKw<Array<Record<string, unknown>>>(
             credentials,
@@ -1886,21 +1908,40 @@ export async function searchProductCatalog(
             "search_read",
             [[
                 ["pricelist_id", "in", pricelistIds],
+                "|",
                 ["product_id", "in", productIds],
+                "&",
+                ["product_id", "=", false],
+                ["product_tmpl_id", "in", templateIds],
                 ["compute_price", "=", "fixed"],
             ]],
-            { fields: ["pricelist_id", "product_id", "fixed_price"], limit: 5000 }
+            { fields: ["pricelist_id", "product_id", "product_tmpl_id", "fixed_price", ...(lotFieldName ? [lotFieldName] : [])], limit: 5000 }
         )
         : [];
 
+    const productIdsByTemplateId = new Map<number, number[]>();
+    for (const product of products) {
+        const templateId = getRelationalId(product.product_tmpl_id);
+        const id = Number(product.id ?? 0);
+        if (templateId && id > 0) {
+            productIdsByTemplateId.set(templateId, [...(productIdsByTemplateId.get(templateId) ?? []), id]);
+        }
+    }
+
     const pricelistsByProductId = new Map<
         number,
-        Array<{ pricelistName: string; currencyCode: string; price: number }>
+        Array<{ pricelistName: string; currencyCode: string; price: number; lotName?: string }>
     >();
-    for (const item of pricelistItems) {
-        const productId = getRelationalId(item.product_id);
+    const variantRuleKeys = new Set<string>();
+    const sortedItems = [...pricelistItems].sort(
+        (a, b) => Number(Boolean(getRelationalId(b.product_id))) - Number(Boolean(getRelationalId(a.product_id)))
+    );
+    for (const item of sortedItems) {
         const pricelistId = getRelationalId(item.pricelist_id);
-        if (!productId || !pricelistId) {
+        const variantId = getRelationalId(item.product_id);
+        const templateId = getRelationalId(item.product_tmpl_id);
+        const targetIds = variantId ? [variantId] : (templateId ? productIdsByTemplateId.get(templateId) ?? [] : []);
+        if (!pricelistId || targetIds.length === 0) {
             continue;
         }
         const info = pricelistInfoById.get(pricelistId);
@@ -1910,13 +1951,59 @@ export async function searchProductCatalog(
         if (!info || info.multiplier === undefined) {
             continue;
         }
-        const entries = pricelistsByProductId.get(productId) ?? [];
-        entries.push({
-            pricelistName: info.name,
-            currencyCode: TARGET_CURRENCY_CODE,
-            price: Number((Number(item.fixed_price ?? 0) * info.multiplier).toFixed(2)),
-        });
-        pricelistsByProductId.set(productId, entries);
+        const lotId = lotFieldName ? getRelationalId(item[lotFieldName]) : null;
+        const lotName = lotFieldName ? getRelationalName(item[lotFieldName]) : "";
+        for (const productId of targetIds) {
+            const key = `${productId}:${pricelistId}:${lotId ?? 0}`;
+            if (variantRuleKeys.has(key)) {
+                continue;
+            }
+            variantRuleKeys.add(key);
+            const entries = pricelistsByProductId.get(productId) ?? [];
+            entries.push({
+                pricelistName: info.name,
+                currencyCode: TARGET_CURRENCY_CODE,
+                price: Number((Number(item.fixed_price ?? 0) * info.multiplier).toFixed(2)),
+                ...(lotName ? { lotName } : {}),
+            });
+            pricelistsByProductId.set(productId, entries);
+        }
+    }
+
+    if (input?.evaluatePricelists && productIds.length > 0) {
+        const MAX_EVALUATED_PRICELISTS = 15;
+        const evaluable = pricelistIds.filter((id) => pricelistInfoById.get(id)?.multiplier !== undefined);
+        for (const pricelistId of evaluable.slice(0, MAX_EVALUATED_PRICELISTS)) {
+            const info = pricelistInfoById.get(pricelistId);
+            if (!info || info.multiplier === undefined) continue;
+            try {
+                // `price` is Odoo's computed, pricelist-aware price for the context's pricelist.
+                const priced = await executeKw<Array<Record<string, unknown>>>(
+                    credentials,
+                    uid,
+                    "product.product",
+                    "read",
+                    [productIds],
+                    { fields: ["price"], context: { pricelist: pricelistId, quantity: 1, date: todayStr } }
+                );
+                for (const row of priced) {
+                    const productId = Number(row.id ?? 0);
+                    const value = Number(row.price ?? 0);
+                    if (productId <= 0 || !(value > 0)) continue;
+                    const existing = pricelistsByProductId.get(productId) ?? [];
+                    if (existing.some((entry) => entry.pricelistName === info.name)) continue;
+                    const others = [...existing];
+                    others.push({
+                        pricelistName: info.name,
+                        currencyCode: TARGET_CURRENCY_CODE,
+                        price: Number((value * info.multiplier).toFixed(2)),
+                    });
+                    pricelistsByProductId.set(productId, others);
+                }
+            } catch {
+                // This Odoo version may not expose `price` — keep the fixed-rule prices found above.
+            }
+        }
     }
 
     const cards = products

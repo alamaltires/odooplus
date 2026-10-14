@@ -11,6 +11,7 @@ export const APP_DEFINITIONS: Array<{ href: string; label: string }> = [
     { href: "/orders/pending", label: "Pending Orders" },
     { href: "/product-scanner", label: "Product Scanner" },
     { href: "/product-requests", label: "Sales Orders" },
+    { href: "/msrp-finder", label: "MSRP Finder" },
     { href: "/purchase-order", label: "Purchase Order" },
     { href: "/po-tracking", label: "PO Tracking" },
     { href: "/products-performance", label: "Products Performance" },
@@ -40,6 +41,7 @@ export function defaultAppHrefsForRole(role: AppUserRole): string[] {
                 "/settings",
                 "/product-scanner",
                 "/product-requests",
+                "/msrp-finder",
             ];
         case "salesperson":
             return ["/sales-targets", "/salesperson-activity", "/payment-followup", "/settings", "/product-requests"];

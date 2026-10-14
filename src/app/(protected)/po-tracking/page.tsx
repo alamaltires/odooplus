@@ -127,6 +127,23 @@ function plainEvent(description: string) {
         .trim();
 }
 
+/**
+ * The containers to show for a B/L. Odoo's notes sometimes hold only the B/L (one
+ * "(not listed)" placeholder) while the carrier's live tracking knows every container —
+ * so containers the carrier reports are added, and the placeholder dropped once any are known.
+ */
+function containersFor(group: BlGroup, tracking: ShipmentTracking | undefined) {
+    const listed = group.containers.filter((container) => container.containerNo);
+    const known = new Set(listed.map((container) => container.containerNo.toUpperCase()));
+    const orderName = group.orders[0]?.name ?? "";
+    const fromTracking = (tracking?.containers ?? [])
+        .map((container) => container.number.toUpperCase())
+        .filter((number) => number && !known.has(number))
+        .map((number) => ({ containerNo: number, sealNo: "", orderName }));
+    const merged = [...listed, ...fromTracking];
+    return merged.length > 0 ? merged : group.containers;
+}
+
 function allEvents(tracking: ShipmentTracking) {
     return tracking.containers.flatMap((container) => container.events);
 }
@@ -550,7 +567,7 @@ export default function PoTrackingPage() {
                                             ) : null;
                                         })()}
                                         <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-2">
-                                            <Fact icon={<Container className="h-4 w-4" />} label="Containers" value={String(group.containers.length)} />
+                                            <Fact icon={<Container className="h-4 w-4" />} label="Containers" value={String(containersFor(group, tracking).length)} />
                                             {group.totalQty > 0 ? (
                                                 <Fact icon={<Package className="h-4 w-4" />} label="Units" value={group.totalQty.toLocaleString("en-US")} />
                                             ) : null}
@@ -856,7 +873,7 @@ export default function PoTrackingPage() {
                     customer: Array.from(new Set(group.orders.map((order) => order.companyName).filter(Boolean))).join(", "),
                     pol: city(tracking?.origin?.name),
                     pod: city(tracking?.destination?.name),
-                    vol: group.containers.length,
+                    vol: containersFor(group, tracking).length,
                     qty: Math.round(group.totalQty),
                     amount: amount > 0 ? Number(amount.toFixed(2)) : null,
                     factory: Array.from(new Set(group.orders.map((order) => order.vendorName).filter(Boolean))).join(", "),
@@ -1271,7 +1288,7 @@ function Details({ group, tracking }: { group: BlGroup; tracking: ShipmentTracki
                         </tr>
                     </thead>
                     <tbody>
-                        {group.containers.map((container) => {
+                        {containersFor(group, tracking).map((container) => {
                             const live = tracking?.containers.find((entry) => entry.number.toUpperCase() === container.containerNo);
                             return (
                                 <tr key={`${container.orderName}-${container.containerNo}`} className="border-t border-(--line) align-top">
