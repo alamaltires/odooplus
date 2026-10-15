@@ -522,6 +522,10 @@ export function getSalesTeams() {
     return post<{ teams: Array<{ id: number; name: string }> }>("/api/odoo/sales-teams", {});
 }
 
+export function getCustomerTags() {
+    return post<{ tags: Array<{ id: number; name: string }> }>("/api/odoo/customer-tags", {});
+}
+
 export function getSalespeople() {
     return post<{ salespeople: OdooSalesperson[] }>("/api/odoo/salespeople", {});
 }

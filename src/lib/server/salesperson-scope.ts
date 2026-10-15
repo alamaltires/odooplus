@@ -1,6 +1,6 @@
 import { getAdminDb } from "@/lib/server/firebase-admin";
 import { getUserIdFromRequest, getUserRoleFromRequest } from "@/lib/server/auth-helpers";
-import { getOdooUserId, getSalesTeams, isCustomerAssignedToUser } from "@/lib/server/odoo-client";
+import { getOdooUserId, getSalesTeams, isCustomerAssignedToUser, type CustomerTagFilter } from "@/lib/server/odoo-client";
 import { OdooCredentials } from "@/types/odoo";
 
 /**
@@ -17,6 +17,19 @@ export async function getOwnSalespersonScope(
         return null;
     }
     return getOdooUserId(credentials);
+}
+
+/**
+ * The customer tags this user may see (Settings -> App Permissions):
+ * `{ all: true }` for every customer, `{ ids }` for the chosen tags, or null
+ * when nothing is set (falls back to the default tag).
+ */
+export async function getCustomerTagScope(request: Request): Promise<CustomerTagFilter> {
+    const userId = await getUserIdFromRequest(request);
+    const data = (await getAdminDb().collection("users").doc(userId).get()).data();
+    if (data?.customerTagsAll === true) return { all: true };
+    const ids = Array.isArray(data?.customerTagIds) ? (data.customerTagIds as unknown[]).map(Number).filter((id) => id > 0) : [];
+    return ids.length > 0 ? { ids } : null;
 }
 
 /**

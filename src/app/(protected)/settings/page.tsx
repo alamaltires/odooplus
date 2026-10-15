@@ -1,11 +1,11 @@
 "use client";
 
-import { FormEvent, ReactNode, useCallback, useEffect, useState } from "react";
+import { FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { getAuth } from "firebase/auth";
-import { Pencil, Shield, Trash2, X } from "lucide-react";
+import { ChevronDown, Pencil, Shield, Trash2, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { getOdooSettings, saveOdooSettings } from "@/lib/firestore-settings";
-import { getSalesTeams, getSystemOdooSettings, saveSystemOdooSettings } from "@/lib/client-odoo";
+import { getCustomerTags, getSalesTeams, getSystemOdooSettings, saveSystemOdooSettings } from "@/lib/client-odoo";
 import { OdooUserCredentials } from "@/types/odoo";
 import { APP_DEFINITIONS, defaultAppHrefsForRole } from "@/lib/app-permissions";
 import { Select2, type Select2Option } from "@/components/select2";
@@ -34,7 +34,8 @@ const ROLE_OPTIONS: Select2Option[] = [
     { value: "admin", label: "Admin" },
 ];
 
-type UserRow = { id: string; email: string; role: Role; createdAt: string | null; enabledApps: string[] | null; salesTeamId: number | null };
+type UserRow = { id: string; email: string; role: Role; createdAt: string | null; enabledApps: string[] | null; salesTeamId: number | null; customerTags: { all: boolean; ids: number[] } | null };
+type CustomerTag = { id: number; name: string };
 
 const initialState: OdooUserCredentials = {
     username: "",
@@ -68,6 +69,11 @@ export default function SettingsPage() {
     const [permissionsUser, setPermissionsUser] = useState<UserRow | null>(null);
     const [permissionsSelection, setPermissionsSelection] = useState<string[]>([]);
     const [permissionsSalesTeamId, setPermissionsSalesTeamId] = useState("");
+    const [customerTags, setCustomerTags] = useState<CustomerTag[]>([]);
+    const [tagsLoading, setTagsLoading] = useState(false);
+    const [tagsError, setTagsError] = useState<string | null>(null);
+    const [tagsAll, setTagsAll] = useState(false);
+    const [tagIds, setTagIds] = useState<number[]>([]);
     const [salesTeams, setSalesTeams] = useState<Array<{ id: number; name: string }>>([]);
     const [salesTeamsLoading, setSalesTeamsLoading] = useState(false);
     const [salesTeamsError, setSalesTeamsError] = useState<string | null>(null);
@@ -248,6 +254,20 @@ export default function SettingsPage() {
         setPermissionsSelection(target.enabledApps ?? defaultAppHrefsForRole(target.role));
         setPermissionsError(null);
         setPermissionsSalesTeamId(target.salesTeamId ? String(target.salesTeamId) : "");
+        setTagsAll(target.customerTags?.all === true);
+        setTagIds(target.customerTags?.ids ?? []);
+        setTagsLoading(true);
+        setTagsError(null);
+        getCustomerTags()
+            .then((data) => {
+                setCustomerTags(data.tags);
+                // Nothing saved yet: the app has been showing only the "Customer ACT" tag, so start there.
+                if (!target.customerTags) {
+                    setTagIds(data.tags.filter((tag) => tag.name.trim().toLowerCase() === "customer act").map((tag) => tag.id));
+                }
+            })
+            .catch((loadError) => setTagsError(loadError instanceof Error ? loadError.message : "Failed to load customer tags."))
+            .finally(() => setTagsLoading(false));
 
         if (target.role === "sales_manager") {
             setSalesTeamsLoading(true);
@@ -283,6 +303,7 @@ export default function SettingsPage() {
                 },
                 body: JSON.stringify({
                     enabledApps,
+                    customerTags: tagsAll ? { all: true } : tagIds.length > 0 ? { ids: tagIds } : null,
                     ...(permissionsUser.role === "sales_manager"
                         ? { salesTeamId: permissionsSalesTeamId ? Number(permissionsSalesTeamId) : null }
                         : {}),
@@ -597,6 +618,13 @@ export default function SettingsPage() {
                     target={permissionsUser}
                     selection={permissionsSelection}
                     onToggle={togglePermissionApp}
+                    customerTags={customerTags}
+                    tagsLoading={tagsLoading}
+                    tagsError={tagsError}
+                    tagsAll={tagsAll}
+                    onTagsAll={setTagsAll}
+                    tagIds={tagIds}
+                    onTagIds={setTagIds}
                     salesTeamId={permissionsSalesTeamId}
                     onSalesTeamChange={setPermissionsSalesTeamId}
                     salesTeams={salesTeams}
@@ -689,6 +717,13 @@ function PermissionsModal({
     target,
     selection,
     onToggle,
+    customerTags,
+    tagsLoading,
+    tagsError,
+    tagsAll,
+    onTagsAll,
+    tagIds,
+    onTagIds,
     salesTeamId,
     onSalesTeamChange,
     salesTeams,
@@ -703,6 +738,13 @@ function PermissionsModal({
     target: UserRow;
     selection: string[];
     onToggle: (href: string) => void;
+    customerTags: CustomerTag[];
+    tagsLoading: boolean;
+    tagsError: string | null;
+    tagsAll: boolean;
+    onTagsAll: (value: boolean) => void;
+    tagIds: number[];
+    onTagIds: (value: number[]) => void;
     salesTeamId: string;
     onSalesTeamChange: (value: string) => void;
     salesTeams: Array<{ id: number; name: string }>;
@@ -739,6 +781,16 @@ function PermissionsModal({
                     </label>
                 ))}
             </div>
+
+            <TagMultiSelect
+                tags={customerTags}
+                loading={tagsLoading}
+                error={tagsError}
+                all={tagsAll}
+                onAll={onTagsAll}
+                selected={tagIds}
+                onSelected={onTagIds}
+            />
 
             {target.role === "sales_manager" ? (
                 <div className="mt-4">
@@ -782,6 +834,120 @@ function PermissionsModal({
                 </button>
             </div>
         </ModalShell>
+    );
+}
+
+function TagMultiSelect({
+    tags,
+    loading,
+    error,
+    all,
+    onAll,
+    selected,
+    onSelected,
+}: {
+    tags: CustomerTag[];
+    loading: boolean;
+    error: string | null;
+    all: boolean;
+    onAll: (value: boolean) => void;
+    selected: number[];
+    onSelected: (value: number[]) => void;
+}) {
+    const [open, setOpen] = useState(false);
+    const [search, setSearch] = useState("");
+    const rootRef = useRef<HTMLDivElement>(null);
+    const query = search.trim().toLowerCase();
+    const shown = tags.filter((tag) => !query || tag.name.toLowerCase().includes(query));
+    const selectedTags = tags.filter((tag) => selected.includes(tag.id));
+
+    useEffect(() => {
+        if (!open) return;
+        const onDown = (event: MouseEvent) => {
+            if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
+        };
+        const onKey = (event: KeyboardEvent) => {
+            if (event.key === "Escape") setOpen(false);
+        };
+        document.addEventListener("mousedown", onDown);
+        document.addEventListener("keydown", onKey);
+        return () => {
+            document.removeEventListener("mousedown", onDown);
+            document.removeEventListener("keydown", onKey);
+        };
+    }, [open]);
+
+    const toggle = (id: number) => onSelected(selected.includes(id) ? selected.filter((item) => item !== id) : [...selected, id]);
+
+    return (
+        <div className="mt-4" ref={rootRef}>
+            <span className="mb-1 block text-sm font-medium">Customer tags</span>
+            <div className="relative">
+                <button
+                    type="button"
+                    onClick={() => setOpen((current) => !current)}
+                    aria-expanded={open}
+                    className="flex min-h-10 w-full items-center justify-between gap-2 rounded-xl border border-(--line) bg-white px-3 py-1.5 text-left text-sm"
+                >
+                    <span className="flex min-w-0 flex-wrap gap-1">
+                        {all ? (
+                            <span className="rounded-full bg-(--chip) px-2 py-0.5 text-xs font-medium">All customers</span>
+                        ) : selectedTags.length > 0 ? (
+                            selectedTags.map((tag) => (
+                                <span key={tag.id} className="rounded-full bg-(--chip) px-2 py-0.5 text-xs font-medium">
+                                    {tag.name}
+                                </span>
+                            ))
+                        ) : (
+                            <span className="text-(--ink-soft)">{loading ? "Loading tags..." : "Default (Customer ACT)"}</span>
+                        )}
+                    </span>
+                    <ChevronDown className={`h-4 w-4 shrink-0 text-(--ink-soft) transition ${open ? "rotate-180" : ""}`} />
+                </button>
+                {open ? (
+                    <div className="absolute z-20 mt-1 w-full rounded-xl border border-(--line) bg-white shadow-lg">
+                        <label className="flex cursor-pointer items-center gap-2.5 border-b border-(--line) px-3 py-2 hover:bg-(--chip)">
+                            <input type="checkbox" checked={all} onChange={(event) => onAll(event.target.checked)} className="h-4 w-4 rounded border-(--line)" />
+                            <span className="text-sm font-medium">All customers (every tag)</span>
+                        </label>
+                        {all ? null : (
+                            <>
+                                <input
+                                    value={search}
+                                    onChange={(event) => setSearch(event.target.value)}
+                                    placeholder="Search tags..."
+                                    className="w-full border-b border-(--line) bg-transparent px-3 py-2 text-sm outline-none"
+                                    autoFocus
+                                />
+                                <div className="max-h-52 overflow-y-auto p-1.5">
+                                    {loading ? <p className="px-2 py-1.5 text-sm text-(--ink-soft)">Loading tags...</p> : null}
+                                    {!loading && shown.length === 0 ? <p className="px-2 py-1.5 text-sm text-(--ink-soft)">No tags found.</p> : null}
+                                    {shown.map((tag) => (
+                                        <label key={tag.id} className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-1.5 hover:bg-(--chip)">
+                                            <input type="checkbox" checked={selected.includes(tag.id)} onChange={() => toggle(tag.id)} className="h-4 w-4 rounded border-(--line)" />
+                                            <span className="text-sm">{tag.name}</span>
+                                        </label>
+                                    ))}
+                                </div>
+                            </>
+                        )}
+                        <div className="flex justify-end border-t border-(--line) px-3 py-1.5">
+                            <button type="button" onClick={() => setOpen(false)} className="text-sm font-medium text-(--brand)">
+                                Done
+                            </button>
+                        </div>
+                    </div>
+                ) : null}
+            </div>
+            <p className="mt-1 text-xs text-(--ink-soft)">
+                {all
+                    ? "This user sees all customers."
+                    : selected.length > 0
+                      ? `This user sees customers with any of the ${selected.length} selected tag${selected.length === 1 ? "" : "s"}.`
+                      : "Nothing selected: this user sees only the default \"Customer ACT\" tag."}
+            </p>
+            {error ? <p className="mt-1 text-xs text-red-600">{error}</p> : null}
+        </div>
     );
 }
 

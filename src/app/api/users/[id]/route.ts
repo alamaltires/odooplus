@@ -39,6 +39,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
             role?: string;
             enabledApps?: string[] | null;
             salesTeamId?: number | null;
+            customerTags?: { all?: boolean; ids?: number[] } | null;
         };
 
         const adminAuth = getAdminAuth();
@@ -87,11 +88,22 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
             firestoreUpdate.salesTeamId = body.salesTeamId;
         }
 
+        if (body.customerTags === null) {
+            firestoreUpdate.customerTagsAll = FieldValue.delete();
+            firestoreUpdate.customerTagIds = FieldValue.delete();
+        } else if (body.customerTags && typeof body.customerTags === "object") {
+            const ids = Array.isArray(body.customerTags.ids)
+                ? body.customerTags.ids.map(Number).filter((value) => Number.isFinite(value) && value > 0)
+                : [];
+            firestoreUpdate.customerTagsAll = body.customerTags.all === true;
+            firestoreUpdate.customerTagIds = body.customerTags.all === true ? [] : ids;
+        }
+
         await getAdminDb().collection("users").doc(id).set(firestoreUpdate, { merge: true });
 
         const updatedDoc = await getAdminDb().collection("users").doc(id).get();
         const data = updatedDoc.data() as
-            | { email?: string; role?: string; createdAt?: Timestamp; enabledApps?: string[]; salesTeamId?: number }
+            | { email?: string; role?: string; createdAt?: Timestamp; enabledApps?: string[]; salesTeamId?: number; customerTagsAll?: boolean; customerTagIds?: number[] }
             | undefined;
 
         return NextResponse.json({
@@ -102,6 +114,11 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
                 createdAt: data?.createdAt instanceof Timestamp ? data.createdAt.toDate().toISOString() : null,
                 enabledApps: Array.isArray(data?.enabledApps) ? data.enabledApps : null,
                 salesTeamId: typeof data?.salesTeamId === "number" ? data.salesTeamId : null,
+                customerTags: data?.customerTagsAll
+                    ? { all: true, ids: [] as number[] }
+                    : Array.isArray(data?.customerTagIds) && data.customerTagIds.length > 0
+                      ? { all: false, ids: data.customerTagIds }
+                      : null,
             },
         });
     } catch (error) {

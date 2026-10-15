@@ -45,6 +45,8 @@ export async function GET(request: Request) {
                 createdAt?: Timestamp;
                 enabledApps?: string[];
                 salesTeamId?: number;
+                customerTagsAll?: boolean;
+                customerTagIds?: number[];
             } | undefined])
         );
 
@@ -96,6 +98,12 @@ export async function GET(request: Request) {
                     createdAt,
                     enabledApps: Array.isArray(profile?.enabledApps) ? profile.enabledApps : null,
                     salesTeamId: typeof profile?.salesTeamId === "number" ? profile.salesTeamId : null,
+                    customerTags:
+                        profile?.customerTagsAll === true
+                            ? { all: true, ids: [] as number[] }
+                            : Array.isArray(profile?.customerTagIds) && profile.customerTagIds.length > 0
+                              ? { all: false, ids: profile.customerTagIds as number[] }
+                              : null,
                 };
             })
             .sort((left, right) => left.email.localeCompare(right.email));

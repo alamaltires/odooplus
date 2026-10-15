@@ -1507,9 +1507,28 @@ export async function isCustomerAssignedToUser(
     return ids.length > 0;
 }
 
+export type CustomerTagFilter = { all: true } | { ids: number[] } | null;
+
+/** The default when a user has no tag setting: the original "Customer ACT" tag only. */
+const DEFAULT_CUSTOMER_TAG = "Customer ACT";
+
+export async function getCustomerTags(credentials: OdooCredentials): Promise<Array<{ id: number; name: string }>> {
+    const uid = await authenticate(credentials);
+    const tags = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "res.partner.category",
+        "search_read",
+        [[]],
+        { fields: ["id", "name", "display_name"], order: "name asc", limit: 1000, context: { active_test: false } }
+    );
+    return tags.map((tag) => ({ id: Number(tag.id), name: toDisplayString(tag.display_name || tag.name) }));
+}
+
 export async function getCustomers(
     credentials: OdooCredentials,
-    assignedToUserId?: number | null
+    assignedToUserId?: number | null,
+    tagFilter: CustomerTagFilter = null
 ): Promise<CustomerOption[]> {
     const uid = await authenticate(credentials);
     const partnerFields = await getAvailablePartnerFields(credentials, uid);
@@ -1521,7 +1540,11 @@ export async function getCustomers(
         "search_read",
         [[
             ["is_company", "=", true],
-            ["category_id.name", "=", "Customer ACT"],
+            ...(tagFilter && "all" in tagFilter
+                ? []
+                : tagFilter && tagFilter.ids.length > 0
+                  ? [["category_id", "in", tagFilter.ids]]
+                  : [["category_id.name", "=", DEFAULT_CUSTOMER_TAG]]),
             ...(assignedToUserId ? [["user_id", "=", assignedToUserId]] : []),
         ]],
         {
