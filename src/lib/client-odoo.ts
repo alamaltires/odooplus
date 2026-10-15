@@ -776,6 +776,7 @@ export type PoTrackingOrder = {
     currencyCode: string;
     types: string[];
     fullyReceived: boolean;
+    receiptDone: boolean;
     totalQty: number;
     brands: string[];
     amountTotal: number;
@@ -826,6 +827,13 @@ export function getPoTrackingOrders(input?: { includeReceived?: boolean; fresh?:
 /** Tyre brands per PO id — fetched only for the orders being shown (or exported). */
 export function getPoBrands(orderIds: number[]) {
     return post<{ brands: Record<string, string[]> }>("/api/odoo/po-tracking/brands", { orderIds });
+}
+
+export type PoBillStatus = { state: string; count: number; billNames: string[] };
+
+/** Vendor-bill payment status per PO id — only for the arrived orders being shown. */
+export function getPoBills(orderIds: number[]) {
+    return post<{ bills: Record<string, PoBillStatus> }>("/api/odoo/po-tracking/bills", { orderIds });
 }
 
 export function geocodePorts(names: string[]) {

@@ -26,6 +26,8 @@ import {
     geocodePorts,
     exportPoTrackingExcel,
     getPoBrands,
+    getPoBills,
+    type PoBillStatus,
     getPoTrackingOrders,
     getSeaRoutes,
     getSavedShipmentTracking,
@@ -232,6 +234,8 @@ export default function PoTrackingPage() {
     const [page, setPage] = useState(1);
     // Tyre brands per PO, fetched only for the shipments on the visible page (or when exporting).
     const [brandsByOrder, setBrandsByOrder] = useState<Record<number, string[]>>({});
+    // Vendor-bill payment status per PO, fetched only for arrived shipments on screen.
+    const [billsByOrder, setBillsByOrder] = useState<Record<number, PoBillStatus>>({});
     const [scrollTarget, setScrollTarget] = useState<string | null>(null);
     const [exporting, setExporting] = useState(false);
     const [exportError, setExportError] = useState<string | null>(null);
@@ -316,17 +320,20 @@ export default function PoTrackingPage() {
         () =>
             groups.map((group) => {
                 const tracking = tracked[group.blNumber];
-                const stage = stageOf(tracking);
+                // Fully received in Odoo means it has arrived, whether or not it was ever tracked.
+                const received = group.orders.length > 0 && group.orders.every((order) => order.fullyReceived || order.receiptDone);
+                const trackedStage = stageOf(tracking);
+                const stage: Stage = received && trackedStage !== "delivered" ? "arrived" : trackedStage;
                 const eta = etaOf(group, tracking);
-                return { group, tracking, stage, eta };
+                return { group, tracking, stage, eta, received };
             }),
         [groups, tracked]
     );
 
     const counts = useMemo(() => {
         const result = { soon: 0, transit: 0, arrived: 0, untracked: 0 };
-        for (const { tracking, stage, eta } of enriched) {
-            if (!tracking) result.untracked += 1;
+        for (const { tracking, stage, eta, received } of enriched) {
+            if (!tracking && !received) result.untracked += 1;
             else if (stage === "arrived" || stage === "delivered") result.arrived += 1;
             else result.transit += 1;
             if (stage !== "arrived" && stage !== "delivered" && eta.days !== null && eta.days <= 7) result.soon += 1;
@@ -356,10 +363,10 @@ export default function PoTrackingPage() {
     const visible = useMemo(() => {
         const query = search.trim().toLowerCase();
         return enriched
-            .filter(({ group, tracking, stage, eta }) => {
-                if (filter === "untracked" && tracking) return false;
-                if (filter === "transit" && (!tracking || stage === "arrived" || stage === "delivered")) return false;
-                if (filter === "arrived" && (!tracking || (stage !== "arrived" && stage !== "delivered"))) return false;
+            .filter(({ group, tracking, stage, eta, received }) => {
+                if (filter === "untracked" && (tracking || received)) return false;
+                if (filter === "transit" && (!(tracking || received) || stage === "arrived" || stage === "delivered")) return false;
+                if (filter === "arrived" && (!(tracking || received) || (stage !== "arrived" && stage !== "delivered"))) return false;
                 if (filter === "soon" && (stage === "arrived" || stage === "delivered" || eta.days === null || eta.days > 7)) return false;
                 if (!query) return true;
                 return (
@@ -394,7 +401,7 @@ export default function PoTrackingPage() {
                     }
                 }
                 const rank = (item: (typeof enriched)[number]) =>
-                    !item.tracking ? 3 : item.stage === "arrived" || item.stage === "delivered" ? 2 : item.eta.days !== null && item.eta.days < 0 ? 1 : 0;
+                    !item.tracking && !item.received ? 3 : item.stage === "arrived" || item.stage === "delivered" ? 2 : item.eta.days !== null && item.eta.days < 0 ? 1 : 0;
                 if (rank(a) !== rank(b)) return rank(a) - rank(b);
                 // Within a group: nearest arrival first (overdue ones: the most recently due first).
                 const ta = a.eta.date?.getTime() ?? Infinity;
@@ -458,6 +465,32 @@ export default function PoTrackingPage() {
         };
     }, [pagedVisible, brandsByOrder, resultBl, enriched]);
 
+    useEffect(() => {
+        const need = new Set<number>();
+        const pinned = resultBl ? enriched.find((item) => item.group.blNumber === resultBl) : undefined;
+        for (const { group, stage } of [...pagedVisible, ...(pinned ? [pinned] : [])]) {
+            if (stage !== "arrived" && stage !== "delivered") continue;
+            for (const order of group.orders) {
+                if (billsByOrder[order.id] === undefined) need.add(order.id);
+            }
+        }
+        if (need.size === 0) return;
+        let cancelled = false;
+        getPoBills(Array.from(need))
+            .then((data) => {
+                if (cancelled) return;
+                setBillsByOrder((current) => {
+                    const next = { ...current };
+                    for (const id of need) next[id] = data.bills[String(id)] ?? { state: "no_bill", count: 0, billNames: [] };
+                    return next;
+                });
+            })
+            .catch(() => undefined);
+        return () => {
+            cancelled = true;
+        };
+    }, [pagedVisible, billsByOrder, resultBl, enriched]);
+
     // Tracking re-sorts the list, so once the new order has rendered, scroll to the
     // card that was just tracked and open its results.
     const updateOne = useCallback(async (blNumber: string, chosenCarrier?: string, reveal = true) => {
@@ -515,11 +548,11 @@ export default function PoTrackingPage() {
         { key: "untracked", label: "Not tracked", count: counts.untracked },
     ];
 
-    const renderCard = ({ group, tracking, stage, eta }: (typeof enriched)[number], pinned = false) => {
+    const renderCard = ({ group, tracking, stage, eta, received }: (typeof enriched)[number], pinned = false) => {
                     const isOpen = pinned || expanded.has(group.blNumber);
                     const isUpdating = updating.has(group.blNumber);
                     const error = trackingErrors[group.blNumber];
-                    const chip = etaChip(eta.days, stage);
+                    const chip = received && !tracking ? { text: "Received", className: "bg-emerald-100 text-emerald-800" } : etaChip(eta.days, stage);
                     const stageIndex = STAGES.findIndex((item) => item.key === stage);
                     const latest = latestActualEvent(tracking);
                     const stale = tracking && Date.now() - new Date(tracking.fetchedAt).getTime() > DAY;
@@ -566,6 +599,31 @@ export default function PoTrackingPage() {
                                                 </div>
                                             ) : null;
                                         })()}
+                                        {stage === "arrived" || stage === "delivered" ? (
+                                            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                                <span className="text-xs text-(--ink-soft)">Vendor bill</span>
+                                                {group.orders.map((order) => {
+                                                    const bill = billsByOrder[order.id];
+                                                    const label = !bill
+                                                        ? "…"
+                                                        : ({ paid: "Paid", in_payment: "In payment", partial: "Partially paid", not_paid: "Not paid", no_bill: "No bill" } as Record<string, string>)[bill.state] ?? bill.state;
+                                                    const tone =
+                                                        bill?.state === "paid" || bill?.state === "in_payment"
+                                                            ? "bg-emerald-100 text-emerald-800"
+                                                            : bill?.state === "partial"
+                                                              ? "bg-amber-100 text-amber-800"
+                                                              : bill?.state === "not_paid"
+                                                                ? "bg-red-100 text-red-700"
+                                                                : "bg-(--chip) text-(--ink-soft)";
+                                                    return (
+                                                        <span key={order.id} className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${tone}`} title={bill?.billNames.join(", ")}>
+                                                            {group.orders.length > 1 ? `${order.name}: ` : ""}
+                                                            {label}
+                                                        </span>
+                                                    );
+                                                })}
+                                            </div>
+                                        ) : null}
                                         <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-2">
                                             <Fact icon={<Container className="h-4 w-4" />} label="Containers" value={String(containersFor(group, tracking).length)} />
                                             {group.totalQty > 0 ? (
@@ -631,7 +689,9 @@ export default function PoTrackingPage() {
                                         ) : null}
                                     </div>
                                 ) : (
-                                    <p className="px-5 pb-4 text-sm text-(--ink-soft)">Not tracked yet — press Track to get the latest position.</p>
+                                    <p className="px-5 pb-4 text-sm text-(--ink-soft)">
+                                        {received ? "Received in Odoo." : "Not tracked yet — press Track to get the latest position."}
+                                    </p>
                                 )}
 
                                 {error ? (
@@ -663,15 +723,17 @@ export default function PoTrackingPage() {
                                         <span className={`text-xs ${stale ? "text-amber-600" : "text-(--ink-soft)"}`}>
                                             {tracking ? `Checked ${timeAgo(tracking.fetchedAt)}` : ""}
                                         </span>
-                                        <button
-                                            type="button"
-                                            onClick={() => void updateOne(group.blNumber)}
-                                            disabled={isUpdating || busy}
-                                            className="inline-flex items-center gap-2 rounded-xl border border-(--line) bg-white px-3 py-1.5 text-sm font-medium disabled:opacity-60"
-                                        >
-                                            <RefreshCw className={`h-4 w-4 ${isUpdating ? "animate-spin" : ""}`} />
-                                            {tracking ? "Update" : "Track"}
-                                        </button>
+                                        {stage === "arrived" || stage === "delivered" ? null : (
+                                            <button
+                                                type="button"
+                                                onClick={() => void updateOne(group.blNumber)}
+                                                disabled={isUpdating || busy}
+                                                className="inline-flex items-center gap-2 rounded-xl border border-(--line) bg-white px-3 py-1.5 text-sm font-medium disabled:opacity-60"
+                                            >
+                                                <RefreshCw className={`h-4 w-4 ${isUpdating ? "animate-spin" : ""}`} />
+                                                {tracking ? "Update" : "Track"}
+                                            </button>
+                                        )}
                                     </div>
                                 </div>
 
@@ -832,7 +894,7 @@ export default function PoTrackingPage() {
     const bulkTargets =
         view === "map"
             ? shownOnMap.filter((item) => item.stage !== "delivered").map((item) => item.blNumber)
-            : visible.filter(({ stage, tracking }) => !(tracking && stage === "delivered")).map(({ group }) => group.blNumber);
+            : visible.filter(({ stage, tracking, received }) => !(received || (tracking && stage === "delivered"))).map(({ group }) => group.blNumber);
 
     // The Excel export covers what the current view is showing (all pages, or the ticked map shipments).
     async function exportToExcel() {

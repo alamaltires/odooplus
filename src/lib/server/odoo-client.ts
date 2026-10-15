@@ -10572,6 +10572,8 @@ export type PoTrackingOrder = {
     currencyCode: string;
     types: string[];
     fullyReceived: boolean;
+    /** Odoo's own receipt status on the PO ("full" once its receipts are done). */
+    receiptDone: boolean;
     /** Total ordered quantity on the PO (the container text doesn't say how it splits). */
     totalQty: number;
     /** Tyre brands on the PO's product lines (filled by `getPoBrands`, empty in the list load). */
@@ -10867,7 +10869,7 @@ async function loadImportedPurchaseOrdersForTracking(
 
     const readFields = [
         "name", "partner_id", "partner_ref", ...noteFields, "date_order", "date_planned", "currency_id",
-        "amount_total", "company_id", typeField.fieldName, ...(totalQtyField ? [totalQtyField] : []),
+        "amount_total", "company_id", "receipt_status", typeField.fieldName, ...(totalQtyField ? [totalQtyField] : []),
     ].filter((name, index, all) => all.indexOf(name) === index && hasField(name));
 
     // Not capped: a fixed limit here silently kept only the newest N orders
@@ -10950,6 +10952,7 @@ async function loadImportedPurchaseOrdersForTracking(
             currencyCode: getRelationalName(order.currency_id),
             types,
             fullyReceived,
+            receiptDone: order.receipt_status === "full",
             totalQty: Number((declaredUnits > 0 ? declaredUnits : poTotalQty).toFixed(2)),
             brands: [],
             amountTotal: Number(order.amount_total ?? 0),
@@ -10993,6 +10996,46 @@ export async function getPoBrands(credentials: OdooCredentials, orderIds: number
     const result: Record<number, string[]> = {};
     for (const [orderId, set] of brands) {
         result[orderId] = Array.from(set).sort((left, right) => left.localeCompare(right));
+    }
+    return result;
+}
+
+export type PoBillStatus = {
+    /** "paid" | "partial" | "not_paid" | "in_payment" | "reversed" | "no_bill" */
+    state: string;
+    count: number;
+    billNames: string[];
+};
+
+/** Vendor-bill payment status per purchase order — only asked for the arrived orders on screen. */
+export async function getPoBills(credentials: OdooCredentials, orderIds: number[]): Promise<Record<number, PoBillStatus>> {
+    const ids = Array.from(new Set(orderIds.map(Number).filter((id) => Number.isFinite(id) && id > 0)));
+    if (ids.length === 0) {
+        return {};
+    }
+
+    const uid = await authenticate(credentials);
+    const orders = await readInBatches(credentials, uid, "purchase.order", ids, ["invoice_ids"]).catch(() => [] as Array<Record<string, unknown>>);
+    const billIds = Array.from(new Set(orders.flatMap((order) => (Array.isArray(order.invoice_ids) ? (order.invoice_ids as number[]) : []))));
+    const bills = billIds.length
+        ? await readInBatches(credentials, uid, "account.move", billIds, ["name", "state", "payment_state", "move_type"]).catch(() => [] as Array<Record<string, unknown>>)
+        : [];
+    const billById = new Map(bills.map((bill) => [Number(bill.id), bill]));
+
+    const result: Record<number, PoBillStatus> = {};
+    for (const order of orders) {
+        const list = (Array.isArray(order.invoice_ids) ? (order.invoice_ids as number[]) : [])
+            .map((id) => billById.get(id))
+            .filter((bill): bill is Record<string, unknown> => Boolean(bill) && bill!.move_type === "in_invoice" && bill!.state !== "cancel");
+        const states = list.map((bill) => String(bill.payment_state || "not_paid"));
+        let state = "no_bill";
+        if (states.length > 0) {
+            if (states.every((value) => value === "paid")) state = "paid";
+            else if (states.every((value) => value === "paid" || value === "in_payment")) state = "in_payment";
+            else if (states.some((value) => value === "paid" || value === "partial" || value === "in_payment")) state = "partial";
+            else state = "not_paid";
+        }
+        result[Number(order.id)] = { state, count: list.length, billNames: list.map((bill) => String(bill.name || "")) };
     }
     return result;
 }
