@@ -1,87 +1,152 @@
 "use client";
 
-import { FormEvent, useState } from "react";
-import { Download, ScanSearch } from "lucide-react";
-import { getNearExpiryProducts } from "@/lib/client-odoo";
-import { OdooNearExpiryProduct } from "@/types/odoo";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { AlertCircle, ChevronLeft, ChevronRight, Download, RefreshCw, Search, Warehouse } from "lucide-react";
+import { useAuth } from "@/lib/auth-context";
+import { getAgedStock, type AgedStockResponse, type AgedStockRow } from "@/lib/client-odoo";
 
-function formatDate(value: string) {
-    if (!value) {
-        return "-";
-    }
+/** One scan fetches everything older than this; the age pills then filter instantly, without asking Odoo again. */
+const SCAN_BASE_DAYS = 90;
+const AGE_PILLS = [
+    { days: 90, label: "3 months+" },
+    { days: 180, label: "6 months+" },
+    { days: 270, label: "9 months+" },
+    { days: 365, label: "1 year+" },
+];
+const BUCKET_COLORS = ["bg-emerald-500", "bg-amber-400", "bg-orange-500", "bg-red-500"];
+const PAGE_SIZE = 25;
 
-    return value.slice(0, 10);
+function timeAgo(iso: string | null) {
+    if (!iso) return "";
+    const minutes = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+    if (minutes < 1) return "just now";
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return `${hours} h ago`;
+    return `${Math.round(hours / 24)} d ago`;
 }
 
-function formatDateTime(value: string | null) {
-    if (!value) {
-        return "-";
-    }
+function ageText(days: number) {
+    if (days < 60) return `${days} days`;
+    if (days < 365) return `${Math.round(days / 30)} months`;
+    const years = days / 365;
+    return `${years.toFixed(1)} years`;
+}
 
-    return value.replace("T", " ").slice(0, 16);
+const ageTone = (days: number) => (days > 365 ? "bg-red-500" : days > 270 ? "bg-orange-500" : days > 180 ? "bg-amber-500" : "bg-yellow-400");
+const ageBadge = (days: number) =>
+    days > 365 ? "bg-red-100 text-red-700" : days > 270 ? "bg-orange-100 text-orange-700" : days > 180 ? "bg-amber-100 text-amber-800" : "bg-yellow-100 text-yellow-800";
+
+function Stat({ label, value, hint, tone }: { label: string; value: string; hint?: string; tone?: string }) {
+    return (
+        <div className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_24px_rgba(8,23,41,0.05)] animate-[dash-rise_0.5s_ease-out_both]">
+            <p className="text-sm text-(--ink-soft)">{label}</p>
+            <p className={`mt-2 font-display text-3xl leading-tight tabular-nums ${tone ?? ""}`}>{value}</p>
+            {hint ? <p className="mt-1 truncate text-xs text-(--ink-soft)">{hint}</p> : null}
+        </div>
+    );
 }
 
 export default function ProductScannerPage() {
-    const [thresholdDays, setThresholdDays] = useState(30);
-    const [products, setProducts] = useState<OdooNearExpiryProduct[]>([]);
-    const [scannedAt, setScannedAt] = useState<string | null>(null);
+    const { user } = useAuth();
+    const storageKey = user ? `aged-stock-v1-${user.uid}` : null;
+
+    const [result, setResult] = useState<AgedStockResponse | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [exporting, setExporting] = useState(false);
 
-    async function handleScan(event: FormEvent) {
-        event.preventDefault();
+    const [minAge, setMinAge] = useState(180);
+    const [warehouse, setWarehouse] = useState("");
+    const [brand, setBrand] = useState("");
+    const [search, setSearch] = useState("");
+    const [sort, setSort] = useState<"age" | "quantity">("age");
+    const [page, setPage] = useState(1);
 
+    // Show the last scan straight away when coming back to the page.
+    useEffect(() => {
+        if (!storageKey) return;
+        const timer = window.setTimeout(() => {
+            try {
+                const saved = window.localStorage.getItem(storageKey);
+                if (saved) setResult(JSON.parse(saved) as AgedStockResponse);
+            } catch {
+                // ignore a broken saved copy
+            }
+        }, 0);
+        return () => window.clearTimeout(timer);
+    }, [storageKey]);
+
+    const scan = useCallback(async () => {
         setLoading(true);
         setError(null);
-
         try {
-            const response = await getNearExpiryProducts({ thresholdDays });
-            setProducts(response.products);
-            setScannedAt(response.scannedAt);
-            setThresholdDays(response.thresholdDays);
+            const response = await getAgedStock({ minAgeDays: SCAN_BASE_DAYS });
+            setResult(response);
+            setPage(1);
+            if (storageKey) {
+                try {
+                    window.localStorage.setItem(storageKey, JSON.stringify(response));
+                } catch {
+                    // storage full or unavailable
+                }
+            }
         } catch (scanError) {
-            setError(
-                scanError instanceof Error
-                    ? scanError.message
-                    : "Failed to scan near expiry products."
-            );
+            setError(scanError instanceof Error ? scanError.message : "Failed to scan aged stock.");
         } finally {
             setLoading(false);
         }
-    }
+    }, [storageKey]);
+
+    // Everything below is worked out from the scan, so filters respond instantly.
+    const aged = useMemo(() => (result ? result.rows.filter((row) => row.ageDays >= minAge) : []), [result, minAge]);
+    const agedUnits = aged.reduce((total, row) => total + row.quantity, 0);
+    const oldest = aged[0] ?? null;
+
+    const warehouses = useMemo(() => {
+        const totals = new Map<string, number>();
+        for (const row of aged) totals.set(row.warehouse, (totals.get(row.warehouse) ?? 0) + row.quantity);
+        return Array.from(totals, ([name, units]) => ({ name, units })).sort((a, b) => b.units - a.units);
+    }, [aged]);
+    const brands = useMemo(() => Array.from(new Set(aged.map((row) => row.brand).filter(Boolean))).sort((a, b) => a.localeCompare(b)), [aged]);
+
+    const rows = useMemo(() => {
+        const query = search.trim().toLowerCase();
+        return aged
+            .filter((row) => (!warehouse || row.warehouse === warehouse) && (!brand || row.brand === brand) && (!query || `${row.productName} ${row.brand} ${row.lotName}`.toLowerCase().includes(query)))
+            .sort((a, b) => (sort === "age" ? b.ageDays - a.ageDays || b.quantity - a.quantity : b.quantity - a.quantity || b.ageDays - a.ageDays));
+    }, [aged, warehouse, brand, search, sort]);
+
+    const pageCount = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+    const currentPage = Math.min(page, pageCount);
+    const pageRows = rows.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+    const shownUnits = rows.reduce((total, row) => total + row.quantity, 0);
+    const maxAge = Math.max(...aged.map((row) => row.ageDays), 1);
+    const bucketTotal = result ? result.buckets.reduce((total, bucket) => total + bucket.units, 0) : 0;
+    const filtered = Boolean(warehouse || brand || search.trim());
 
     async function handleExport() {
-        if (products.length === 0) {
-            return;
-        }
-
+        if (rows.length === 0) return;
         setExporting(true);
-        setError(null);
-
         try {
             const XLSX = await import("xlsx");
-            const exportRows = products.map((product) => ({
-                Product: product.productName,
-                Lot: product.lotName,
-                "Expiry Date": formatDate(product.expirationDate),
-                "Days Left": product.daysUntilExpiry,
-                Quantity: product.quantity,
-            }));
-
-            const worksheet = XLSX.utils.json_to_sheet(exportRows);
+            const worksheet = XLSX.utils.json_to_sheet(
+                rows.map((row: AgedStockRow) => ({
+                    Product: row.productName,
+                    Brand: row.brand,
+                    Lot: row.lotName,
+                    Warehouse: row.warehouse,
+                    Locations: row.locations.join(", "),
+                    Quantity: row.quantity,
+                    "In Stock Since": row.oldestDate,
+                    "Age (Days)": row.ageDays,
+                }))
+            );
             const workbook = XLSX.utils.book_new();
-            XLSX.utils.book_append_sheet(workbook, worksheet, "Near Expiry");
-            XLSX.writeFile(
-                workbook,
-                `near-expiry-products-${thresholdDays}d-${new Date().toISOString().slice(0, 10)}.xlsx`
-            );
+            XLSX.utils.book_append_sheet(workbook, worksheet, "Aged Stock");
+            XLSX.writeFile(workbook, `aged-stock-${minAge}d-${new Date().toISOString().slice(0, 10)}.xlsx`);
         } catch (exportError) {
-            setError(
-                exportError instanceof Error
-                    ? exportError.message
-                    : "Failed to export Excel file."
-            );
+            setError(exportError instanceof Error ? exportError.message : "Failed to export Excel file.");
         } finally {
             setExporting(false);
         }
@@ -89,103 +154,268 @@ export default function ProductScannerPage() {
 
     return (
         <section>
-            <div className="flex items-start justify-between gap-4">
+            {/* Header */}
+            <div className="flex flex-wrap items-end justify-between gap-4 animate-[dash-rise_0.5s_ease-out_both]">
                 <div>
                     <h1 className="font-display text-3xl">Product Scanner</h1>
-                    <p className="mt-1 text-sm text-(--ink-soft)">
-                        Scan near-expiry products from Odoo on demand.
+                    <p className="mt-1 max-w-xl text-sm text-(--ink-soft)">
+                        Stock that has been sitting in your warehouses the longest, counted from the date it arrived.
                     </p>
                 </div>
-                <ScanSearch className="h-8 w-8 text-(--brand)" aria-hidden="true" />
-            </div>
-
-            <form
-                onSubmit={handleScan}
-                className="mt-6 rounded-2xl border border-(--line) bg-(--card) p-5"
-            >
-                <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-end">
-                    <label className="block">
-                        <span className="mb-2 block text-sm font-medium">Scan Window (Days)</span>
-                        <input
-                            type="number"
-                            min="1"
-                            max="365"
-                            value={thresholdDays}
-                            onChange={(event) => setThresholdDays(Number(event.target.value))}
-                            className="w-44 rounded-xl border border-(--line) bg-white px-3 py-2"
-                            required
-                        />
-                    </label>
+                <div className="flex items-center gap-3">
+                    {result ? <span className="text-xs text-(--ink-soft)">Scanned {timeAgo(result.scannedAt)}</span> : null}
                     <button
-                        type="submit"
+                        type="button"
+                        onClick={() => void scan()}
                         disabled={loading}
-                        className="rounded-xl bg-(--brand) px-5 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
+                        className="group inline-flex items-center gap-2 rounded-xl bg-(--brand) px-4 py-2.5 text-sm font-semibold text-white shadow-[0_8px_18px_rgba(229,26,39,0.28)] transition hover:-translate-y-0.5 disabled:translate-y-0 disabled:opacity-60 disabled:shadow-none"
                     >
-                        {loading ? "Scanning..." : "Scan Near Expiry"}
+                        <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : "transition group-hover:rotate-180"}`} />
+                        {loading ? "Scanning warehouses..." : result ? "Scan again" : "Scan warehouses"}
                     </button>
-                    <p className="text-sm text-(--ink-soft)">
-                        Last scan: {formatDateTime(scannedAt)}
-                    </p>
                 </div>
-
-                {error ? <p className="mt-4 text-sm text-red-600">{error}</p> : null}
-            </form>
-
-            <div className="mt-6 rounded-2xl border border-(--line) bg-(--card) p-5">
-                <div className="flex items-end justify-between gap-3">
-                    <div>
-                        <h2 className="font-display text-2xl">Near Expiry Lots</h2>
-                        <p className="mt-1 text-sm text-(--ink-soft)">
-                            Showing lots expiring within {thresholdDays} day(s).
-                        </p>
-                    </div>
-                    <div className="flex items-center gap-3">
-                        <button
-                            type="button"
-                            onClick={() => void handleExport()}
-                            disabled={products.length === 0 || exporting}
-                            className="inline-flex items-center gap-2 rounded-xl border border-(--line) px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                            <Download className="h-4 w-4" aria-hidden="true" />
-                            {exporting ? "Exporting..." : "Export Excel"}
-                        </button>
-                        <span className="rounded-full bg-(--chip) px-3 py-1 text-xs font-medium text-(--ink-soft)">
-                            {products.length} lot(s)
-                        </span>
-                    </div>
-                </div>
-
-                {products.length === 0 ? (
-                    <p className="mt-4 text-sm text-(--ink-soft)">
-                        No near-expiry products found. Run a scan to refresh data.
-                    </p>
-                ) : (
-                    <div className="mt-4 overflow-hidden rounded-xl border border-(--line)">
-                        <table className="w-full border-collapse text-left text-sm">
-                            <thead className="bg-(--chip) text-(--ink-soft)">
-                                <tr>
-                                    <th className="px-4 py-3 font-medium">Product</th>
-                                    <th className="px-4 py-3 font-medium">Lot</th>
-                                    <th className="px-4 py-3 font-medium">Expiry Date</th>
-                                    <th className="px-4 py-3 font-medium">Days Left</th>
-                                    <th className="px-4 py-3 font-medium">Quantity</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {products.map((product) => (
-                                    <tr key={product.lotId} className="border-t border-(--line)">
-                                        <td className="px-4 py-3">{product.productName}</td>
-                                        <td className="px-4 py-3">{product.lotName}</td>
-                                        <td className="px-4 py-3">{formatDate(product.expirationDate)}</td>
-                                        <td className="px-4 py-3">{product.daysUntilExpiry}</td>
-                                        <td className="px-4 py-3">{product.quantity}</td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                )}
             </div>
+
+            {error ? (
+                <p className="mt-4 flex items-start gap-2 rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">
+                    <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /> {error}
+                </p>
+            ) : null}
+
+            {/* Empty / loading states */}
+            {!result && !loading ? (
+                <div className="mt-8 rounded-2xl border border-dashed border-(--line) bg-(--card) px-6 py-14 text-center animate-[dash-rise_0.5s_ease-out_both]">
+                    <Warehouse className="mx-auto h-10 w-10 text-(--brand)" aria-hidden="true" />
+                    <p className="mt-3 font-display text-xl">Find your slow-moving stock</p>
+                    <p className="mx-auto mt-1 max-w-md text-sm text-(--ink-soft)">
+                        One scan reads every warehouse. After that you can switch between 3 months, 6 months and 1 year, or filter by warehouse and brand, instantly.
+                    </p>
+                    <button type="button" onClick={() => void scan()} className="mt-5 rounded-xl bg-(--brand) px-5 py-2.5 text-sm font-semibold text-white">
+                        Scan warehouses
+                    </button>
+                </div>
+            ) : null}
+
+            {loading && !result ? (
+                <div className="mt-6 grid gap-4 sm:grid-cols-3">
+                    {[0, 1, 2].map((index) => (
+                        <div key={index} className="h-28 rounded-2xl bg-[linear-gradient(90deg,var(--chip)_25%,#fff_50%,var(--chip)_75%)] bg-[length:200%_100%] animate-[dash-shimmer_1.4s_linear_infinite]" />
+                    ))}
+                </div>
+            ) : null}
+
+            {result ? (
+                <div className={`transition-opacity ${loading ? "opacity-50" : ""}`}>
+                    {/* Age filter */}
+                    <div className="mt-6 flex flex-wrap items-center gap-2">
+                        <span className="mr-1 text-sm font-medium">Older than</span>
+                        {AGE_PILLS.map((pill) => (
+                            <button
+                                key={pill.days}
+                                type="button"
+                                onClick={() => {
+                                    setMinAge(pill.days);
+                                    setPage(1);
+                                }}
+                                className={`rounded-full border px-4 py-1.5 text-sm transition ${
+                                    minAge === pill.days ? "border-(--brand) bg-(--brand) font-semibold text-white shadow-sm" : "border-(--line) bg-white hover:bg-(--chip)"
+                                }`}
+                            >
+                                {pill.label}
+                            </button>
+                        ))}
+                    </div>
+
+                    {/* Key figures */}
+                    <div className="mt-4 grid gap-4 sm:grid-cols-3">
+                        <Stat
+                            label={`Aged stock (${AGE_PILLS.find((pill) => pill.days === minAge)?.label.toLowerCase()})`}
+                            value={`${Math.round(agedUnits).toLocaleString("en-US")} units`}
+                            hint={`${result.totalUnits > 0 ? ((agedUnits / result.totalUnits) * 100).toFixed(1) : 0}% of ${Math.round(result.totalUnits).toLocaleString("en-US")} on hand · ${aged.length.toLocaleString("en-US")} lines`}
+                            tone={agedUnits > 0 ? "text-red-600" : "text-emerald-600"}
+                        />
+                        <Stat label="Oldest item" value={oldest ? ageText(oldest.ageDays) : "-"} hint={oldest ? `${oldest.productName}${oldest.brand ? ` · ${oldest.brand}` : ""}` : "Nothing this old"} />
+                        <Stat
+                            label="Most aged stock in"
+                            value={warehouses[0]?.name ?? "-"}
+                            hint={warehouses[0] ? `${Math.round(warehouses[0].units).toLocaleString("en-US")} units aged here` : undefined}
+                        />
+                    </div>
+
+                    {/* Age distribution */}
+                    <div className="mt-4 rounded-2xl border border-(--line) bg-(--card) p-5 animate-[dash-rise_0.6s_ease-out_both]">
+                        <p className="text-sm font-medium">How old is everything on hand</p>
+                        <div className="mt-3 flex h-4 overflow-hidden rounded-full bg-(--chip)">
+                            {result.buckets.map((bucket, index) =>
+                                bucket.units > 0 ? (
+                                    <div
+                                        key={bucket.label}
+                                        className={`${BUCKET_COLORS[index]} origin-left animate-[dash-bar_0.9s_ease-out_both] ${(result.buckets[index + 1]?.fromDays ?? Infinity) <= minAge ? "opacity-40" : ""}`}
+                                        style={{ width: `${(bucket.units / Math.max(bucketTotal, 1)) * 100}%` }}
+                                        title={`${bucket.label}: ${Math.round(bucket.units).toLocaleString("en-US")} units`}
+                                    />
+                                ) : null
+                            )}
+                        </div>
+                        <ul className="mt-3 flex flex-wrap gap-x-6 gap-y-1.5 text-sm">
+                            {result.buckets.map((bucket, index) => (
+                                <li key={bucket.label} className="flex items-center gap-2">
+                                    <span className={`h-2.5 w-2.5 rounded-full ${BUCKET_COLORS[index]}`} />
+                                    <span className="text-(--ink-soft)">{bucket.label}</span>
+                                    <span className="font-semibold tabular-nums">{Math.round(bucket.units).toLocaleString("en-US")}</span>
+                                    <span className="text-xs text-(--ink-soft)">({bucketTotal > 0 ? Math.round((bucket.units / bucketTotal) * 100) : 0}%)</span>
+                                </li>
+                            ))}
+                        </ul>
+                        {result.unknownAgeUnits > 0 ? (
+                            <p className="mt-2 text-xs text-(--ink-soft)">{Math.round(result.unknownAgeUnits).toLocaleString("en-US")} units have no incoming date in Odoo, so they are not aged.</p>
+                        ) : null}
+                    </div>
+
+                    {/* List */}
+                    <div className="mt-4 rounded-2xl border border-(--line) bg-(--card) p-5 animate-[dash-rise_0.7s_ease-out_both]">
+                        {warehouses.length > 1 ? (
+                            <div className="mb-4 flex flex-wrap items-center gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setWarehouse("")}
+                                    className={`rounded-full border px-3 py-1 text-sm ${!warehouse ? "border-(--brand) bg-(--chip) font-medium" : "border-(--line) bg-white"}`}
+                                >
+                                    All warehouses
+                                </button>
+                                {warehouses.map((wh) => (
+                                    <button
+                                        key={wh.name}
+                                        type="button"
+                                        onClick={() => {
+                                            setWarehouse(warehouse === wh.name ? "" : wh.name);
+                                            setPage(1);
+                                        }}
+                                        className={`rounded-full border px-3 py-1 text-sm ${warehouse === wh.name ? "border-(--brand) bg-(--chip) font-medium" : "border-(--line) bg-white"}`}
+                                    >
+                                        {wh.name} <span className="text-xs text-(--ink-soft)">{Math.round(wh.units).toLocaleString("en-US")}</span>
+                                    </button>
+                                ))}
+                            </div>
+                        ) : null}
+
+                        <div className="flex flex-wrap items-center gap-3">
+                            <label className="relative min-w-52 flex-1">
+                                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-(--ink-soft)" />
+                                <input
+                                    value={search}
+                                    onChange={(event) => {
+                                        setSearch(event.target.value);
+                                        setPage(1);
+                                    }}
+                                    placeholder="Search product, brand or lot"
+                                    className="w-full rounded-xl border border-(--line) bg-white py-2 pl-9 pr-3 text-sm"
+                                />
+                            </label>
+                            <select
+                                value={brand}
+                                onChange={(event) => {
+                                    setBrand(event.target.value);
+                                    setPage(1);
+                                }}
+                                className="rounded-xl border border-(--line) bg-white px-3 py-2 text-sm"
+                            >
+                                <option value="">All brands</option>
+                                {brands.map((name) => (
+                                    <option key={name} value={name}>
+                                        {name}
+                                    </option>
+                                ))}
+                            </select>
+                            <select value={sort} onChange={(event) => setSort(event.target.value as "age" | "quantity")} className="rounded-xl border border-(--line) bg-white px-3 py-2 text-sm">
+                                <option value="age">Oldest first</option>
+                                <option value="quantity">Largest quantity first</option>
+                            </select>
+                            <button
+                                type="button"
+                                onClick={() => void handleExport()}
+                                disabled={rows.length === 0 || exporting}
+                                className="inline-flex items-center gap-2 rounded-xl border border-(--line) bg-white px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                                <Download className="h-4 w-4" aria-hidden="true" />
+                                {exporting ? "Exporting..." : "Export"}
+                            </button>
+                        </div>
+
+                        <p className="mt-3 text-sm text-(--ink-soft)">
+                            {rows.length.toLocaleString("en-US")} line{rows.length === 1 ? "" : "s"} · {Math.round(shownUnits).toLocaleString("en-US")} units
+                            {filtered ? " (filtered)" : ""}
+                            {result.truncated ? " · showing the oldest 5,000 lines" : ""}
+                        </p>
+
+                        {rows.length === 0 ? (
+                            <p className="mt-6 rounded-xl bg-(--chip) px-4 py-8 text-center text-sm text-(--ink-soft)">
+                                {filtered ? "Nothing matches these filters." : "No stock this old. Nice."}
+                            </p>
+                        ) : (
+                            <div className="mt-3 overflow-x-auto">
+                                <table className="w-full min-w-170 border-collapse text-left text-sm">
+                                    <thead className="text-xs uppercase tracking-wide text-(--ink-soft)">
+                                        <tr className="border-b border-(--line)">
+                                            <th className="py-2 pr-3 font-medium">Product</th>
+                                            <th className="px-3 py-2 font-medium">Lot</th>
+                                            <th className="px-3 py-2 font-medium">Warehouse</th>
+                                            <th className="px-3 py-2 text-right font-medium">Qty</th>
+                                            <th className="py-2 pl-3 font-medium">Age</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {pageRows.map((row) => (
+                                            <tr key={`${row.productId}-${row.lotName}-${row.warehouse}`} className="border-b border-(--line)/60 transition hover:bg-(--chip)/50">
+                                                <td className="py-3 pr-3">
+                                                    <p className="font-medium leading-snug">{row.productName}</p>
+                                                    {row.brand ? <p className="text-xs text-(--ink-soft)">{row.brand}</p> : null}
+                                                </td>
+                                                <td className="px-3 py-3 text-(--ink-soft)">{row.lotName || "-"}</td>
+                                                <td className="px-3 py-3">
+                                                    <p>{row.warehouse}</p>
+                                                    <p className="max-w-48 truncate text-xs text-(--ink-soft)" title={row.locations.join(", ")}>
+                                                        {row.locations.map((location) => location.split("/").slice(1).join("/")).filter(Boolean).join(", ")}
+                                                    </p>
+                                                </td>
+                                                <td className="px-3 py-3 text-right font-semibold tabular-nums">{Math.round(row.quantity).toLocaleString("en-US")}</td>
+                                                <td className="py-3 pl-3">
+                                                    <div className="flex items-center gap-3">
+                                                        <div className="h-1.5 w-24 shrink-0 overflow-hidden rounded-full bg-(--chip)">
+                                                            <div className={`h-full rounded-full ${ageTone(row.ageDays)}`} style={{ width: `${Math.max(6, (row.ageDays / maxAge) * 100)}%` }} />
+                                                        </div>
+                                                        <div>
+                                                            <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${ageBadge(row.ageDays)}`}>{ageText(row.ageDays)}</span>
+                                                            <p className="mt-0.5 text-[11px] text-(--ink-soft)">since {row.oldestDate}</p>
+                                                        </div>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+
+                        {pageCount > 1 ? (
+                            <div className="mt-4 flex items-center justify-between text-sm">
+                                <span className="text-(--ink-soft)">
+                                    Page {currentPage} of {pageCount}
+                                </span>
+                                <div className="flex gap-2">
+                                    <button type="button" onClick={() => setPage(currentPage - 1)} disabled={currentPage <= 1} className="inline-flex items-center gap-1 rounded-lg border border-(--line) bg-white px-3 py-1.5 disabled:opacity-40">
+                                        <ChevronLeft className="h-4 w-4" /> Previous
+                                    </button>
+                                    <button type="button" onClick={() => setPage(currentPage + 1)} disabled={currentPage >= pageCount} className="inline-flex items-center gap-1 rounded-lg border border-(--line) bg-white px-3 py-1.5 disabled:opacity-40">
+                                        Next <ChevronRight className="h-4 w-4" />
+                                    </button>
+                                </div>
+                            </div>
+                        ) : null}
+                    </div>
+                </div>
+            ) : null}
+            <style>{`@keyframes dash-bar{from{transform:scaleX(0)}to{transform:scaleX(1)}}`}</style>
         </section>
     );
 }

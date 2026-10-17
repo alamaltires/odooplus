@@ -929,3 +929,32 @@ export function refreshDashboardCard(card: string) {
 export function getSavedDashboard() {
     return post<{ cards: Record<string, { data: unknown; fetchedAt: string }> }>("/api/odoo/dashboard-card", { cachedOnly: true });
 }
+
+export type AgedStockRow = {
+    productId: number;
+    productName: string;
+    brand: string;
+    lotName: string;
+    warehouse: string;
+    locations: string[];
+    quantity: number;
+    oldestDate: string;
+    ageDays: number;
+};
+
+export type AgedStockResponse = {
+    minAgeDays: number;
+    totalUnits: number;
+    agedUnits: number;
+    unknownAgeUnits: number;
+    buckets: Array<{ label: string; fromDays: number; units: number }>;
+    warehouses: Array<{ name: string; totalUnits: number; agedUnits: number }>;
+    rows: AgedStockRow[];
+    truncated: boolean;
+    scannedAt: string;
+};
+
+/** On-hand stock older than `minAgeDays` (by Odoo's incoming date), per product / lot / warehouse. */
+export function getAgedStock(input: { minAgeDays: number }) {
+    return post<AgedStockResponse>("/api/odoo/aged-stock", input);
+}

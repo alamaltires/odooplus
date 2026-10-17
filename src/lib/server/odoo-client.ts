@@ -11742,3 +11742,134 @@ export async function computeDashboardCard(credentials: OdooCredentials, card: s
             throw new Error("Unknown dashboard card.");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Aged stock: how long on-hand stock has been sitting in the warehouses.
+// ---------------------------------------------------------------------------
+
+export type AgedStockRow = {
+    productId: number;
+    productName: string;
+    brand: string;
+    lotName: string;
+    warehouse: string;
+    locations: string[];
+    quantity: number;
+    /** Date the oldest units of this row arrived in the warehouse (Odoo's "incoming date"). */
+    oldestDate: string;
+    ageDays: number;
+};
+
+export type AgedStockResult = {
+    minAgeDays: number;
+    totalUnits: number;
+    agedUnits: number;
+    unknownAgeUnits: number;
+    buckets: Array<{ label: string; fromDays: number; units: number }>;
+    warehouses: Array<{ name: string; totalUnits: number; agedUnits: number }>;
+    rows: AgedStockRow[];
+    truncated: boolean;
+};
+
+const AGED_STOCK_BUCKETS = [
+    { label: "0-90 days", fromDays: 0 },
+    { label: "91-180 days", fromDays: 91 },
+    { label: "181-365 days", fromDays: 181 },
+    { label: "Over 1 year", fromDays: 366 },
+];
+const AGED_STOCK_MAX_ROWS = 5000;
+
+export async function getAgedStock(credentials: OdooCredentials, minAgeDays: number): Promise<AgedStockResult> {
+    const uid = await authenticate(credentials);
+    const minAge = Number.isFinite(minAgeDays) ? Math.max(1, Math.min(3650, Math.floor(minAgeDays))) : 180;
+    const now = Date.now();
+
+    const quants = await searchReadAll(
+        credentials,
+        uid,
+        "stock.quant",
+        [["location_id.usage", "=", "internal"], ["quantity", ">", 0]],
+        ["product_id", "lot_id", "location_id", "quantity", "in_date"],
+        { maxRecords: 150000 }
+    );
+
+    const buckets = AGED_STOCK_BUCKETS.map((bucket) => ({ ...bucket, units: 0 }));
+    const warehouses = new Map<string, { totalUnits: number; agedUnits: number }>();
+    const groups = new Map<string, AgedStockRow>();
+    let totalUnits = 0;
+    let agedUnits = 0;
+    let unknownAgeUnits = 0;
+
+    for (const quant of quants) {
+        const quantity = Number(quant.quantity ?? 0);
+        if (quantity <= 0) continue;
+        totalUnits += quantity;
+
+        const location = getRelationalName(quant.location_id);
+        const warehouse = location.split("/")[0].trim() || "Unknown";
+        const wh = warehouses.get(warehouse) ?? { totalUnits: 0, agedUnits: 0 };
+        wh.totalUnits += quantity;
+        warehouses.set(warehouse, wh);
+
+        const inDate = typeof quant.in_date === "string" ? quant.in_date : "";
+        const received = inDate ? new Date(`${inDate.replace(" ", "T")}Z`) : null;
+        if (!received || Number.isNaN(received.getTime())) {
+            unknownAgeUnits += quantity;
+            continue;
+        }
+
+        const ageDays = Math.max(0, Math.floor((now - received.getTime()) / 86_400_000));
+        for (let index = buckets.length - 1; index >= 0; index -= 1) {
+            if (ageDays >= buckets[index].fromDays) {
+                buckets[index].units += quantity;
+                break;
+            }
+        }
+        if (ageDays < minAge) continue;
+
+        agedUnits += quantity;
+        wh.agedUnits += quantity;
+        const productId = getRelationalId(quant.product_id) ?? 0;
+        const lotName = getRelationalName(quant.lot_id);
+        const key = `${productId}|${lotName}|${warehouse}`;
+        const row = groups.get(key) ?? {
+            productId,
+            productName: getRelationalName(quant.product_id),
+            brand: "",
+            lotName,
+            warehouse,
+            locations: [],
+            quantity: 0,
+            oldestDate: received.toISOString().slice(0, 10),
+            ageDays,
+        };
+        row.quantity += quantity;
+        if (location && !row.locations.includes(location)) row.locations.push(location);
+        if (ageDays > row.ageDays) {
+            row.ageDays = ageDays;
+            row.oldestDate = received.toISOString().slice(0, 10);
+        }
+        groups.set(key, row);
+    }
+
+    const all = Array.from(groups.values()).sort((a, b) => b.ageDays - a.ageDays || b.quantity - a.quantity);
+    const rows = all.slice(0, AGED_STOCK_MAX_ROWS);
+
+    const productIds = Array.from(new Set(rows.map((row) => row.productId).filter(Boolean)));
+    if (productIds.length > 0) {
+        const products = await readInBatches(credentials, uid, "product.product", productIds, ["tire_brand"]).catch(() => [] as Array<Record<string, unknown>>);
+        const brandById = new Map(products.map((product) => [Number(product.id), getRelationalName(product.tire_brand)]));
+        for (const row of rows) row.brand = brandById.get(row.productId) ?? "";
+    }
+
+    return {
+        minAgeDays: minAge,
+        totalUnits,
+        agedUnits,
+        unknownAgeUnits,
+        buckets: buckets.map(({ label, fromDays, units }) => ({ label, fromDays, units })),
+        warehouses: Array.from(warehouses, ([name, value]) => ({ name, ...value })).sort((a, b) => b.agedUnits - a.agedUnits),
+        rows,
+        truncated: all.length > rows.length,
+    };
+}
