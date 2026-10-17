@@ -919,3 +919,13 @@ export function getCustomerActivityReport(input: { customerId: number; startDate
 export function getPartnerLedger(input: { customerId: number; asOfDate: string; unreconciledOnly?: boolean }) {
     return post<OdooPartnerLedger>("/api/odoo/partner-ledger", input);
 }
+
+/** Recalculates one card from Odoo and saves it. Only used by the dashboard's Refresh button. */
+export function refreshDashboardCard(card: string) {
+    return post<{ data: unknown; fetchedAt: string }>("/api/odoo/dashboard-card", { card, refresh: true });
+}
+
+/** The figures saved by the last refresh — never queries Odoo. */
+export function getSavedDashboard() {
+    return post<{ cards: Record<string, { data: unknown; fetchedAt: string }> }>("/api/odoo/dashboard-card", { cachedOnly: true });
+}

@@ -11499,3 +11499,246 @@ export async function getPartnerLedger(
         },
     };
 }
+
+// ---------------------------------------------------------------------------
+// Dashboard cards: a handful of aggregate (read_group) queries each, no row dumps.
+// ---------------------------------------------------------------------------
+
+export type DashboardScope = {
+    salespersonIds: number[] | null;
+    tags: CustomerTagFilter;
+    /** Saved carrier tracking per B/L (read from our own database by the API route). */
+    trackedByBl?: Record<string, DashboardTracking>;
+};
+
+/** The parts of a saved tracking result the dashboard needs. */
+export type DashboardTracking = {
+    status?: string;
+    origin?: { departure?: string } | null;
+    destination?: { arrival?: string } | null;
+    containers?: Array<{ events?: Array<{ isActual?: boolean; description?: string }> }>;
+};
+
+/** Same stage rules as the PO Tracking page. */
+function dashboardStage(tracking: DashboardTracking | undefined): "waiting" | "departed" | "arrived" | "delivered" {
+    if (!tracking) return "waiting";
+    const actual = (tracking.containers ?? []).flatMap((container) => container.events ?? []).filter((event) => event.isActual);
+    const has = (pattern: RegExp) => actual.some((event) => pattern.test(event.description ?? ""));
+    if (String(tracking.status ?? "").toUpperCase().includes("DELIVER") || has(/Empty Container Returned|Delivery to Consignee/i)) return "delivered";
+    if (has(/Arrival at Port of Discharg|Unloaded.*Discharg/i)) return "arrived";
+    const departure = tracking.origin?.departure ? new Date(tracking.origin.departure) : null;
+    if (has(/Departure from Port of Loading|Loaded on/i) || (departure && !Number.isNaN(departure.getTime()) && departure.getTime() <= Date.now())) return "departed";
+    return "waiting";
+}
+
+function addDays(date: string, days: number) {
+    const value = new Date(`${date}T00:00:00`);
+    value.setDate(value.getDate() + days);
+    return formatLocalDate(value);
+}
+
+function partnerTagDomain(field: string, tags: CustomerTagFilter): unknown[] {
+    if (tags && "all" in tags) return [];
+    if (tags && tags.ids.length > 0) return [[`${field}.category_id`, "in", tags.ids]];
+    return [[`${field}.category_id.name`, "=", DEFAULT_CUSTOMER_TAG]];
+}
+
+export async function computeDashboardCard(credentials: OdooCredentials, card: string, scope: DashboardScope): Promise<unknown> {
+    const uid = await authenticate(credentials);
+    const today = formatLocalDate(new Date());
+    const monthStart = `${today.slice(0, 8)}01`;
+    const prevEnd = addDays(monthStart, -1);
+    const prevStart = `${prevEnd.slice(0, 8)}01`;
+
+    const group = (model: string, domain: unknown[], fields: string[], groupby: string[], extra: Record<string, unknown> = {}) =>
+        executeKw<Array<Record<string, unknown>>>(credentials, uid, model, "read_group", [domain, fields, groupby], { lazy: false, ...extra });
+
+    const salesDomain = (from: string, to: string, types: string[] = ["out_invoice", "out_refund"]): unknown[] => [
+        ["move_type", "in", types],
+        ["state", "=", "posted"],
+        ["invoice_date", ">=", from],
+        ["invoice_date", "<=", to],
+        ...(scope.salespersonIds ? [["invoice_user_id", "in", scope.salespersonIds]] : []),
+        ...partnerTagDomain("partner_id", scope.tags),
+    ];
+    const sum = (rows: Array<Record<string, unknown>>, field: string) => rows.reduce((total, row) => total + Number(row[field] ?? 0), 0);
+    const count = (rows: Array<Record<string, unknown>>) => rows.reduce((total, row) => total + Number(row.__count ?? 0), 0);
+
+    switch (card) {
+        case "today": {
+            // Counts for today and yesterday (UTC days), limited to the user's own scope.
+            const dayStart = new Date();
+            dayStart.setUTCHours(0, 0, 0, 0);
+            const orderScope: unknown[] = [
+                ...(scope.salespersonIds ? [["user_id", "in", scope.salespersonIds]] : []),
+                ...partnerTagDomain("partner_id", scope.tags),
+            ];
+            const invoiceScope: unknown[] = [
+                ...(scope.salespersonIds ? [["invoice_user_id", "in", scope.salespersonIds]] : []),
+                ...partnerTagDomain("partner_id", scope.tags),
+            ];
+            const counts = async (offset: number) => {
+                const start = new Date(dayStart);
+                start.setUTCDate(start.getUTCDate() + offset);
+                const end = new Date(start);
+                end.setUTCDate(end.getUTCDate() + 1);
+                const from = formatOdooDateTime(start);
+                const to = formatOdooDateTime(end);
+                const [pending, confirmed, invoices] = await Promise.all([
+                    executeKw<number>(credentials, uid, "sale.order", "search_count", [[["state", "in", ["draft", "sent"]], ["date_order", ">=", from], ["date_order", "<", to], ...orderScope]]),
+                    executeKw<number>(credentials, uid, "sale.order", "search_count", [[["state", "in", ["sale", "done"]], ["date_order", ">=", from], ["date_order", "<", to], ...orderScope]]),
+                    executeKw<number>(credentials, uid, "account.move", "search_count", [[["move_type", "=", "out_invoice"], ["state", "=", "posted"], ["invoice_date", "=", start.toISOString().slice(0, 10)], ...invoiceScope]]),
+                ]);
+                return { pending, confirmed, invoices };
+            };
+            const [now, before] = await Promise.all([counts(0), counts(-1)]);
+            return { ...now, prev: before };
+        }
+
+        case "sales": {
+            const byDay = async (from: string, to: string) => {
+                const rows = await group("account.move", salesDomain(from, to), ["amount_untaxed_signed"], ["invoice_date:day"]);
+                const days: number[] = Array.from({ length: Number(to.slice(8, 10)) }, () => 0);
+                for (const row of rows) {
+                    // __domain repeats the query's own ">= start" term too, so the day is the latest ">=" bound.
+                    const starts = (Array.isArray(row.__domain) ? (row.__domain as unknown[][]) : [])
+                        .filter((term) => Array.isArray(term) && term[0] === "invoice_date" && term[1] === ">=")
+                        .map((term) => String(term[2]).slice(0, 10))
+                        .sort();
+                    const day = starts.length ? Number(starts[starts.length - 1].slice(8, 10)) : 0;
+                    if (day >= 1 && day <= days.length) days[day - 1] += Number(row.amount_untaxed_signed ?? 0);
+                }
+                return days;
+            };
+            const [thisMonth, lastMonth, count_] = await Promise.all([
+                byDay(monthStart, today),
+                byDay(prevStart, prevEnd),
+                group("account.move", salesDomain(monthStart, today), ["amount_untaxed_signed"], []),
+            ]);
+            const mtd = thisMonth.reduce((total, value) => total + value, 0);
+            const dayNow = thisMonth.length;
+            return {
+                mtd,
+                prevSamePeriod: lastMonth.slice(0, dayNow).reduce((total, value) => total + value, 0),
+                prevMonthTotal: lastMonth.reduce((total, value) => total + value, 0),
+                invoices: count(count_),
+                month: monthStart.slice(0, 7),
+                daysInMonth: new Date(Number(today.slice(0, 4)), Number(today.slice(5, 7)), 0).getDate(),
+                thisMonth,
+                lastMonth,
+            };
+        }
+
+        case "receivables": {
+            const base: unknown[] = [
+                ["move_type", "=", "out_invoice"],
+                ["state", "=", "posted"],
+                ["payment_state", "in", ["not_paid", "partial"]],
+                ...(scope.salespersonIds ? [["invoice_user_id", "in", scope.salespersonIds]] : []),
+                ...partnerTagDomain("partner_id", scope.tags),
+            ];
+            const [open, overdue] = await Promise.all([
+                group("account.move", base, ["amount_residual_signed"], []),
+                group("account.move", [...base, ["invoice_date_due", "<", today]], ["amount_residual_signed"], []),
+            ]);
+            return { overdue: sum(overdue, "amount_residual_signed"), overdueInvoices: count(overdue), open: sum(open, "amount_residual_signed") };
+        }
+
+        case "pending": {
+            const rows = await group(
+                "sale.order",
+                [
+                    ["state", "in", ["draft", "sent"]],
+                    ...(scope.salespersonIds ? [["user_id", "in", scope.salespersonIds]] : []),
+                    ...partnerTagDomain("partner_id", scope.tags),
+                ],
+                ["amount_total"],
+                []
+            );
+            return { count: count(rows), total: sum(rows, "amount_total") };
+        }
+
+        case "shipments": {
+            // Same logic as the PO Tracking page: one shipment per B/L, the carrier's ETA when it is
+            // tracked (the PO's expected date otherwise), and Odoo's receipt status for arrived goods.
+            const { orders } = await getImportedPurchaseOrdersForTracking(credentials, {});
+            const shipments = new Map<string, { orders: PoTrackingOrder[] }>();
+            for (const order of orders) {
+                for (const blNumber of new Set(order.containers.map((container) => container.blNumber))) {
+                    const entry = shipments.get(blNumber) ?? { orders: [] };
+                    if (!entry.orders.some((existing) => existing.id === order.id)) entry.orders.push(order);
+                    shipments.set(blNumber, entry);
+                }
+            }
+            const result = { onTheWay: 0, late: 0, dueWeek: 0, atPort: 0, untracked: 0, unitsWeek: 0 };
+            const nowMs = Date.now();
+            for (const [blNumber, shipment] of shipments) {
+                if (shipment.orders.every((order) => order.fullyReceived || order.receiptDone)) continue;
+                const tracking = scope.trackedByBl?.[blNumber];
+                if (!tracking) {
+                    result.untracked += 1;
+                    continue;
+                }
+                const stage = dashboardStage(tracking);
+                if (stage === "arrived" || stage === "delivered") {
+                    result.atPort += 1;
+                    continue;
+                }
+                result.onTheWay += 1;
+                const etaSource = tracking.destination?.arrival || shipment.orders[0]?.expectedArrival;
+                const eta = etaSource ? new Date(etaSource) : null;
+                if (!eta || Number.isNaN(eta.getTime())) continue;
+                const days = Math.ceil((eta.getTime() - nowMs) / 86_400_000);
+                if (days < 0) result.late += 1;
+                else if (days <= 7) {
+                    result.dueWeek += 1;
+                    result.unitsWeek += shipment.orders.reduce((total, order) => total + order.totalQty / Math.max(1, new Set(order.containers.map((c) => c.blNumber)).size), 0);
+                }
+            }
+            return { ...result, unitsWeek: Math.round(result.unitsWeek) };
+        }
+
+        case "topProducts":
+        case "topBrands": {
+            const rows = await group(
+                "account.move.line",
+                [
+                    ["move_id.move_type", "=", "out_invoice"],
+                    ["parent_state", "=", "posted"],
+                    ["product_id", "!=", false],
+                    ["date", ">=", monthStart],
+                    ["date", "<=", today],
+                    ...(scope.salespersonIds ? [["move_id.invoice_user_id", "in", scope.salespersonIds]] : []),
+                    ...partnerTagDomain("partner_id", scope.tags),
+                ],
+                ["quantity", "balance"],
+                ["product_id"],
+                { orderby: "quantity desc", limit: card === "topProducts" ? 5 : 300 }
+            );
+            const sold = rows.map((row) => ({
+                id: getRelationalId(row.product_id) ?? 0,
+                name: getRelationalName(row.product_id) || "—",
+                quantity: Number(row.quantity ?? 0),
+                amount: -Number(row.balance ?? 0),
+            }));
+            if (card === "topProducts") {
+                return { rows: sold.map(({ name, quantity, amount }) => ({ name, quantity, amount })) };
+            }
+            const products = sold.length ? await readInBatches(credentials, uid, "product.product", sold.map((item) => item.id), ["tire_brand"]).catch(() => []) : [];
+            const brandById = new Map(products.map((product) => [Number(product.id), getRelationalName(product.tire_brand)]));
+            const totals = new Map<string, { quantity: number; amount: number }>();
+            for (const item of sold) {
+                const brand = brandById.get(item.id);
+                if (!brand) continue;
+                const entry = totals.get(brand) ?? { quantity: 0, amount: 0 };
+                entry.quantity += item.quantity;
+                entry.amount += item.amount;
+                totals.set(brand, entry);
+            }
+            return { rows: Array.from(totals, ([name, value]) => ({ name, ...value })).sort((a, b) => b.quantity - a.quantity).slice(0, 5) };
+        }
+
+        default:
+            throw new Error("Unknown dashboard card.");
+    }
+}
