@@ -9,7 +9,7 @@ export type AppUserRole = "admin" | "purchase" | "salesperson" | "sales_manager"
 export const APP_DEFINITIONS: Array<{ href: string; label: string }> = [
     { href: "/dashboard", label: "Dashboard" },
     { href: "/orders/pending", label: "Pending Orders" },
-    { href: "/product-scanner", label: "Product Scanner" },
+    { href: "/product-scanner", label: "Aged Stock" },
     { href: "/product-requests", label: "Sales Orders" },
     { href: "/msrp-finder", label: "MSRP Finder" },
     { href: "/purchase-order", label: "Purchase Order" },

@@ -157,7 +157,7 @@ export default function ProductScannerPage() {
             {/* Header */}
             <div className="flex flex-wrap items-end justify-between gap-4 animate-[dash-rise_0.5s_ease-out_both]">
                 <div>
-                    <h1 className="font-display text-3xl">Product Scanner</h1>
+                    <h1 className="font-display text-3xl">Aged Stock</h1>
                     <p className="mt-1 max-w-xl text-sm text-(--ink-soft)">
                         Stock that has been sitting in your warehouses the longest, counted from the date it arrived.
                     </p>
