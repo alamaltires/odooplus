@@ -935,6 +935,7 @@ export type AgedStockRow = {
     productName: string;
     brand: string;
     lotName: string;
+    unitCost: number | null;
     warehouse: string;
     locations: string[];
     quantity: number;

@@ -287,7 +287,7 @@ export default function SettingsPage() {
         );
     }
 
-    async function savePermissions(enabledApps: string[] | null) {
+    async function savePermissions(enabledApps: string[] | null | undefined) {
         if (!permissionsUser) return;
 
         setPermissionsSaving(true);
@@ -563,8 +563,7 @@ export default function SettingsPage() {
                                                 <button
                                                     type="button"
                                                     onClick={() => openPermissions(item)}
-                                                    disabled={item.role === "admin"}
-                                                    title={item.role === "admin" ? "Admins always have full access" : "Manage app permissions"}
+                                                    title={item.role === "admin" ? "Customer tags (admins always have access to every app)" : "Manage app permissions"}
                                                     className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-(--line) bg-white text-(--brand) hover:bg-(--chip) disabled:cursor-not-allowed disabled:opacity-40"
                                                 >
                                                     <Shield className="h-4 w-4" aria-hidden="true" />
@@ -632,7 +631,7 @@ export default function SettingsPage() {
                     salesTeamsError={salesTeamsError}
                     saving={permissionsSaving}
                     error={permissionsError}
-                    onSave={() => void savePermissions(permissionsSelection)}
+                    onSave={() => void savePermissions(permissionsUser.role === "admin" ? undefined : permissionsSelection)}
                     onReset={() => void savePermissions(null)}
                     onClose={() => setPermissionsUser(null)}
                 />
@@ -756,13 +755,20 @@ function PermissionsModal({
     onReset: () => void;
     onClose: () => void;
 }) {
+    const isAdmin = target.role === "admin";
     const isOverride = target.enabledApps !== null;
 
     return (
         <ModalShell title="App Permissions" subtitle={target.email} onClose={onClose}>
             <p className="text-sm text-(--ink-soft)">
-                Choose which apps {target.email} can access. This overrides the default apps for the{" "}
-                <span className="font-medium">{ROLE_LABELS[target.role] ?? target.role}</span> role.
+                {isAdmin ? (
+                    <>Admins always have access to every app. You can still limit which customers {target.email} sees below.</>
+                ) : (
+                    <>
+                        Choose which apps {target.email} can access. This overrides the default apps for the{" "}
+                        <span className="font-medium">{ROLE_LABELS[target.role] ?? target.role}</span> role.
+                    </>
+                )}
             </p>
 
             <div className="mt-4 space-y-1.5">
@@ -773,7 +779,8 @@ function PermissionsModal({
                     >
                         <input
                             type="checkbox"
-                            checked={selection.includes(app.href)}
+                            checked={isAdmin || selection.includes(app.href)}
+                            disabled={isAdmin}
                             onChange={() => onToggle(app.href)}
                             className="h-4 w-4 rounded border-(--line)"
                         />
@@ -826,7 +833,7 @@ function PermissionsModal({
                 <button
                     type="button"
                     onClick={onReset}
-                    disabled={saving || !isOverride}
+                    disabled={saving || !isOverride || isAdmin}
                     title={isOverride ? "Revert to the role's default apps" : "Already using role defaults"}
                     className="rounded-xl border border-(--line) bg-white px-4 py-2 text-sm font-medium text-(--ink) disabled:cursor-not-allowed disabled:opacity-50"
                 >

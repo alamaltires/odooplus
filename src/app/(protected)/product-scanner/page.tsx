@@ -135,6 +135,7 @@ export default function ProductScannerPage() {
                     Product: row.productName,
                     Brand: row.brand,
                     Lot: row.lotName,
+                    "Lot Cost": row.unitCost ?? "",
                     Warehouse: row.warehouse,
                     Locations: row.locations.join(", "),
                     Quantity: row.quantity,
@@ -354,11 +355,12 @@ export default function ProductScannerPage() {
                             </p>
                         ) : (
                             <div className="mt-3 overflow-x-auto">
-                                <table className="w-full min-w-170 border-collapse text-left text-sm">
+                                <table className="w-full min-w-190 border-collapse text-left text-sm">
                                     <thead className="text-xs uppercase tracking-wide text-(--ink-soft)">
                                         <tr className="border-b border-(--line)">
                                             <th className="py-2 pr-3 font-medium">Product</th>
                                             <th className="px-3 py-2 font-medium">Lot</th>
+                                            <th className="px-3 py-2 text-right font-medium">Lot cost</th>
                                             <th className="px-3 py-2 font-medium">Warehouse</th>
                                             <th className="px-3 py-2 text-right font-medium">Qty</th>
                                             <th className="py-2 pl-3 font-medium">Age</th>
@@ -372,6 +374,9 @@ export default function ProductScannerPage() {
                                                     {row.brand ? <p className="text-xs text-(--ink-soft)">{row.brand}</p> : null}
                                                 </td>
                                                 <td className="px-3 py-3 text-(--ink-soft)">{row.lotName || "-"}</td>
+                                                <td className="px-3 py-3 text-right tabular-nums">
+                                                    {row.unitCost ? row.unitCost.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "-"}
+                                                </td>
                                                 <td className="px-3 py-3">
                                                     <p>{row.warehouse}</p>
                                                     <p className="max-w-48 truncate text-xs text-(--ink-soft)" title={row.locations.join(", ")}>
