@@ -8,6 +8,7 @@ import { getCustomerReport } from "@/lib/client-odoo";
 import { useAuth } from "@/lib/auth-context";
 import { OdooCustomerReport } from "@/types/odoo";
 import { BrandSalesTree } from "@/components/brand-sales-tree";
+import { getDisplayCurrency } from "@/lib/display-currency";
 
 function formatNumber(value: number) {
     return value.toLocaleString(undefined, {
@@ -17,7 +18,7 @@ function formatNumber(value: number) {
 }
 
 function formatCurrency(value: number) {
-    return `AED ${formatNumber(value)}`;
+    return `${getDisplayCurrency()} ${formatNumber(value)}`;
 }
 
 function formatDateTime(value: string) {

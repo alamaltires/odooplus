@@ -6,6 +6,7 @@ import { Mail, MessageCircle, ShoppingCart } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { getOrderDetails } from "@/lib/client-odoo";
 import { BackorderDetails } from "@/types/odoo";
+import { getDisplayCurrency } from "@/lib/display-currency";
 
 export default function SingleOrderPage() {
     const params = useParams<{ id: string }>();
@@ -327,7 +328,7 @@ export default function SingleOrderPage() {
                                         <td className="px-4 py-3">{line.ordered_qty}</td>
                                         <td className="px-4 py-3">{line.available_qty}</td>
                                         <td className="px-4 py-3">{line.shortage_qty}</td>
-                                        <td className="px-4 py-3">{Number(line.price_unit).toFixed(2)} AED</td>
+                                        <td className="px-4 py-3">{Number(line.price_unit).toFixed(2)} {getDisplayCurrency()}</td>
                                     </tr>
                                 ))}
                             </tbody>

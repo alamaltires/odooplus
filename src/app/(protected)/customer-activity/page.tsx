@@ -7,6 +7,7 @@ import { getCustomerActivityReport, getCustomers } from "@/lib/client-odoo";
 import { Select2 } from "@/components/select2";
 import { BrandSalesTree } from "@/components/brand-sales-tree";
 import type { OdooCustomerActivityOrder, OdooCustomerActivityReport, OdooCustomerOption } from "@/types/odoo";
+import { getDisplayCurrency } from "@/lib/display-currency";
 
 function todayISO() {
     return new Date().toISOString().slice(0, 10);
@@ -23,7 +24,7 @@ function formatNumber(value: number) {
 }
 
 function formatCurrency(value: number) {
-    return `AED ${formatNumber(value)}`;
+    return `${getDisplayCurrency()} ${formatNumber(value)}`;
 }
 
 function formatDate(value: string) {
@@ -110,10 +111,10 @@ export default function CustomerActivityPage() {
                 { Metric: "Sales in period", Value: report.totals.totalSales },
                 { Metric: "Target achieved %", Value: report.totals.targetPercent ?? "" },
                 { Metric: "Orders", Value: report.totals.orderCount },
-                { Metric: "Net sales ex VAT (AED)", Value: report.totals.netSales },
-                { Metric: "Delivered revenue ex VAT (AED)", Value: report.totals.deliveredRevenue },
-                { Metric: "Cost of goods (AED)", Value: report.totals.costOfGoods },
-                { Metric: "Gross profit (AED)", Value: report.totals.grossProfit },
+                { Metric: `Net sales ex VAT (${getDisplayCurrency()})`, Value: report.totals.netSales },
+                { Metric: `Delivered revenue ex VAT (${getDisplayCurrency()})`, Value: report.totals.deliveredRevenue },
+                { Metric: `Cost of goods (${getDisplayCurrency()})`, Value: report.totals.costOfGoods },
+                { Metric: `Gross profit (${getDisplayCurrency()})`, Value: report.totals.grossProfit },
                 { Metric: "GP %", Value: report.totals.gpPercent ?? "" },
                 { Metric: "Open quotations", Value: report.totals.openQuotationCount },
             ]),
@@ -309,7 +310,7 @@ export default function CustomerActivityPage() {
                     </div>
 
                     <p className="-mt-2 text-xs text-(--ink-soft)">
-                        GP = delivered revenue (excluding VAT, in AED) minus the cost Odoo booked on those deliveries. Of {formatCurrency(report.totals.netSales)} ordered
+                        GP = delivered revenue (excluding VAT, in {getDisplayCurrency()}) minus the cost Odoo booked on those deliveries. Of {formatCurrency(report.totals.netSales)} ordered
                         (ex VAT), {formatCurrency(report.totals.deliveredRevenue)} has been delivered so far.
                         {report.totals.linesWithoutCost > 0
                             ? ` ${report.totals.linesWithoutCost} delivered line${report.totals.linesWithoutCost === 1 ? " has" : "s have"} no cost recorded in Odoo, so GP is overstated by their cost.`

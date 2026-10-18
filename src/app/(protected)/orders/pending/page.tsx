@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useAuth } from "@/lib/auth-context";
 import { searchSalesOrder, sendPendingOrderEmail } from "@/lib/client-odoo";
 import { BackorderStatus, SavedBackorder, SalesOrderMatch } from "@/types/odoo";
+import { getDisplayCurrency } from "@/lib/display-currency";
 
 function formatDate(value: string | undefined) {
     if (!value) {
@@ -23,7 +24,7 @@ function formatDateTime(value: string | undefined) {
 }
 
 function formatCurrency(value: number) {
-    return `AED ${value.toLocaleString(undefined, {
+    return `${getDisplayCurrency()} ${value.toLocaleString(undefined, {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
     })}`;

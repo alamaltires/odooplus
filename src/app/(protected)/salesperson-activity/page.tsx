@@ -16,6 +16,7 @@ import {
     OdooSalespersonActivityReport,
     OdooServicedCustomer,
 } from "@/types/odoo";
+import { getDisplayCurrency } from "@/lib/display-currency";
 
 function todayISO() {
     return new Date().toISOString().slice(0, 10);
@@ -43,7 +44,7 @@ function formatNumber(value: number) {
 }
 
 function formatCurrency(value: number) {
-    return `AED ${formatNumber(value)}`;
+    return `${getDisplayCurrency()} ${formatNumber(value)}`;
 }
 
 function monthlyTargetPercent(row: OdooServicedCustomer) {

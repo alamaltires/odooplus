@@ -13,9 +13,9 @@ import { visibleDashboardCards } from "@/lib/dashboard-cards";
 
 export const maxDuration = 60;
 
-const cacheKey = (userId: string, companyIds: number[]) => `v8_${userId}_${[...companyIds].sort((a, b) => a - b).join("-") || "all"}`;
+const cacheKey = (userId: string, companyIds: number[]) => `v9_${userId}_${[...companyIds].sort((a, b) => a - b).join("-") || "all"}`;
 
-// Bump the `v8_` prefix below whenever a card's data shape changes, so old saved figures are ignored.
+// Bump the `v9_` prefix below whenever a card's data shape changes, so old saved figures are ignored.
 
 /**
  * Dashboard figures. Saved per user (and company selection, since the numbers depend on the

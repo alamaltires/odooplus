@@ -6,6 +6,7 @@ import { Search } from "lucide-react";
 import { getCustomers, getProducts, getSalespeople } from "@/lib/client-odoo";
 import { useAuth } from "@/lib/auth-context";
 import { BackorderDetails, OdooCustomerOption, OdooProductOption, OdooSalesperson } from "@/types/odoo";
+import { getDisplayCurrency } from "@/lib/display-currency";
 
 type ManualLine = {
     id: string;
@@ -602,7 +603,7 @@ export default function ManualBackorderPage() {
                                         />
                                     </label>
                                     <label className="block text-sm">
-                                        <span className="mb-2 block font-medium">Price (AED)</span>
+                                        <span className="mb-2 block font-medium">Price ({getDisplayCurrency()})</span>
                                         <input
                                             type="number"
                                             min="0"

@@ -1246,6 +1246,89 @@ function buildCurrencyMultipliers(
     return multiplierByCurrencyId;
 }
 
+/**
+ * Turns amounts that Odoo stores in different currencies into ONE currency, using the rates configured under
+ * Accounting > Currencies (home company's table). The target is the company's own currency when exactly one
+ * company is selected, otherwise AED. Without this, adding up records from several companies would add USD and
+ * AED numbers together as if they were the same unit.
+ */
+export type MoneyConverter = {
+    targetCurrencyId: number | null;
+    targetCurrencyCode: string;
+    /** Amount stored in `currencyId` (an order's/invoice's own currency) -> target currency. */
+    convert: (amount: number, currencyId: number | null | undefined) => number;
+    /** Amount stored in a company's own currency (Odoo's `*_signed` fields) -> target currency. */
+    convertFromCompany: (amount: number, companyId: number | null | undefined) => number;
+    /** Currencies that had no rate configured and were therefore left unconverted. */
+    unconverted: Set<string>;
+};
+
+async function getMoneyConverter(credentials: OdooCredentials, uid: number): Promise<MoneyConverter> {
+    const selectedCompanyIds = companyContextStorage.getStore() ?? [];
+
+    const [companies, homeCompanyId, aedRows] = await Promise.all([
+        runWithoutCompanyRestriction(() =>
+            executeKw<Array<{ id: number; currency_id?: unknown }>>(credentials, uid, "res.company", "search_read", [[]], {
+                fields: ["id", "currency_id"],
+                limit: 500,
+            })
+        ),
+        getHomeCompanyId(credentials, uid),
+        runWithoutCompanyRestriction(() =>
+            executeKw<Array<{ id: number }>>(credentials, uid, "res.currency", "search_read", [[["name", "=", TARGET_CURRENCY_CODE]]], {
+                fields: ["id"],
+                limit: 1,
+                context: { active_test: false },
+            })
+        ),
+    ]);
+
+    const currencyOfCompany = new Map<number, number>();
+    for (const company of companies) {
+        const currencyId = getRelationalId(company.currency_id);
+        if (currencyId) currencyOfCompany.set(Number(company.id), currencyId);
+    }
+    const homeCurrencyId = homeCompanyId ? currencyOfCompany.get(homeCompanyId) ?? null : null;
+    const aedId = Number(aedRows[0]?.id ?? 0) || null;
+    const targetCurrencyId =
+        selectedCompanyIds.length === 1 ? currencyOfCompany.get(selectedCompanyIds[0]) ?? aedId : aedId ?? homeCurrencyId;
+
+    const currencyIds = Array.from(new Set([...currencyOfCompany.values(), ...(targetCurrencyId ? [targetCurrencyId] : [])]));
+    const rates =
+        homeCompanyId && currencyIds.length > 0
+            ? await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, currencyIds, new Date().toISOString().slice(0, 10))
+            : new Map<number, number>();
+    if (homeCurrencyId && !rates.has(homeCurrencyId)) rates.set(homeCurrencyId, 1);
+
+    const codes = new Map<number, string>();
+    const names = currencyIds.length > 0
+        ? await runWithoutCompanyRestriction(() =>
+              executeKw<Array<{ id: number; name: string }>>(credentials, uid, "res.currency", "read", [currencyIds], { fields: ["name"], context: { active_test: false } })
+          ).catch(() => [] as Array<{ id: number; name: string }>)
+        : [];
+    for (const row of names) codes.set(Number(row.id), row.name);
+
+    const unconverted = new Set<string>();
+    const convert = (amount: number, currencyId: number | null | undefined) => {
+        if (!currencyId || !targetCurrencyId || currencyId === targetCurrencyId) return amount;
+        const from = rates.get(currencyId);
+        const to = rates.get(targetCurrencyId);
+        if (!from || !to) {
+            unconverted.add(codes.get(currencyId) ?? String(currencyId));
+            return amount;
+        }
+        return (amount / from) * to;
+    };
+
+    return {
+        targetCurrencyId,
+        targetCurrencyCode: (targetCurrencyId && codes.get(targetCurrencyId)) || TARGET_CURRENCY_CODE,
+        convert,
+        convertFromCompany: (amount, companyId) => convert(amount, companyId ? currencyOfCompany.get(companyId) : null),
+        unconverted,
+    };
+}
+
 async function getInvoiceSalespersonField(
     credentials: OdooCredentials,
     uid: number
@@ -3160,7 +3243,7 @@ export async function getSalespersonActivityReport(
                 ["date_order", "<=", toOdooDateBoundary(endDate, true, timeZone)],
             ]],
             {
-                fields: ["id", "name", "partner_id", "amount_total", "date_order"],
+                fields: ["id", "name", "partner_id", "amount_total", "currency_id", "date_order"],
                 order: "date_order desc",
                 limit: 20000,
             }
@@ -3236,6 +3319,7 @@ export async function getSalespersonActivityReport(
         monthlyTargetField ? [monthlyTargetField] : []
     );
 
+    const money = await getMoneyConverter(credentials, uid);
     const servicedByCustomerId = new Map<number, ServicedCustomerRow>();
     for (const order of servicedOrders) {
         const partnerId = getRelationalId(order.partner_id);
@@ -3251,7 +3335,7 @@ export async function getSalespersonActivityReport(
         const summary = toCustomerSummary(customer, salesperson.name);
         const key = summary.customerId;
         const existing = servicedByCustomerId.get(key);
-        const orderAmount = Number(order.amount_total ?? 0);
+        const orderAmount = money.convert(Number(order.amount_total ?? 0), getRelationalId(order.currency_id));
         const lastSaleDate = normalizeOdooDate(order.date_order);
         const customerMonthlyTarget = monthlyTargetField ? Number(customer[monthlyTargetField] ?? 0) : 0;
 
@@ -3398,7 +3482,7 @@ export async function getCustomerReport(
                 ["state", "in", ["sale", "done"]],
             ]],
             {
-                fields: ["id", "amount_total"],
+                fields: ["id", "amount_total", "currency_id"],
                 order: "date_order desc",
                 limit: 20000,
             }
@@ -3431,9 +3515,10 @@ export async function getCustomerReport(
         getPreferredBrandField(credentials, uid),
     ]);
 
+    const money = await getMoneyConverter(credentials, uid);
     const totalSales = Number(
         confirmedOrders
-            .reduce((sum, order) => sum + Number(order.amount_total ?? 0), 0)
+            .reduce((sum, order) => sum + money.convert(Number(order.amount_total ?? 0), getRelationalId(order.currency_id)), 0)
             .toFixed(2)
     );
 
@@ -3449,7 +3534,7 @@ export async function getCustomerReport(
             ["product_id", "!=", false],
         ]],
         {
-            fields: ["product_id", "product_uom_qty", "price_subtotal"],
+            fields: ["product_id", "product_uom_qty", "price_subtotal", "currency_id"],
             limit: 50000,
         }
     );
@@ -3557,7 +3642,7 @@ export async function getCustomerReport(
         const templateId = productToTemplateId.get(productId);
         const template = typeof templateId === "number" ? templateById.get(templateId) : undefined;
         const quantity = Number(line.product_uom_qty ?? 0);
-        const sales = Number(line.price_subtotal ?? 0);
+        const sales = money.convert(Number(line.price_subtotal ?? 0), getRelationalId(line.currency_id));
 
         const brandValue = template?.[brandField.fieldName];
         const brandName = getRelationalName(brandValue) || toDisplayString(brandValue) || `Unknown ${brandField.label}`;
@@ -10098,7 +10183,7 @@ export async function getMarginAnalyticsBreakdown(
  */
 export async function getCompanies(
     credentials: OdooCredentials
-): Promise<{ companies: Array<{ id: number; name: string }>; defaultCompanyId: number | null }> {
+): Promise<{ companies: Array<{ id: number; name: string; currency: string }>; defaultCompanyId: number | null }> {
     const uid = await authenticate(credentials);
 
     let allowedIds: number[] | null = null;
@@ -10120,16 +10205,16 @@ export async function getCompanies(
         // Fall back to whatever res.company exposes to this login.
     }
 
-    const companies = await executeKw<Array<{ id: number; name: string }>>(
+    const companies = await executeKw<Array<{ id: number; name: string; currency_id?: unknown }>>(
         credentials,
         uid,
         "res.company",
         "search_read",
         [allowedIds ? [["id", "in", allowedIds]] : []],
-        { fields: ["id", "name"], order: "id asc", limit: 200 }
+        { fields: ["id", "name", "currency_id"], order: "id asc", limit: 200 }
     );
 
-    const list = companies.map((company) => ({ id: company.id, name: company.name }));
+    const list = companies.map((company) => ({ id: company.id, name: company.name, currency: getRelationalName(company.currency_id) }));
     return {
         companies: list,
         defaultCompanyId: defaultCompanyId && list.some((company) => company.id === defaultCompanyId) ? defaultCompanyId : null,
@@ -10220,18 +10305,24 @@ export async function getUnifiedLots(
 export async function getPendingOrders(credentials: OdooCredentials) {
     const uid = await authenticate(credentials);
 
-    return executeKw<Array<Record<string, unknown>>>(
+    const orders = await executeKw<Array<Record<string, unknown>>>(
         credentials,
         uid,
         "sale.order",
         "search_read",
         [["&", ["state", "in", ["draft", "sent"]], ["invoice_status", "!=", "invoiced"]]],
         {
-            fields: ["id", "name", "partner_id", "amount_total", "state", "date_order"],
+            fields: ["id", "name", "partner_id", "amount_total", "currency_id", "state", "date_order"],
             order: "date_order desc",
             limit: 100,
         }
     );
+
+    const money = await getMoneyConverter(credentials, uid);
+    return orders.map((order) => ({
+        ...order,
+        amount_total: money.convert(Number(order.amount_total ?? 0), getRelationalId(order.currency_id)),
+    }));
 }
 
 export async function findSalesOrderByNumber(
@@ -11212,7 +11303,7 @@ export async function getCustomerActivityReport(
                 ["date_order", ">=", rangeStart],
                 ["date_order", "<=", rangeEnd],
             ],
-            ["id", "name", "amount_total", "date_order", "user_id", "state"]
+            ["id", "name", "amount_total", "currency_id", "date_order", "user_id", "state"]
         ),
         searchReadAll(
             credentials,
@@ -11222,16 +11313,17 @@ export async function getCustomerActivityReport(
                 ["partner_id", "child_of", commercialPartnerId],
                 ["state", "in", ["draft", "sent"]],
             ],
-            ["id", "name", "amount_total", "date_order", "user_id", "state"]
+            ["id", "name", "amount_total", "currency_id", "date_order", "user_id", "state"]
         ),
         getCustomerReport(credentials, customerId),
     ]);
 
+    const money = await getMoneyConverter(credentials, uid);
     const toOrder = (order: Record<string, unknown>) => ({
         id: Number(order.id ?? 0),
         name: toDisplayString(order.name),
         date: normalizeOdooDate(order.date_order),
-        amount: Number(Number(order.amount_total ?? 0).toFixed(2)),
+        amount: Number(money.convert(Number(order.amount_total ?? 0), getRelationalId(order.currency_id)).toFixed(2)),
         state: toDisplayString(order.state),
         salespersonName: getRelationalName(order.user_id) || "-",
         deliveredRevenue: 0,
@@ -11266,23 +11358,7 @@ export async function getCustomerActivityReport(
     const layerMoves = layerMoveIds.length > 0 ? await readInBatches(credentials, uid, "stock.move", layerMoveIds, ["id", "sale_line_id"]) : [];
     const saleLineIdByMoveId = new Map(layerMoves.map((move) => [Number(move.id), getRelationalId(move.sale_line_id)]));
 
-    const gpCurrencyIds = new Set<number>();
-    for (const record of [...saleLines, ...costLayers]) {
-        const currencyId = getRelationalId(record.currency_id);
-        if (currencyId) gpCurrencyIds.add(currencyId);
-    }
-    const gpPrimaryCurrencyId = await getPrimaryCurrencyId(credentials, uid, Array.from(gpCurrencyIds).map((currencyId) => ({ currencyId })));
-    const gpHomeCompanyId = await getHomeCompanyId(credentials, uid);
-    const gpOtherCurrencyIds = Array.from(gpCurrencyIds).filter((id) => id !== gpPrimaryCurrencyId);
-    const gpRates = gpHomeCompanyId && gpOtherCurrencyIds.length > 0
-        ? await getCurrencyRatesToHomeCurrency(credentials, uid, gpHomeCompanyId, gpOtherCurrencyIds, endDate)
-        : new Map<number, number>();
-    const gpMultipliers = buildCurrencyMultipliers(gpPrimaryCurrencyId, gpRates);
-    const toHomeAmount = (amount: number, currencyId: number | null) => {
-        if (!currencyId) return amount;
-        const multiplier = gpMultipliers.get(currencyId);
-        return typeof multiplier === "number" ? amount * multiplier : amount;
-    };
+    const toHomeAmount = (amount: number, currencyId: number | null) => money.convert(amount, currencyId);
 
     const costByLineId = new Map<number, number>();
     for (const layer of costLayers) {
@@ -11536,7 +11612,6 @@ export async function computeDashboardCard(credentials: OdooCredentials, card: s
         ...(scope.salespersonIds ? [["invoice_user_id", "in", scope.salespersonIds]] : []),
         ...partnerTagDomain("partner_id", scope.tags),
     ];
-    const sum = (rows: Array<Record<string, unknown>>, field: string) => rows.reduce((total, row) => total + Number(row[field] ?? 0), 0);
     const count = (rows: Array<Record<string, unknown>>) => rows.reduce((total, row) => total + Number(row.__count ?? 0), 0);
 
     switch (card) {
@@ -11571,8 +11646,10 @@ export async function computeDashboardCard(credentials: OdooCredentials, card: s
         }
 
         case "sales": {
+            // Amounts are in each invoice company's own currency; convert before adding them together.
+            const money = await getMoneyConverter(credentials, uid);
             const byDay = async (from: string, to: string) => {
-                const rows = await group("account.move", salesDomain(from, to), ["amount_untaxed_signed"], ["invoice_date:day"]);
+                const rows = await group("account.move", salesDomain(from, to), ["amount_untaxed_signed"], ["invoice_date:day", "company_id"]);
                 const days: number[] = Array.from({ length: Number(to.slice(8, 10)) }, () => 0);
                 for (const row of rows) {
                     // __domain repeats the query's own ">= start" term too, so the day is the latest ">=" bound.
@@ -11581,7 +11658,7 @@ export async function computeDashboardCard(credentials: OdooCredentials, card: s
                         .map((term) => String(term[2]).slice(0, 10))
                         .sort();
                     const day = starts.length ? Number(starts[starts.length - 1].slice(8, 10)) : 0;
-                    if (day >= 1 && day <= days.length) days[day - 1] += Number(row.amount_untaxed_signed ?? 0);
+                    if (day >= 1 && day <= days.length) days[day - 1] += money.convertFromCompany(Number(row.amount_untaxed_signed ?? 0), getRelationalId(row.company_id));
                 }
                 return days;
             };
@@ -11612,14 +11689,18 @@ export async function computeDashboardCard(credentials: OdooCredentials, card: s
                 ...(scope.salespersonIds ? [["invoice_user_id", "in", scope.salespersonIds]] : []),
                 ...partnerTagDomain("partner_id", scope.tags),
             ];
+            const money = await getMoneyConverter(credentials, uid);
             const [open, overdue] = await Promise.all([
-                group("account.move", base, ["amount_residual_signed"], []),
-                group("account.move", [...base, ["invoice_date_due", "<", today]], ["amount_residual_signed"], []),
+                group("account.move", base, ["amount_residual_signed"], ["company_id"]),
+                group("account.move", [...base, ["invoice_date_due", "<", today]], ["amount_residual_signed"], ["company_id"]),
             ]);
-            return { overdue: sum(overdue, "amount_residual_signed"), overdueInvoices: count(overdue), open: sum(open, "amount_residual_signed") };
+            const inTarget = (rows: Array<Record<string, unknown>>) =>
+                rows.reduce((total, row) => total + money.convertFromCompany(Number(row.amount_residual_signed ?? 0), getRelationalId(row.company_id)), 0);
+            return { overdue: inTarget(overdue), overdueInvoices: count(overdue), open: inTarget(open) };
         }
 
         case "pending": {
+            const money = await getMoneyConverter(credentials, uid);
             const rows = await group(
                 "sale.order",
                 [
@@ -11628,9 +11709,12 @@ export async function computeDashboardCard(credentials: OdooCredentials, card: s
                     ...partnerTagDomain("partner_id", scope.tags),
                 ],
                 ["amount_total"],
-                []
+                ["currency_id"]
             );
-            return { count: count(rows), total: sum(rows, "amount_total") };
+            return {
+                count: count(rows),
+                total: rows.reduce((total, row) => total + money.convert(Number(row.amount_total ?? 0), getRelationalId(row.currency_id)), 0),
+            };
         }
 
         case "stock": {
@@ -11660,7 +11744,8 @@ export async function computeDashboardCard(credentials: OdooCredentials, card: s
 
         case "topProducts":
         case "topBrands": {
-            const rows = await group(
+            const money = await getMoneyConverter(credentials, uid);
+            const grouped = await group(
                 "account.move.line",
                 [
                     ["move_id.move_type", "=", "out_invoice"],
@@ -11672,15 +11757,21 @@ export async function computeDashboardCard(credentials: OdooCredentials, card: s
                     ...partnerTagDomain("partner_id", scope.tags),
                 ],
                 ["quantity", "balance"],
-                ["product_id"],
-                { orderby: "quantity desc", limit: card === "topProducts" ? 5 : 300 }
+                ["product_id", "company_id"],
+                { orderby: "quantity desc", limit: 600 }
             );
-            const sold = rows.map((row) => ({
-                id: getRelationalId(row.product_id) ?? 0,
-                name: getRelationalName(row.product_id) || "—",
-                quantity: Number(row.quantity ?? 0),
-                amount: -Number(row.balance ?? 0),
-            }));
+            // `balance` is in each company's own currency: convert, then add the companies of one product together.
+            const soldById = new Map<number, { id: number; name: string; quantity: number; amount: number }>();
+            for (const row of grouped) {
+                const id = getRelationalId(row.product_id) ?? 0;
+                const entry = soldById.get(id) ?? { id, name: getRelationalName(row.product_id) || "—", quantity: 0, amount: 0 };
+                entry.quantity += Number(row.quantity ?? 0);
+                entry.amount += money.convertFromCompany(-Number(row.balance ?? 0), getRelationalId(row.company_id));
+                soldById.set(id, entry);
+            }
+            const sold = Array.from(soldById.values())
+                .sort((a, b) => b.quantity - a.quantity)
+                .slice(0, card === "topProducts" ? 5 : 300);
             if (card === "topProducts") {
                 return { rows: sold.map(({ name, quantity, amount }) => ({ name, quantity, amount })) };
             }
@@ -11740,7 +11831,7 @@ const AGED_STOCK_BUCKETS = [
     { label: "Over 1 year", fromDays: 366 },
 ];
 
-type AgedLayer = { ms: number; quantity: number; moveId: number };
+type AgedLayer = { ms: number; quantity: number; cost: number };
 
 /** A product / lot / warehouse whose oldest quant is old enough to need its movements replayed. */
 export type AgedCandidate = {
@@ -11750,6 +11841,8 @@ export type AgedCandidate = {
     warehouse: string;
     locations: string[];
     quantity: number;
+    /** On hand of this product / lot across every warehouse. */
+    lotTotal: number;
     oldestMs: number;
 };
 
@@ -11833,6 +11926,7 @@ export async function getAgedStockBase(credentials: OdooCredentials, minAgeDays:
             warehouse,
             locations: [],
             quantity: 0,
+            lotTotal: 0,
             oldestMs: received.getTime(),
         };
         info.quantity += quantity;
@@ -11841,6 +11935,13 @@ export async function getAgedStockBase(credentials: OdooCredentials, minAgeDays:
         keys.set(key, info);
         entries.push({ key, quantity, ms: received.getTime() });
     }
+
+    const lotTotals = new Map<string, number>();
+    for (const info of keys.values()) {
+        const lotKey = `${info.productId}|${info.lotName}`;
+        lotTotals.set(lotKey, (lotTotals.get(lotKey) ?? 0) + info.quantity);
+    }
+    for (const info of keys.values()) info.lotTotal = lotTotals.get(`${info.productId}|${info.lotName}`) ?? info.quantity;
 
     // A key whose oldest quant is younger than the threshold cannot hold aged stock.
     const candidates: AgedCandidate[] = [];
@@ -11866,9 +11967,11 @@ export async function getAgedStockBase(credentials: OdooCredentials, minAgeDays:
 }
 
 /**
- * Step 2 (called in small batches): rebuilds the age of the candidates from the real stock movements (FIFO).
- * Deliveries consume the oldest receipts first, so when a product's stock drops to 0 its old receipt date is
- * gone and the "since" date becomes the next receipt that followed, instead of Odoo's first quant `in_date`.
+ * Step 2: dates the stock from Odoo's own valuation layers. Every receipt creates a layer whose
+ * `remaining_qty` Odoo already reduces as goods are delivered (oldest first), so the layers that still have
+ * a remaining quantity ARE the receipts still on hand. When stock has gone to 0 and been replenished, the
+ * old layers are used up and only the newer receipt is left. No movement history needs to be read.
+ * Products without open layers (e.g. standard-cost products) fall back to the quant's incoming date.
  */
 export async function refineAgedStock(
     credentials: OdooCredentials,
@@ -11880,90 +11983,67 @@ export async function refineAgedStock(
     const now = Date.now();
     const ageOf = (ms: number) => Math.max(0, Math.floor((now - ms) / 86_400_000));
 
-    const candidates = new Map(candidateList.map((item) => [`${item.productId}|${item.lotName}|${item.warehouse}`, item]));
     const productIds = Array.from(new Set(candidateList.map((item) => item.productId).filter(Boolean)));
-    const events = new Map<string, Array<{ ms: number; quantity: number; moveId: number }>>();
 
-    if (productIds.length > 0) {
-        // Plain id lists are far cheaper for Odoo than joining on location usage for every movement line.
-        const internal = await searchReadAll(credentials, uid, "stock.location", [["usage", "=", "internal"]], ["id"]);
-        const internalIds = new Set(internal.map((location) => Number(location.id)));
-        const internalList = Array.from(internalIds);
+    // 1. Open layers (receipts still on hand), a few thousand at most.
+    type OpenLayer = { productId: number; moveId: number; ms: number; quantity: number; unitCost: number };
+    const openLayers: OpenLayer[] = [];
+    for (let start = 0; start < productIds.length; start += 1000) {
+        const layers = await searchReadAll(
+            credentials,
+            uid,
+            "stock.valuation.layer",
+            [["product_id", "in", productIds.slice(start, start + 1000)], ["remaining_qty", ">", 0]],
+            ["product_id", "stock_move_id", "remaining_qty", "remaining_value", "create_date"]
+        ).catch(() => [] as Array<Record<string, unknown>>);
+        for (const layer of layers) {
+            const quantity = Number(layer.remaining_qty ?? 0);
+            const date = typeof layer.create_date === "string" ? new Date(`${layer.create_date.replace(" ", "T")}Z`).getTime() : NaN;
+            if (!(quantity > 0) || Number.isNaN(date)) continue;
+            openLayers.push({
+                productId: getRelationalId(layer.product_id) ?? 0,
+                moveId: getRelationalId(layer.stock_move_id) ?? 0,
+                ms: date,
+                quantity,
+                unitCost: Number(layer.remaining_value ?? 0) / quantity,
+            });
+        }
+    }
 
+    // 2. Which lot(s) each of those receipts brought in (only for the few moves that still have stock).
+    const moveIds = Array.from(new Set(openLayers.map((layer) => layer.moveId).filter(Boolean)));
+    const lotsByMove = new Map<number, Array<{ lotName: string; quantity: number }>>();
+    for (let start = 0; start < moveIds.length; start += 1000) {
         const lines = await searchReadAll(
             credentials,
             uid,
             "stock.move.line",
-            [
-                ["product_id", "in", productIds],
-                ["state", "=", "done"],
-                "|",
-                ["location_id", "in", internalList],
-                ["location_dest_id", "in", internalList],
-            ],
-            ["product_id", "lot_id", "move_id", "quantity", "qty_done", "date", "location_id", "location_dest_id"],
-            { order: "date asc, id asc" }
-        );
-
-        const push = (key: string, event: { ms: number; quantity: number; moveId: number }) => {
-            if (!candidates.has(key)) return;
-            const list = events.get(key);
-            if (list) list.push(event);
-            else events.set(key, [event]);
-        };
+            [["move_id", "in", moveIds.slice(start, start + 1000)], ["state", "=", "done"]],
+            ["move_id", "lot_id", "quantity", "qty_done"]
+        ).catch(() => [] as Array<Record<string, unknown>>);
         for (const line of lines) {
+            const moveId = getRelationalId(line.move_id) ?? 0;
             const quantity = Number(line.quantity ?? line.qty_done ?? 0);
-            const date = typeof line.date === "string" ? new Date(`${line.date.replace(" ", "T")}Z`).getTime() : NaN;
-            if (!(quantity > 0) || Number.isNaN(date)) continue;
-            const productId = getRelationalId(line.product_id) ?? 0;
-            const lotName = getRelationalName(line.lot_id);
-            const fromId = getRelationalId(line.location_id);
-            const toId = getRelationalId(line.location_dest_id);
-            const from = fromId && internalIds.has(fromId) ? getRelationalName(line.location_id).split("/")[0].trim() : "";
-            const to = toId && internalIds.has(toId) ? getRelationalName(line.location_dest_id).split("/")[0].trim() : "";
-            if (from === to) continue; // moves inside one warehouse do not change its stock
-            if (to) push(`${productId}|${lotName}|${to}`, { ms: date, quantity, moveId: getRelationalId(line.move_id) ?? 0 });
-            if (from) push(`${productId}|${lotName}|${from}`, { ms: date, quantity: -quantity, moveId: 0 });
+            if (!moveId || !(quantity > 0)) continue;
+            const list = lotsByMove.get(moveId) ?? [];
+            list.push({ lotName: getRelationalName(line.lot_id), quantity });
+            lotsByMove.set(moveId, list);
         }
     }
 
-    // FIFO: what is left after the deliveries is what is still sitting there.
-    const layersByKey = new Map<string, AgedLayer[]>();
-    for (const [key, info] of candidates) {
-        const layers: AgedLayer[] = [];
-        for (const event of events.get(key) ?? []) {
-            if (event.quantity > 0) {
-                layers.push({ ms: event.ms, quantity: event.quantity, moveId: event.moveId });
-                continue;
-            }
-            let out = -event.quantity;
-            while (out > 1e-9 && layers.length > 0) {
-                const take = Math.min(out, layers[0].quantity);
-                layers[0].quantity -= take;
-                out -= take;
-                if (layers[0].quantity <= 1e-9) layers.shift();
-            }
+    // Layers per product / lot, oldest first.
+    const layersByLot = new Map<string, AgedLayer[]>();
+    for (const layer of openLayers.sort((a, b) => a.ms - b.ms)) {
+        const parts = lotsByMove.get(layer.moveId) ?? [{ lotName: "", quantity: 1 }];
+        const total = parts.reduce((sum, part) => sum + part.quantity, 0);
+        for (const part of parts) {
+            const lotKey = `${layer.productId}|${part.lotName}`;
+            const list = layersByLot.get(lotKey) ?? [];
+            list.push({ ms: layer.ms, quantity: (layer.quantity * part.quantity) / total, cost: layer.unitCost });
+            layersByLot.set(lotKey, list);
         }
-        // Reconcile with what Odoo says is on hand (incomplete history, manual corrections).
-        let held = layers.reduce((sum, layer) => sum + layer.quantity, 0);
-        while (held > info.quantity + 1e-9 && layers.length > 0) {
-            const cut = Math.min(held - info.quantity, layers[0].quantity);
-            layers[0].quantity -= cut;
-            held -= cut;
-            if (layers[0].quantity <= 1e-9) layers.shift();
-        }
-        if (held < info.quantity - 1e-9) layers.unshift({ ms: info.oldestMs, quantity: info.quantity - held, moveId: 0 });
-        layersByKey.set(key, layers);
     }
 
-    // Unit cost of each receipt that is still on hand.
-    const moveIds = new Set<number>();
-    for (const layers of layersByKey.values()) for (const layer of layers) if (layer.moveId) moveIds.add(layer.moveId);
-    const priceByMove = new Map<number, number>();
-    if (moveIds.size > 0) {
-        const moves = await readInBatches(credentials, uid, "stock.move", Array.from(moveIds), ["id", "price_unit"]).catch(() => [] as Array<Record<string, unknown>>);
-        for (const move of moves) priceByMove.set(Number(move.id), Number(move.price_unit ?? 0));
-    }
     const productInfo = new Map<number, { brand: string; cost: number }>();
     if (productIds.length > 0) {
         const products = await readInBatches(credentials, uid, "product.product", productIds, ["tire_brand", "standard_price"]).catch(() => [] as Array<Record<string, unknown>>);
@@ -11974,18 +12054,31 @@ export async function refineAgedStock(
     const bucketUnits = AGED_STOCK_BUCKETS.map(() => 0);
     const warehouseAged: Record<string, number> = {};
     let agedUnits = 0;
-    for (const [key, info] of candidates) {
+    for (const info of candidateList) {
+        // This warehouse's share of the receipts still on hand for the product / lot.
+        const share = info.lotTotal > 0 ? info.quantity / info.lotTotal : 1;
+        const layers = (layersByLot.get(`${info.productId}|${info.lotName}`) ?? []).map((layer) => ({ ...layer, quantity: layer.quantity * share }));
+
+        // Reconcile with what Odoo says is on hand (older layers are trimmed first, gaps get the quant's own date).
+        let held = layers.reduce((sum, layer) => sum + layer.quantity, 0);
+        while (held > info.quantity + 1e-9 && layers.length > 0) {
+            const cut = Math.min(held - info.quantity, layers[0].quantity);
+            layers[0].quantity -= cut;
+            held -= cut;
+            if (layers[0].quantity <= 1e-9) layers.shift();
+        }
+        if (held < info.quantity - 1e-9) layers.unshift({ ms: info.oldestMs, quantity: info.quantity - held, cost: 0 });
+
         const fallbackCost = productInfo.get(info.productId)?.cost ?? 0;
         let agedQuantity = 0;
         let agedCost = 0;
         let oldestMs = 0;
-        for (const layer of layersByKey.get(key) ?? []) {
+        for (const layer of layers) {
             const layerAge = ageOf(layer.ms);
             bucketUnits[bucketIndex(layerAge)] += layer.quantity;
             if (layerAge < minAge) continue;
-            const price = layer.moveId ? priceByMove.get(layer.moveId) ?? 0 : 0;
             agedQuantity += layer.quantity;
-            agedCost += layer.quantity * (price > 0 ? price : fallbackCost);
+            agedCost += layer.quantity * (layer.cost > 0 ? layer.cost : fallbackCost);
             if (!oldestMs) oldestMs = layer.ms;
         }
         if (agedQuantity <= 0) continue;
@@ -12006,4 +12099,24 @@ export async function refineAgedStock(
     }
 
     return { rows, bucketUnits, agedUnits, warehouseAged };
+}
+
+export async function getAgedStock(credentials: OdooCredentials, minAgeDays: number): Promise<AgedStockResult> {
+    const base = await getAgedStockBase(credentials, minAgeDays);
+    const refined = await refineAgedStock(credentials, base.minAgeDays, base.candidates);
+
+    const rows = refined.rows.sort((a, b) => b.ageDays - a.ageDays || b.quantity - a.quantity);
+    const limited = rows.slice(0, 5000);
+    return {
+        minAgeDays: base.minAgeDays,
+        totalUnits: base.totalUnits,
+        agedUnits: refined.agedUnits,
+        unknownAgeUnits: base.unknownAgeUnits,
+        buckets: base.buckets.map((bucket, index) => ({ ...bucket, units: bucket.units + (refined.bucketUnits[index] ?? 0) })),
+        warehouses: base.warehouses
+            .map((warehouse) => ({ ...warehouse, agedUnits: refined.warehouseAged[warehouse.name] ?? 0 }))
+            .sort((a, b) => b.agedUnits - a.agedUnits),
+        rows: limited,
+        truncated: rows.length > limited.length,
+    };
 }

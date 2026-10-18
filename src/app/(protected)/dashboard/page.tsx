@@ -436,7 +436,7 @@ export default function DashboardPage() {
         return () => window.clearInterval(timer);
     }, []);
 
-    const storageKey = user ? `dashboard-saved-v8-${user.uid}` : null;
+    const storageKey = user ? `dashboard-saved-v9-${user.uid}` : null;
     const persist = useCallback(
         (cards: Record<string, CardState>) => {
             if (!storageKey) return;

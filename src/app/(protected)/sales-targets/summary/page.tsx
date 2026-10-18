@@ -7,6 +7,7 @@ import { getSalespersonMonthlyInvoices } from "@/lib/client-odoo";
 import { getAllSalesTargets } from "@/lib/firestore-settings";
 import { useAuth } from "@/lib/auth-context";
 import { SalesTargetRecord } from "@/types/odoo";
+import { getDisplayCurrency } from "@/lib/display-currency";
 
 const months = [
     { value: 1, label: "January" },
@@ -36,7 +37,7 @@ type SummaryRow = {
 };
 
 function formatCurrency(value: number) {
-    return `AED ${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+    return `${getDisplayCurrency()} ${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 }
 
 function achievementTone(achievedAmount: number, targetAmount: number) {

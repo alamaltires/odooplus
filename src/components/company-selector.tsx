@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Building2, ChevronDown } from "lucide-react";
 import { getCompanies } from "@/lib/client-odoo";
 import { useAuth } from "@/lib/auth-context";
+import { setCompanyCurrencies } from "@/lib/display-currency";
 import {
     getSelectedCompanyIds,
     hasStoredCompanySelection,
@@ -38,6 +39,7 @@ export function CompanySelector() {
                 if (cancelled) return;
                 setCompanies(data.companies);
                 if (data.companies.length === 0) return;
+                setCompanyCurrencies(Object.fromEntries(data.companies.filter((company) => company.currency).map((company) => [company.id, company.currency])));
 
                 const allowedIds = data.companies.map((company) => company.id);
                 const stored = getSelectedCompanyIds().filter((id) => allowedIds.includes(id));

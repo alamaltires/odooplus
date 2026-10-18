@@ -7,6 +7,7 @@ import { CheckCircle2, Mail, MessageCircle, Pencil, Search, ShoppingCart } from 
 import { getProducts } from "@/lib/client-odoo";
 import { useAuth } from "@/lib/auth-context";
 import { OdooProductOption, SavedBackorder } from "@/types/odoo";
+import { getDisplayCurrency } from "@/lib/display-currency";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -727,7 +728,7 @@ export default function ManualBackorderDetailsPage() {
                                                 <td className="px-4 py-3">{product.ordered_quantity}</td>
                                                 <td className="px-4 py-3">{product.available_quantity}</td>
                                                 <td className="px-4 py-3">{product.shortage}</td>
-                                                <td className="px-4 py-3">{Number(product.price).toFixed(2)} AED</td>
+                                                <td className="px-4 py-3">{Number(product.price).toFixed(2)} {getDisplayCurrency()}</td>
                                             </tr>
                                         ))}
                                     </tbody>
@@ -884,7 +885,7 @@ export default function ManualBackorderDetailsPage() {
                                             />
                                         </label>
                                         <label className="block text-sm">
-                                            <span className="mb-2 block font-medium">Price (AED)</span>
+                                            <span className="mb-2 block font-medium">Price ({getDisplayCurrency()})</span>
                                             <input
                                                 type="number"
                                                 min="0"
