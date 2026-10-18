@@ -955,7 +955,76 @@ export type AgedStockResponse = {
     scannedAt: string;
 };
 
-/** On-hand stock older than `minAgeDays` (by Odoo's incoming date), per product / lot / warehouse. */
-export function getAgedStock(input: { minAgeDays: number }) {
-    return post<AgedStockResponse>("/api/odoo/aged-stock", input);
+export type AgedCandidate = {
+    productId: number;
+    productName: string;
+    lotName: string;
+    warehouse: string;
+    locations: string[];
+    quantity: number;
+    oldestMs: number;
+};
+
+type AgedStockBase = Omit<AgedStockResponse, "rows" | "truncated" | "scannedAt" | "agedUnits"> & { candidates: AgedCandidate[] };
+type AgedStockRefined = { rows: AgedStockRow[]; bucketUnits: number[]; agedUnits: number; warehouseAged: Record<string, number> };
+
+const AGED_BATCH_SIZE = 150;
+
+/**
+ * On-hand stock older than `minAgeDays`, per product / lot / warehouse. Done in several short requests
+ * (a quick totals step, then batches that replay the stock movements) so none of them can time out.
+ */
+export async function getAgedStock(
+    input: { minAgeDays: number },
+    onProgress?: (done: number, total: number) => void
+): Promise<AgedStockResponse> {
+    const base = await post<AgedStockBase>("/api/odoo/aged-stock", { stage: "base", minAgeDays: input.minAgeDays });
+    const batches: AgedCandidate[][] = [];
+    // Keep all lots of one product together so a batch replays each product's history once.
+    const sorted = [...base.candidates].sort((a, b) => a.productId - b.productId);
+    for (let start = 0; start < sorted.length; start += AGED_BATCH_SIZE) {
+        let end = Math.min(sorted.length, start + AGED_BATCH_SIZE);
+        while (end < sorted.length && sorted[end].productId === sorted[end - 1].productId) end += 1;
+        batches.push(sorted.slice(start, end));
+        start = end - AGED_BATCH_SIZE;
+    }
+
+    const buckets = base.buckets.map((bucket) => ({ ...bucket }));
+    const warehouseAged = new Map<string, number>();
+    const rows: AgedStockRow[] = [];
+    let agedUnits = 0;
+    let done = 0;
+    onProgress?.(0, batches.length);
+
+    for (const batch of batches) {
+        const refined = await post<AgedStockRefined>("/api/odoo/aged-stock", {
+            stage: "refine",
+            minAgeDays: base.minAgeDays,
+            candidates: batch,
+        });
+        rows.push(...refined.rows);
+        agedUnits += refined.agedUnits;
+        refined.bucketUnits.forEach((units, index) => {
+            if (buckets[index]) buckets[index].units += units;
+        });
+        for (const [name, units] of Object.entries(refined.warehouseAged)) warehouseAged.set(name, (warehouseAged.get(name) ?? 0) + units);
+        done += 1;
+        onProgress?.(done, batches.length);
+    }
+
+    rows.sort((a, b) => b.ageDays - a.ageDays || b.quantity - a.quantity);
+    const limited = rows.slice(0, 5000);
+    return {
+        minAgeDays: base.minAgeDays,
+        totalUnits: base.totalUnits,
+        agedUnits,
+        unknownAgeUnits: base.unknownAgeUnits,
+        buckets,
+        warehouses: base.warehouses
+            .map((warehouse) => ({ ...warehouse, agedUnits: warehouseAged.get(warehouse.name) ?? 0 }))
+            .sort((a, b) => b.agedUnits - a.agedUnits),
+        rows: limited,
+        truncated: rows.length > limited.length,
+        scannedAt: new Date().toISOString(),
+    };
 }

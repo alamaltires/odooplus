@@ -11739,19 +11739,52 @@ const AGED_STOCK_BUCKETS = [
     { label: "181-365 days", fromDays: 181 },
     { label: "Over 1 year", fromDays: 366 },
 ];
-const AGED_STOCK_MAX_ROWS = 5000;
 
 type AgedLayer = { ms: number; quantity: number; moveId: number };
 
-/**
- * Rebuilds the age of on-hand stock from the real stock movements (FIFO), per product / lot / warehouse:
- * deliveries consume the oldest receipts first, so when a product's stock drops to 0 its old receipt date
- * is gone and the "since" date becomes the next receipt that followed. Odoo's quant `in_date` alone would
- * keep reporting the very first entry date.
- */
-export async function getAgedStock(credentials: OdooCredentials, minAgeDays: number): Promise<AgedStockResult> {
+/** A product / lot / warehouse whose oldest quant is old enough to need its movements replayed. */
+export type AgedCandidate = {
+    productId: number;
+    productName: string;
+    lotName: string;
+    warehouse: string;
+    locations: string[];
+    quantity: number;
+    oldestMs: number;
+};
+
+export type AgedStockBase = {
+    minAgeDays: number;
+    totalUnits: number;
+    unknownAgeUnits: number;
+    /** Units already known to be young (no need to look at their movements). */
+    buckets: Array<{ label: string; fromDays: number; units: number }>;
+    warehouses: Array<{ name: string; totalUnits: number; agedUnits: number }>;
+    candidates: AgedCandidate[];
+};
+
+export type AgedStockRefined = {
+    rows: AgedStockRow[];
+    bucketUnits: number[];
+    agedUnits: number;
+    warehouseAged: Record<string, number>;
+};
+
+function normalizeMinAge(minAgeDays: number) {
+    return Number.isFinite(minAgeDays) ? Math.max(1, Math.min(3650, Math.floor(minAgeDays))) : 180;
+}
+
+function bucketIndex(ageDays: number) {
+    for (let index = AGED_STOCK_BUCKETS.length - 1; index >= 0; index -= 1) {
+        if (ageDays >= AGED_STOCK_BUCKETS[index].fromDays) return index;
+    }
+    return 0;
+}
+
+/** Step 1 (one quick query): totals, and which stock is old enough to be worth a closer look. */
+export async function getAgedStockBase(credentials: OdooCredentials, minAgeDays: number): Promise<AgedStockBase> {
     const uid = await authenticate(credentials);
-    const minAge = Number.isFinite(minAgeDays) ? Math.max(1, Math.min(3650, Math.floor(minAgeDays))) : 180;
+    const minAge = normalizeMinAge(minAgeDays);
     const now = Date.now();
     const ageOf = (ms: number) => Math.max(0, Math.floor((now - ms) / 86_400_000));
 
@@ -11765,29 +11798,11 @@ export async function getAgedStock(credentials: OdooCredentials, minAgeDays: num
     );
 
     const buckets = AGED_STOCK_BUCKETS.map((bucket) => ({ ...bucket, units: 0 }));
-    const addToBucket = (ageDays: number, units: number) => {
-        for (let index = buckets.length - 1; index >= 0; index -= 1) {
-            if (ageDays >= buckets[index].fromDays) {
-                buckets[index].units += units;
-                return;
-            }
-        }
-    };
     const warehouses = new Map<string, { totalUnits: number; agedUnits: number }>();
     let totalUnits = 0;
-    let agedUnits = 0;
     let unknownAgeUnits = 0;
 
-    type KeyInfo = {
-        productId: number;
-        productName: string;
-        lotName: string;
-        warehouse: string;
-        locations: string[];
-        quantity: number;
-        oldestMs: number;
-    };
-    const keys = new Map<string, KeyInfo>();
+    const keys = new Map<string, AgedCandidate>();
     const entries: Array<{ key: string; quantity: number; ms: number }> = [];
 
     for (const quant of quants) {
@@ -11827,21 +11842,55 @@ export async function getAgedStock(credentials: OdooCredentials, minAgeDays: num
         entries.push({ key, quantity, ms: received.getTime() });
     }
 
-    // Keys whose oldest quant is younger than the threshold cannot hold aged stock; bucket them as they are.
-    const candidates = new Set<string>();
-    for (const [key, info] of keys) if (ageOf(info.oldestMs) >= minAge) candidates.add(key);
-    for (const entry of entries) if (!candidates.has(entry.key)) addToBucket(ageOf(entry.ms), entry.quantity);
+    // A key whose oldest quant is younger than the threshold cannot hold aged stock.
+    const candidates: AgedCandidate[] = [];
+    const candidateKeys = new Set<string>();
+    for (const [key, info] of keys) {
+        if (ageOf(info.oldestMs) >= minAge) {
+            candidates.push(info);
+            candidateKeys.add(key);
+        }
+    }
+    for (const entry of entries) {
+        if (!candidateKeys.has(entry.key)) buckets[bucketIndex(ageOf(entry.ms))].units += entry.quantity;
+    }
 
-    // Replay the stock movements of the candidate products.
-    const productIds = Array.from(new Set(Array.from(candidates, (key) => keys.get(key)!.productId).filter(Boolean)));
+    return {
+        minAgeDays: minAge,
+        totalUnits,
+        unknownAgeUnits,
+        buckets: buckets.map(({ label, fromDays, units }) => ({ label, fromDays, units })),
+        warehouses: Array.from(warehouses, ([name, value]) => ({ name, ...value })),
+        candidates,
+    };
+}
+
+/**
+ * Step 2 (called in small batches): rebuilds the age of the candidates from the real stock movements (FIFO).
+ * Deliveries consume the oldest receipts first, so when a product's stock drops to 0 its old receipt date is
+ * gone and the "since" date becomes the next receipt that followed, instead of Odoo's first quant `in_date`.
+ */
+export async function refineAgedStock(
+    credentials: OdooCredentials,
+    minAgeDays: number,
+    candidateList: AgedCandidate[]
+): Promise<AgedStockRefined> {
+    const uid = await authenticate(credentials);
+    const minAge = normalizeMinAge(minAgeDays);
+    const now = Date.now();
+    const ageOf = (ms: number) => Math.max(0, Math.floor((now - ms) / 86_400_000));
+
+    const candidates = new Map(candidateList.map((item) => [`${item.productId}|${item.lotName}|${item.warehouse}`, item]));
+    const productIds = Array.from(new Set(candidateList.map((item) => item.productId).filter(Boolean)));
     const events = new Map<string, Array<{ ms: number; quantity: number; moveId: number }>>();
-    for (let start = 0; start < productIds.length; start += 300) {
+
+    if (productIds.length > 0) {
         const lines = await searchReadAll(
             credentials,
             uid,
             "stock.move.line",
             [
-                ["product_id", "in", productIds.slice(start, start + 300)],
+                ["product_id", "in", productIds],
                 ["state", "=", "done"],
                 "|",
                 ["location_id.usage", "=", "internal"],
@@ -11849,8 +11898,14 @@ export async function getAgedStock(credentials: OdooCredentials, minAgeDays: num
             ],
             ["product_id", "lot_id", "move_id", "quantity", "qty_done", "date", "location_id", "location_dest_id", "location_usage", "location_dest_usage"],
             { order: "date asc, id asc" }
-        ).catch(() => [] as Array<Record<string, unknown>>);
+        );
 
+        const push = (key: string, event: { ms: number; quantity: number; moveId: number }) => {
+            if (!candidates.has(key)) return;
+            const list = events.get(key);
+            if (list) list.push(event);
+            else events.set(key, [event]);
+        };
         for (const line of lines) {
             const quantity = Number(line.quantity ?? line.qty_done ?? 0);
             const date = typeof line.date === "string" ? new Date(`${line.date.replace(" ", "T")}Z`).getTime() : NaN;
@@ -11860,22 +11915,14 @@ export async function getAgedStock(credentials: OdooCredentials, minAgeDays: num
             const from = line.location_usage === "internal" ? getRelationalName(line.location_id).split("/")[0].trim() : "";
             const to = line.location_dest_usage === "internal" ? getRelationalName(line.location_dest_id).split("/")[0].trim() : "";
             if (from === to) continue; // moves inside one warehouse do not change its stock
-            const moveId = getRelationalId(line.move_id) ?? 0;
-            if (to) {
-                const key = `${productId}|${lotName}|${to}`;
-                if (candidates.has(key)) (events.get(key) ?? events.set(key, []).get(key)!).push({ ms: date, quantity, moveId });
-            }
-            if (from) {
-                const key = `${productId}|${lotName}|${from}`;
-                if (candidates.has(key)) (events.get(key) ?? events.set(key, []).get(key)!).push({ ms: date, quantity: -quantity, moveId: 0 });
-            }
+            if (to) push(`${productId}|${lotName}|${to}`, { ms: date, quantity, moveId: getRelationalId(line.move_id) ?? 0 });
+            if (from) push(`${productId}|${lotName}|${from}`, { ms: date, quantity: -quantity, moveId: 0 });
         }
     }
 
     // FIFO: what is left after the deliveries is what is still sitting there.
     const layersByKey = new Map<string, AgedLayer[]>();
-    for (const key of candidates) {
-        const info = keys.get(key)!;
+    for (const [key, info] of candidates) {
         const layers: AgedLayer[] = [];
         for (const event of events.get(key) ?? []) {
             if (event.quantity > 0) {
@@ -11916,16 +11963,18 @@ export async function getAgedStock(credentials: OdooCredentials, minAgeDays: num
         for (const product of products) productInfo.set(Number(product.id), { brand: getRelationalName(product.tire_brand), cost: Number(product.standard_price ?? 0) });
     }
 
-    const groups: AgedStockRow[] = [];
-    for (const key of candidates) {
-        const info = keys.get(key)!;
+    const rows: AgedStockRow[] = [];
+    const bucketUnits = AGED_STOCK_BUCKETS.map(() => 0);
+    const warehouseAged: Record<string, number> = {};
+    let agedUnits = 0;
+    for (const [key, info] of candidates) {
         const fallbackCost = productInfo.get(info.productId)?.cost ?? 0;
         let agedQuantity = 0;
         let agedCost = 0;
         let oldestMs = 0;
         for (const layer of layersByKey.get(key) ?? []) {
             const layerAge = ageOf(layer.ms);
-            addToBucket(layerAge, layer.quantity);
+            bucketUnits[bucketIndex(layerAge)] += layer.quantity;
             if (layerAge < minAge) continue;
             const price = layer.moveId ? priceByMove.get(layer.moveId) ?? 0 : 0;
             agedQuantity += layer.quantity;
@@ -11934,9 +11983,8 @@ export async function getAgedStock(credentials: OdooCredentials, minAgeDays: num
         }
         if (agedQuantity <= 0) continue;
         agedUnits += agedQuantity;
-        const wh = warehouses.get(info.warehouse);
-        if (wh) wh.agedUnits += agedQuantity;
-        groups.push({
+        warehouseAged[info.warehouse] = (warehouseAged[info.warehouse] ?? 0) + agedQuantity;
+        rows.push({
             productId: info.productId,
             productName: info.productName,
             brand: productInfo.get(info.productId)?.brand ?? "",
@@ -11950,17 +11998,5 @@ export async function getAgedStock(credentials: OdooCredentials, minAgeDays: num
         });
     }
 
-    const all = groups.sort((a, b) => b.ageDays - a.ageDays || b.quantity - a.quantity);
-    const rows = all.slice(0, AGED_STOCK_MAX_ROWS);
-
-    return {
-        minAgeDays: minAge,
-        totalUnits,
-        agedUnits,
-        unknownAgeUnits,
-        buckets: buckets.map(({ label, fromDays, units }) => ({ label, fromDays, units })),
-        warehouses: Array.from(warehouses, ([name, value]) => ({ name, ...value })).sort((a, b) => b.agedUnits - a.agedUnits),
-        rows,
-        truncated: all.length > rows.length,
-    };
+    return { rows, bucketUnits, agedUnits, warehouseAged };
 }

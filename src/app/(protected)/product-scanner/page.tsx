@@ -53,6 +53,7 @@ export default function ProductScannerPage() {
 
     const [result, setResult] = useState<AgedStockResponse | null>(null);
     const [loading, setLoading] = useState(false);
+    const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [exporting, setExporting] = useState(false);
 
@@ -81,7 +82,7 @@ export default function ProductScannerPage() {
         setLoading(true);
         setError(null);
         try {
-            const response = await getAgedStock({ minAgeDays: SCAN_BASE_DAYS });
+            const response = await getAgedStock({ minAgeDays: SCAN_BASE_DAYS }, (done, total) => setProgress({ done, total }));
             setResult(response);
             setPage(1);
             if (storageKey) {
@@ -95,6 +96,7 @@ export default function ProductScannerPage() {
             setError(scanError instanceof Error ? scanError.message : "Failed to scan aged stock.");
         } finally {
             setLoading(false);
+            setProgress(null);
         }
     }, [storageKey]);
 
@@ -122,6 +124,8 @@ export default function ProductScannerPage() {
     const pageRows = rows.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
     const shownUnits = rows.reduce((total, row) => total + row.quantity, 0);
     const maxAge = Math.max(...aged.map((row) => row.ageDays), 1);
+    // Reading the stock is the first ~5%; the rest is the batches that replay stock history.
+    const percent = !loading ? 0 : progress && progress.total > 0 ? Math.min(99, Math.round(5 + (progress.done / progress.total) * 95)) : progress ? 99 : 2;
     const bucketTotal = result ? result.buckets.reduce((total, bucket) => total + bucket.units, 0) : 0;
     const filtered = Boolean(warehouse || brand || search.trim());
 
@@ -172,10 +176,22 @@ export default function ProductScannerPage() {
                         className="group inline-flex items-center gap-2 rounded-xl bg-(--brand) px-4 py-2.5 text-sm font-semibold text-white shadow-[0_8px_18px_rgba(229,26,39,0.28)] transition hover:-translate-y-0.5 disabled:translate-y-0 disabled:opacity-60 disabled:shadow-none"
                     >
                         <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : "transition group-hover:rotate-180"}`} />
-                        {loading ? "Scanning warehouses..." : result ? "Scan again" : "Scan warehouses"}
+                        {loading ? (progress && progress.total > 0 ? `Checking stock history ${progress.done}/${progress.total}...` : "Scanning warehouses...") : result ? "Scan again" : "Scan warehouses"}
                     </button>
                 </div>
             </div>
+
+            {loading ? (
+                <div className="mt-4 animate-[dash-rise_0.3s_ease-out_both]" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
+                    <div className="flex items-center justify-between text-xs text-(--ink-soft)">
+                        <span>{progress ? "Checking stock history of aged products" : "Reading warehouse stock"}</span>
+                        <span className="font-semibold tabular-nums text-(--ink)">{percent}%</span>
+                    </div>
+                    <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-(--chip)">
+                        <div className="h-full rounded-full bg-(--brand) transition-[width] duration-500 ease-out" style={{ width: `${percent}%` }} />
+                    </div>
+                </div>
+            ) : null}
 
             {error ? (
                 <p className="mt-4 flex items-start gap-2 rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">
