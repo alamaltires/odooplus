@@ -11967,11 +11967,11 @@ export async function getAgedStockBase(credentials: OdooCredentials, minAgeDays:
 }
 
 /**
- * Step 2: dates the stock from Odoo's own valuation layers. Every receipt creates a layer whose
- * `remaining_qty` Odoo already reduces as goods are delivered (oldest first), so the layers that still have
- * a remaining quantity ARE the receipts still on hand. When stock has gone to 0 and been replenished, the
- * old layers are used up and only the newer receipt is left. No movement history needs to be read.
- * Products without open layers (e.g. standard-cost products) fall back to the quant's incoming date.
+ * Step 2: dates what is on the shelf from the RECEIPTS only (no deliveries to read). Whatever was delivered
+ * came out of the oldest receipts first (FIFO), so today's stock is made of the newest receipts: walk the
+ * receipts from newest to oldest until they add up to the quantity on hand. The receipt where that happens is
+ * the "since" date. When stock hit 0 earlier, the receipts before that point simply are not reached, so the
+ * date is the next receipt after it. Lot-tracked stock is looked up per lot (a handful of lines each).
  */
 export async function refineAgedStock(
     credentials: OdooCredentials,
@@ -11985,64 +11985,105 @@ export async function refineAgedStock(
 
     const productIds = Array.from(new Set(candidateList.map((item) => item.productId).filter(Boolean)));
 
-    // 1. Open layers (receipts still on hand), a few thousand at most.
-    type OpenLayer = { productId: number; moveId: number; ms: number; quantity: number; unitCost: number };
-    const openLayers: OpenLayer[] = [];
-    for (let start = 0; start < productIds.length; start += 1000) {
-        const layers = await searchReadAll(
-            credentials,
-            uid,
-            "stock.valuation.layer",
-            [["product_id", "in", productIds.slice(start, start + 1000)], ["remaining_qty", ">", 0]],
-            ["product_id", "stock_move_id", "remaining_qty", "remaining_value", "create_date"]
-        ).catch(() => [] as Array<Record<string, unknown>>);
-        for (const layer of layers) {
-            const quantity = Number(layer.remaining_qty ?? 0);
-            const date = typeof layer.create_date === "string" ? new Date(`${layer.create_date.replace(" ", "T")}Z`).getTime() : NaN;
-            if (!(quantity > 0) || Number.isNaN(date)) continue;
-            openLayers.push({
-                productId: getRelationalId(layer.product_id) ?? 0,
-                moveId: getRelationalId(layer.stock_move_id) ?? 0,
-                ms: date,
-                quantity,
-                unitCost: Number(layer.remaining_value ?? 0) / quantity,
-            });
+    const internal = await searchReadAll(credentials, uid, "stock.location", [["usage", "=", "internal"]], ["id"]);
+    const internalIds = new Set(internal.map((location) => Number(location.id)));
+    const internalList = Array.from(internalIds);
+    const transit = await searchReadAll(credentials, uid, "stock.location", [["usage", "=", "transit"]], ["id"]).catch(() => [] as Array<Record<string, unknown>>);
+    const transitIds = new Set(transit.map((location) => Number(location.id)));
+
+    // Lot ids of the lots on hand (per product + lot name).
+    const lotIdByKey = new Map<string, number>();
+    const lotNames = Array.from(new Set(candidateList.map((item) => item.lotName).filter(Boolean)));
+    if (lotNames.length > 0) {
+        for (let start = 0; start < productIds.length; start += 500) {
+            const lots = await searchReadAll(
+                credentials,
+                uid,
+                "stock.lot",
+                [["product_id", "in", productIds.slice(start, start + 500)], ["name", "in", lotNames]],
+                ["id", "name", "product_id"]
+            ).catch(() => [] as Array<Record<string, unknown>>);
+            for (const lot of lots) lotIdByKey.set(`${getRelationalId(lot.product_id)}|${toDisplayString(lot.name)}`, Number(lot.id));
         }
     }
+    const lotIds = Array.from(new Set(lotIdByKey.values()));
+    const lotlessProductIds = Array.from(new Set(candidateList.filter((item) => !item.lotName).map((item) => item.productId)));
 
-    // 2. Which lot(s) each of those receipts brought in (only for the few moves that still have stock).
-    const moveIds = Array.from(new Set(openLayers.map((layer) => layer.moveId).filter(Boolean)));
-    const lotsByMove = new Map<number, Array<{ lotName: string; quantity: number }>>();
-    for (let start = 0; start < moveIds.length; start += 1000) {
+    type Receipt = { ms: number; quantity: number; moveId: number };
+    const receiptsByKey = new Map<string, Receipt[]>();
+    // Receipts are pooled per product / lot across warehouses: a transfer between warehouses keeps the age of the
+    // purchase it came from, so only real receipts (from suppliers, production, inventory counts) count.
+    const lotKeyOf = (productId: number, lotName: string) => `${productId}|${lotName}`;
+    const wantedLots = new Set(candidateList.map((item) => lotKeyOf(item.productId, item.lotName)));
+
+    const lineFields = ["product_id", "lot_id", "move_id", "quantity", "qty_done", "date", "location_id", "location_dest_id"];
+    const readReceipts = async (domain: unknown[]) => {
         const lines = await searchReadAll(
             credentials,
             uid,
             "stock.move.line",
-            [["move_id", "in", moveIds.slice(start, start + 1000)], ["state", "=", "done"]],
-            ["move_id", "lot_id", "quantity", "qty_done"]
+            [...domain, ["state", "=", "done"], ["location_dest_id", "in", internalList]],
+            lineFields,
+            { order: "date desc, id desc" }
         ).catch(() => [] as Array<Record<string, unknown>>);
         for (const line of lines) {
-            const moveId = getRelationalId(line.move_id) ?? 0;
             const quantity = Number(line.quantity ?? line.qty_done ?? 0);
-            if (!moveId || !(quantity > 0)) continue;
-            const list = lotsByMove.get(moveId) ?? [];
-            list.push({ lotName: getRelationalName(line.lot_id), quantity });
-            lotsByMove.set(moveId, list);
+            const date = typeof line.date === "string" ? new Date(`${line.date.replace(" ", "T")}Z`).getTime() : NaN;
+            if (!(quantity > 0) || Number.isNaN(date)) continue;
+            // Moves between locations or warehouses (including via transit) are not receipts.
+            const fromId = getRelationalId(line.location_id);
+            if (fromId && (internalIds.has(fromId) || transitIds.has(fromId))) continue;
+            const key = lotKeyOf(getRelationalId(line.product_id) ?? 0, getRelationalName(line.lot_id));
+            if (!wantedLots.has(key)) continue;
+            const list = receiptsByKey.get(key);
+            const receipt = { ms: date, quantity, moveId: getRelationalId(line.move_id) ?? 0 };
+            if (list) list.push(receipt);
+            else receiptsByKey.set(key, [receipt]);
         }
+    };
+    for (let start = 0; start < lotIds.length; start += 1000) await readReceipts([["lot_id", "in", lotIds.slice(start, start + 1000)]]);
+    for (let start = 0; start < lotlessProductIds.length; start += 300) {
+        await readReceipts([["product_id", "in", lotlessProductIds.slice(start, start + 300)], ["lot_id", "=", false]]);
     }
 
-    // Layers per product / lot, oldest first.
-    const layersByLot = new Map<string, AgedLayer[]>();
-    for (const layer of openLayers.sort((a, b) => a.ms - b.ms)) {
-        const parts = lotsByMove.get(layer.moveId) ?? [{ lotName: "", quantity: 1 }];
-        const total = parts.reduce((sum, part) => sum + part.quantity, 0);
-        for (const part of parts) {
-            const lotKey = `${layer.productId}|${part.lotName}`;
-            const list = layersByLot.get(lotKey) ?? [];
-            list.push({ ms: layer.ms, quantity: (layer.quantity * part.quantity) / total, cost: layer.unitCost });
-            layersByLot.set(lotKey, list);
-        }
+    // Walk each product / lot's receipts from newest to oldest until they cover what is on hand in total.
+    const lotInfo = new Map<string, { total: number; oldestMs: number }>();
+    for (const info of candidateList) {
+        const lotKey = lotKeyOf(info.productId, info.lotName);
+        const entry = lotInfo.get(lotKey) ?? { total: info.lotTotal, oldestMs: info.oldestMs };
+        entry.oldestMs = Math.min(entry.oldestMs, info.oldestMs);
+        lotInfo.set(lotKey, entry);
     }
+    const layersByLot = new Map<string, AgedLayer[]>();
+    const moveIds = new Set<number>();
+    const pendingCost = new Map<AgedLayer, number>();
+    for (const [lotKey, info] of lotInfo) {
+        const receipts = (receiptsByKey.get(lotKey) ?? []).sort((x, y) => y.ms - x.ms);
+        const layers: AgedLayer[] = [];
+        let covered = 0;
+        for (const receipt of receipts) {
+            if (covered >= info.total - 1e-9) break;
+            const take = Math.min(receipt.quantity, info.total - covered);
+            const layer = { ms: receipt.ms, quantity: take, cost: 0 };
+            layers.push(layer);
+            if (receipt.moveId) {
+                moveIds.add(receipt.moveId);
+                pendingCost.set(layer, receipt.moveId);
+            }
+            covered += take;
+        }
+        // Receipts do not explain all the stock (opening balance, manual corrections): date the rest by Odoo's own incoming date.
+        if (covered < info.total - 1e-9) layers.push({ ms: info.oldestMs, quantity: info.total - covered, cost: 0 });
+        layers.sort((x, y) => x.ms - y.ms);
+        layersByLot.set(lotKey, layers);
+    }
+
+    const priceByMove = new Map<number, number>();
+    if (moveIds.size > 0) {
+        const moves = await readInBatches(credentials, uid, "stock.move", Array.from(moveIds), ["id", "price_unit"]).catch(() => [] as Array<Record<string, unknown>>);
+        for (const move of moves) priceByMove.set(Number(move.id), Number(move.price_unit ?? 0));
+    }
+    for (const [layer, moveId] of pendingCost) layer.cost = priceByMove.get(moveId) ?? 0;
 
     const productInfo = new Map<number, { brand: string; cost: number }>();
     if (productIds.length > 0) {
@@ -12055,19 +12096,9 @@ export async function refineAgedStock(
     const warehouseAged: Record<string, number> = {};
     let agedUnits = 0;
     for (const info of candidateList) {
-        // This warehouse's share of the receipts still on hand for the product / lot.
+        // This warehouse's share of the product / lot's receipts.
         const share = info.lotTotal > 0 ? info.quantity / info.lotTotal : 1;
-        const layers = (layersByLot.get(`${info.productId}|${info.lotName}`) ?? []).map((layer) => ({ ...layer, quantity: layer.quantity * share }));
-
-        // Reconcile with what Odoo says is on hand (older layers are trimmed first, gaps get the quant's own date).
-        let held = layers.reduce((sum, layer) => sum + layer.quantity, 0);
-        while (held > info.quantity + 1e-9 && layers.length > 0) {
-            const cut = Math.min(held - info.quantity, layers[0].quantity);
-            layers[0].quantity -= cut;
-            held -= cut;
-            if (layers[0].quantity <= 1e-9) layers.shift();
-        }
-        if (held < info.quantity - 1e-9) layers.unshift({ ms: info.oldestMs, quantity: info.quantity - held, cost: 0 });
+        const layers = (layersByLot.get(lotKeyOf(info.productId, info.lotName)) ?? []).map((layer) => ({ ...layer, quantity: layer.quantity * share }));
 
         const fallbackCost = productInfo.get(info.productId)?.cost ?? 0;
         let agedQuantity = 0;
