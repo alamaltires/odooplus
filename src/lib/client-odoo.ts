@@ -941,6 +941,8 @@ export type AgedStockRow = {
     locations: string[];
     quantity: number;
     oldestDate: string;
+    lastReceivedDate?: string;
+    firstReceivedDate?: string;
     ageDays: number;
 };
 

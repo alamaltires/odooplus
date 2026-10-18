@@ -139,6 +139,8 @@ export default function ProductScannerPage() {
                     Warehouse: row.warehouse,
                     Locations: row.locations.join(", "),
                     Quantity: row.quantity,
+                    "Last Receive": row.lastReceivedDate ?? "",
+                    "Oldest Receive": row.firstReceivedDate ?? "",
                     "In Stock Since": row.oldestDate,
                     "Age (Days)": row.ageDays,
                 }))
@@ -364,7 +366,7 @@ export default function ProductScannerPage() {
                             </p>
                         ) : (
                             <div className="mt-3 overflow-x-auto">
-                                <table className="w-full min-w-190 border-collapse text-left text-sm">
+                                <table className="w-full min-w-240 border-collapse text-left text-sm">
                                     <thead className="text-xs uppercase tracking-wide text-(--ink-soft)">
                                         <tr className="border-b border-(--line)">
                                             <th className="py-2 pr-3 font-medium">Product</th>
@@ -372,6 +374,8 @@ export default function ProductScannerPage() {
                                             <th className="px-3 py-2 text-right font-medium">Lot cost</th>
                                             <th className="px-3 py-2 font-medium">Warehouse</th>
                                             <th className="px-3 py-2 text-right font-medium">Qty</th>
+                                            <th className="px-3 py-2 font-medium">Last receive</th>
+                                            <th className="px-3 py-2 font-medium">Oldest receive</th>
                                             <th className="py-2 pl-3 font-medium">Age</th>
                                         </tr>
                                     </thead>
@@ -393,6 +397,8 @@ export default function ProductScannerPage() {
                                                     </p>
                                                 </td>
                                                 <td className="px-3 py-3 text-right font-semibold tabular-nums">{Math.round(row.quantity).toLocaleString("en-US")}</td>
+                                                <td className="px-3 py-3 tabular-nums">{row.lastReceivedDate || "-"}</td>
+                                                <td className="px-3 py-3 tabular-nums">{row.firstReceivedDate || "-"}</td>
                                                 <td className="py-3 pl-3">
                                                     <div className="flex items-center gap-3">
                                                         <div className="h-1.5 w-24 shrink-0 overflow-hidden rounded-full bg-(--chip)">
@@ -400,7 +406,6 @@ export default function ProductScannerPage() {
                                                         </div>
                                                         <div>
                                                             <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${ageBadge(row.ageDays)}`}>{ageText(row.ageDays)}</span>
-                                                            <p className="mt-0.5 text-[11px] text-(--ink-soft)">since {row.oldestDate}</p>
                                                         </div>
                                                     </div>
                                                 </td>

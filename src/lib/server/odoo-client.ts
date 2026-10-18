@@ -1329,6 +1329,67 @@ async function getMoneyConverter(credentials: OdooCredentials, uid: number): Pro
     };
 }
 
+/**
+ * The currency sales-target figures are shown in: the company's own currency when exactly one company is
+ * selected, otherwise AED (see getPrimaryCurrencyId).
+ */
+async function getTargetCurrencyId(
+    credentials: OdooCredentials,
+    uid: number,
+    fallbackAmounts: Array<{ currencyId: number }>
+): Promise<number | null> {
+    const selected = companyContextStorage.getStore() ?? [];
+    if (selected.length === 1) {
+        const companies = await runWithoutCompanyRestriction(() =>
+            executeKw<Array<{ currency_id?: unknown }>>(credentials, uid, "res.company", "read", [[selected[0]]], { fields: ["currency_id"] })
+        ).catch(() => [] as Array<{ currency_id?: unknown }>);
+        const currencyId = getRelationalId(companies[0]?.currency_id);
+        if (currencyId) return currencyId;
+    }
+    return getPrimaryCurrencyId(credentials, uid, fallbackAmounts);
+}
+
+/**
+ * currencyId -> multiplier into `primaryCurrencyId`, from the rates in the home company's currency table (which
+ * are expressed against the home currency, so the target is rebased: amount / rate[from] * rate[target]).
+ */
+async function buildTargetMultipliers(
+    credentials: OdooCredentials,
+    uid: number,
+    homeCompanyId: number | null,
+    primaryCurrencyId: number | null,
+    currencyIds: number[],
+    asOfDate: string
+): Promise<Map<number, number>> {
+    const multipliers = new Map<number, number>();
+    if (primaryCurrencyId) multipliers.set(primaryCurrencyId, 1);
+    const others = currencyIds.filter((id) => id !== primaryCurrencyId);
+    if (!homeCompanyId || !primaryCurrencyId || others.length === 0) return multipliers;
+
+    const homeCompany = await runWithoutCompanyRestriction(() =>
+        executeKw<Array<{ currency_id?: unknown }>>(credentials, uid, "res.company", "read", [[homeCompanyId]], { fields: ["currency_id"] })
+    ).catch(() => [] as Array<{ currency_id?: unknown }>);
+    const homeCurrencyId = getRelationalId(homeCompany[0]?.currency_id);
+
+    const rates = await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, [...others, primaryCurrencyId], asOfDate);
+    if (homeCurrencyId && !rates.has(homeCurrencyId)) rates.set(homeCurrencyId, 1);
+    const primaryRate = rates.get(primaryCurrencyId);
+    if (!primaryRate) return multipliers;
+
+    for (const currencyId of others) {
+        const rate = rates.get(currencyId);
+        if (rate) multipliers.set(currencyId, primaryRate / rate);
+    }
+    return multipliers;
+}
+
+async function getCurrencyCodes(credentials: OdooCredentials, uid: number, ids: number[]): Promise<Map<number, string>> {
+    const rows = await runWithoutCompanyRestriction(() =>
+        executeKw<Array<{ id: number; name: string }>>(credentials, uid, "res.currency", "read", [ids], { fields: ["name"], context: { active_test: false } })
+    ).catch(() => [] as Array<{ id: number; name: string }>);
+    return new Map(rows.map((row) => [Number(row.id), row.name]));
+}
+
 async function getInvoiceSalespersonField(
     credentials: OdooCredentials,
     uid: number
@@ -3824,7 +3885,7 @@ export async function getSalespersonMonthlyInvoices(
     // amount instead of blending mismatched currencies (or silently
     // converting them) into one number.
     const invoiceTransactionAmounts = getInvoiceTransactionAmounts(invoices);
-    const primaryCurrencyId = await getPrimaryCurrencyId(
+    const primaryCurrencyId = await getTargetCurrencyId(
         credentials,
         uid,
         Array.from(invoiceTransactionAmounts.values())
@@ -3833,6 +3894,7 @@ export async function getSalespersonMonthlyInvoices(
         (primaryCurrencyId &&
             Array.from(invoiceTransactionAmounts.values()).find((amount) => amount.currencyId === primaryCurrencyId)
                 ?.currencyCode) ||
+        (primaryCurrencyId ? (await getCurrencyCodes(credentials, uid, [primaryCurrencyId])).get(primaryCurrencyId) : "") ||
         TARGET_CURRENCY_CODE;
 
     // The "total cards" (Posted Invoice Total, Target Status, Progress Bar)
@@ -3850,10 +3912,7 @@ export async function getSalespersonMonthlyInvoices(
         )
     );
     const todayStr = new Date().toISOString().slice(0, 10);
-    const rateByCurrencyId = homeCompanyId
-        ? await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, nonPrimaryCurrencyIds, todayStr)
-        : new Map<number, number>();
-    const multiplierByCurrencyId = buildCurrencyMultipliers(primaryCurrencyId, rateByCurrencyId);
+    const multiplierByCurrencyId = await buildTargetMultipliers(credentials, uid, homeCompanyId, primaryCurrencyId, nonPrimaryCurrencyIds, todayStr);
 
     const currencyTotals = buildCurrencyTotals(Array.from(invoiceTransactionAmounts.values()), multiplierByCurrencyId);
 
@@ -3917,18 +3976,9 @@ export async function getSalespersonMonthlyInvoices(
                     .filter((currencyId) => !multiplierByCurrencyId.has(currencyId))
             )
         );
-        const creditNoteRateByCurrencyId = homeCompanyId && creditNoteNonPrimaryCurrencyIds.length > 0
-            ? await getCurrencyRatesToHomeCurrency(
-                credentials,
-                uid,
-                homeCompanyId,
-                creditNoteNonPrimaryCurrencyIds,
-                todayStr
-            )
-            : new Map<number, number>();
         creditNoteMultiplierByCurrencyId = new Map([
             ...multiplierByCurrencyId,
-            ...buildCurrencyMultipliers(null, creditNoteRateByCurrencyId),
+            ...(await buildTargetMultipliers(credentials, uid, homeCompanyId, primaryCurrencyId, creditNoteNonPrimaryCurrencyIds, todayStr)),
         ]);
 
         creditNoteCurrencyTotals = buildCurrencyTotals(absoluteCreditAmounts, creditNoteMultiplierByCurrencyId);
@@ -6260,7 +6310,7 @@ export async function getSalesTargetDetails(
     // matching how the main sales-target report now blends its totals — and
     // are only broken out separately (`otherCurrencyTotals`) if no rate is
     // configured for that currency.
-    const primaryCurrencyId = await getPrimaryCurrencyId(credentials, uid, []);
+    const primaryCurrencyId = await getTargetCurrencyId(credentials, uid, []);
     const homeCompanyId = await getHomeCompanyId(credentials, uid);
     const timeZone = await getUserTimezone(credentials, uid);
 
@@ -6326,10 +6376,7 @@ export async function getSalesTargetDetails(
         )
     );
     const todayStr = new Date().toISOString().slice(0, 10);
-    const orderRateByCurrencyId = homeCompanyId
-        ? await getCurrencyRatesToHomeCurrency(credentials, uid, homeCompanyId, orderNonPrimaryCurrencyIds, todayStr)
-        : new Map<number, number>();
-    const orderMultiplierByCurrencyId = buildCurrencyMultipliers(primaryCurrencyId, orderRateByCurrencyId);
+    const orderMultiplierByCurrencyId = await buildTargetMultipliers(credentials, uid, homeCompanyId, primaryCurrencyId, orderNonPrimaryCurrencyIds, todayStr);
 
     const partnerIds = Array.from(
         new Set(
@@ -6469,7 +6516,7 @@ export async function getSalesTargetDetails(
         startDate,
         endDate,
         totalBrandSales: Number(totalBrandSales.toFixed(2)),
-        primaryCurrencyCode: TARGET_CURRENCY_CODE,
+        primaryCurrencyCode: primaryCurrencyId ? (await getCurrencyCodes(credentials, uid, [primaryCurrencyId])).get(primaryCurrencyId) || TARGET_CURRENCY_CODE : TARGET_CURRENCY_CODE,
         primaryOrderCount: primaryOrderIds.size,
         otherCurrencyTotals: Array.from(otherCurrencyTotalsByCode.entries())
             .map(([currencyCode, value]) => ({
@@ -11810,6 +11857,9 @@ export type AgedStockRow = {
     quantity: number;
     /** Date the oldest units of this row arrived in the warehouse (Odoo's "incoming date"). */
     oldestDate: string;
+    /** Newest and oldest receipt of this product / lot (from suppliers, production, counts), "" when none is recorded. */
+    lastReceivedDate: string;
+    firstReceivedDate: string;
     ageDays: number;
 };
 
@@ -12054,6 +12104,16 @@ export async function refineAgedStock(
         entry.oldestMs = Math.min(entry.oldestMs, info.oldestMs);
         lotInfo.set(lotKey, entry);
     }
+    const receiptRange = new Map<string, { first: number; last: number }>();
+    for (const [lotKey, receipts] of receiptsByKey) {
+        let first = Infinity;
+        let last = 0;
+        for (const receipt of receipts) {
+            first = Math.min(first, receipt.ms);
+            last = Math.max(last, receipt.ms);
+        }
+        receiptRange.set(lotKey, { first, last });
+    }
     const layersByLot = new Map<string, AgedLayer[]>();
     const moveIds = new Set<number>();
     const pendingCost = new Map<AgedLayer, number>();
@@ -12096,6 +12156,7 @@ export async function refineAgedStock(
     const warehouseAged: Record<string, number> = {};
     let agedUnits = 0;
     for (const info of candidateList) {
+        const range = receiptRange.get(lotKeyOf(info.productId, info.lotName));
         // This warehouse's share of the product / lot's receipts.
         const share = info.lotTotal > 0 ? info.quantity / info.lotTotal : 1;
         const layers = (layersByLot.get(lotKeyOf(info.productId, info.lotName)) ?? []).map((layer) => ({ ...layer, quantity: layer.quantity * share }));
@@ -12125,6 +12186,8 @@ export async function refineAgedStock(
             locations: info.locations,
             quantity: agedQuantity,
             oldestDate: new Date(oldestMs).toISOString().slice(0, 10),
+            lastReceivedDate: range ? new Date(range.last).toISOString().slice(0, 10) : "",
+            firstReceivedDate: range ? new Date(range.first).toISOString().slice(0, 10) : "",
             ageDays: ageOf(oldestMs),
         });
     }
