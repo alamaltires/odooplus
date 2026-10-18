@@ -13,9 +13,9 @@ import { visibleDashboardCards } from "@/lib/dashboard-cards";
 
 export const maxDuration = 60;
 
-const cacheKey = (userId: string, companyIds: number[]) => `v7_${userId}_${[...companyIds].sort((a, b) => a - b).join("-") || "all"}`;
+const cacheKey = (userId: string, companyIds: number[]) => `v8_${userId}_${[...companyIds].sort((a, b) => a - b).join("-") || "all"}`;
 
-// Bump the `v7_` prefix below whenever a card's data shape changes, so old saved figures are ignored.
+// Bump the `v8_` prefix below whenever a card's data shape changes, so old saved figures are ignored.
 
 /**
  * Dashboard figures. Saved per user (and company selection, since the numbers depend on the
@@ -49,18 +49,8 @@ export async function POST(request: Request) {
         const { credentials } = await getOdooCredentialsFromRequest(request);
         const { ids: salespersonIds } = await getAllowedSalespersonIds(request, credentials);
         const tags = await getCustomerTagScope(request);
-        // Saved carrier tracking (our own database) so Shipments matches the PO Tracking page.
-        let trackedByBl: Record<string, never> | undefined;
-        if (cardId === "shipments") {
-            trackedByBl = {};
-            const snapshot = await getAdminDb().collection("po-tracking").limit(2000).get();
-            for (const doc of snapshot.docs) {
-                const saved = doc.data() as { blNumber?: string };
-                if (saved.blNumber) (trackedByBl as Record<string, unknown>)[saved.blNumber] = saved;
-            }
-        }
         const data = await runWithCompanyIds(companyIds, () =>
-            computeDashboardCard(credentials, cardId, { salespersonIds, tags, trackedByBl })
+            computeDashboardCard(credentials, cardId, { salespersonIds, tags })
         );
 
         const fetchedAt = new Date().toISOString();

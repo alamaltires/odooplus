@@ -11504,32 +11504,7 @@ export async function getPartnerLedger(
 // Dashboard cards: a handful of aggregate (read_group) queries each, no row dumps.
 // ---------------------------------------------------------------------------
 
-export type DashboardScope = {
-    salespersonIds: number[] | null;
-    tags: CustomerTagFilter;
-    /** Saved carrier tracking per B/L (read from our own database by the API route). */
-    trackedByBl?: Record<string, DashboardTracking>;
-};
-
-/** The parts of a saved tracking result the dashboard needs. */
-export type DashboardTracking = {
-    status?: string;
-    origin?: { departure?: string } | null;
-    destination?: { arrival?: string } | null;
-    containers?: Array<{ events?: Array<{ isActual?: boolean; description?: string }> }>;
-};
-
-/** Same stage rules as the PO Tracking page. */
-function dashboardStage(tracking: DashboardTracking | undefined): "waiting" | "departed" | "arrived" | "delivered" {
-    if (!tracking) return "waiting";
-    const actual = (tracking.containers ?? []).flatMap((container) => container.events ?? []).filter((event) => event.isActual);
-    const has = (pattern: RegExp) => actual.some((event) => pattern.test(event.description ?? ""));
-    if (String(tracking.status ?? "").toUpperCase().includes("DELIVER") || has(/Empty Container Returned|Delivery to Consignee/i)) return "delivered";
-    if (has(/Arrival at Port of Discharg|Unloaded.*Discharg/i)) return "arrived";
-    const departure = tracking.origin?.departure ? new Date(tracking.origin.departure) : null;
-    if (has(/Departure from Port of Loading|Loaded on/i) || (departure && !Number.isNaN(departure.getTime()) && departure.getTime() <= Date.now())) return "departed";
-    return "waiting";
-}
+export type DashboardScope = { salespersonIds: number[] | null; tags: CustomerTagFilter };
 
 function addDays(date: string, days: number) {
     const value = new Date(`${date}T00:00:00`);
@@ -11658,44 +11633,29 @@ export async function computeDashboardCard(credentials: OdooCredentials, card: s
             return { count: count(rows), total: sum(rows, "amount_total") };
         }
 
-        case "shipments": {
-            // Same logic as the PO Tracking page: one shipment per B/L, the carrier's ETA when it is
-            // tracked (the PO's expected date otherwise), and Odoo's receipt status for arrived goods.
-            const { orders } = await getImportedPurchaseOrdersForTracking(credentials, {});
-            const shipments = new Map<string, { orders: PoTrackingOrder[] }>();
-            for (const order of orders) {
-                for (const blNumber of new Set(order.containers.map((container) => container.blNumber))) {
-                    const entry = shipments.get(blNumber) ?? { orders: [] };
-                    if (!entry.orders.some((existing) => existing.id === order.id)) entry.orders.push(order);
-                    shipments.set(blNumber, entry);
-                }
+        case "stock": {
+            // One grouped query over the internal locations; rolled up per warehouse (first part of the location path).
+            const rows = await group(
+                "stock.quant",
+                [["location_id.usage", "=", "internal"], ["quantity", ">", 0]],
+                ["quantity", "reserved_quantity"],
+                ["location_id"],
+                { limit: 3000 }
+            );
+            const byWarehouse = new Map<string, { units: number; reserved: number }>();
+            for (const row of rows) {
+                const name = getRelationalName(row.location_id).split("/")[0].trim() || "Unknown";
+                const entry = byWarehouse.get(name) ?? { units: 0, reserved: 0 };
+                entry.units += Number(row.quantity ?? 0);
+                entry.reserved += Number(row.reserved_quantity ?? 0);
+                byWarehouse.set(name, entry);
             }
-            const result = { onTheWay: 0, late: 0, dueWeek: 0, atPort: 0, untracked: 0, unitsWeek: 0 };
-            const nowMs = Date.now();
-            for (const [blNumber, shipment] of shipments) {
-                if (shipment.orders.every((order) => order.fullyReceived || order.receiptDone)) continue;
-                const tracking = scope.trackedByBl?.[blNumber];
-                if (!tracking) {
-                    result.untracked += 1;
-                    continue;
-                }
-                const stage = dashboardStage(tracking);
-                if (stage === "arrived" || stage === "delivered") {
-                    result.atPort += 1;
-                    continue;
-                }
-                result.onTheWay += 1;
-                const etaSource = tracking.destination?.arrival || shipment.orders[0]?.expectedArrival;
-                const eta = etaSource ? new Date(etaSource) : null;
-                if (!eta || Number.isNaN(eta.getTime())) continue;
-                const days = Math.ceil((eta.getTime() - nowMs) / 86_400_000);
-                if (days < 0) result.late += 1;
-                else if (days <= 7) {
-                    result.dueWeek += 1;
-                    result.unitsWeek += shipment.orders.reduce((total, order) => total + order.totalQty / Math.max(1, new Set(order.containers.map((c) => c.blNumber)).size), 0);
-                }
-            }
-            return { ...result, unitsWeek: Math.round(result.unitsWeek) };
+            const warehouses = Array.from(byWarehouse, ([name, value]) => ({ name, ...value })).sort((a, b) => b.units - a.units);
+            return {
+                total: warehouses.reduce((sum, item) => sum + item.units, 0),
+                reserved: warehouses.reduce((sum, item) => sum + item.reserved, 0),
+                warehouses: warehouses.slice(0, 6),
+            };
         }
 
         case "topProducts":

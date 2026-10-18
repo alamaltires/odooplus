@@ -197,78 +197,44 @@ function Stat({ label, children, tone }: { label: string; children: ReactNode; t
     );
 }
 
-function ShipmentsDonut({ data }: { data: DashboardCardData["shipments"] }) {
-    const [hover, setHover] = useState<number | null>(null);
-    const later = Math.max(0, data.onTheWay - data.late - data.dueWeek);
-    const slices = [
-        { label: "Running late", value: data.late, color: "#ef4444" },
-        { label: "Arriving in 7 days", value: data.dueWeek, color: "#f59e0b" },
-        { label: "On the way", value: later, color: "#0ea5e9" },
-        { label: "At port, awaiting receipt", value: data.atPort, color: "#10b981" },
-        { label: "Not tracked yet", value: data.untracked, color: "#cbd5e1" },
-    ];
-    const total = slices.reduce((sum, slice) => sum + slice.value, 0);
-    if (total === 0) return <p className="text-sm text-(--ink-soft)">No open shipments.</p>;
-
-    const GAP = total > slices.filter((slice) => slice.value > 0).length ? 0.8 : 0;
-    let offset = 0;
-    const arcs = slices.map((slice, index) => {
-        const length = (slice.value / total) * 100;
-        const arc = { ...slice, index, length, start: offset };
-        offset += length;
-        return arc;
-    });
-    const active = hover !== null ? slices[hover] : null;
-
+function StockCard({ data }: { data: DashboardCardData["stock"] }) {
+    if (data.total <= 0) return <p className="text-sm text-(--ink-soft)">No stock on hand.</p>;
+    const free = Math.max(0, data.total - data.reserved);
+    const freeShare = (free / data.total) * 100;
+    const top = Math.max(...data.warehouses.map((item) => item.units), 1);
     return (
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-4">
-            <div className="relative h-36 w-36 shrink-0">
-                <svg viewBox="0 0 42 42" className="h-full w-full -rotate-90" role="img" aria-label="Open shipments by status">
-                    <circle cx="21" cy="21" r="15.915" fill="none" stroke="var(--chip)" strokeWidth="5" />
-                    {arcs
-                        .filter((arc) => arc.value > 0)
-                        .map((arc) => (
-                            <circle
-                                key={arc.label}
-                                cx="21"
-                                cy="21"
-                                r="15.915"
-                                fill="none"
-                                stroke={arc.color}
-                                strokeWidth={hover === arc.index ? 6.5 : 5}
-                                strokeDasharray={`${Math.max(arc.length - GAP, 0.5)} ${100 - Math.max(arc.length - GAP, 0.5)}`}
-                                strokeDashoffset={-arc.start}
-                                pathLength={100}
-                                className="transition-[stroke-width] duration-200 animate-[dash-ring_1s_ease-out_both]"
-                                style={{ animationDelay: `${arc.index * 120}ms`, opacity: hover === null || hover === arc.index ? 1 : 0.35 }}
-                                onMouseEnter={() => setHover(arc.index)}
-                                onMouseLeave={() => setHover(null)}
-                            />
-                        ))}
-                </svg>
-                <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
-                    <span className="font-display text-3xl leading-none tabular-nums">
-                        <Count value={active ? active.value : total} />
-                    </span>
-                    <span className="mt-1 max-w-20 text-[10px] leading-tight text-(--ink-soft)">{active ? active.label : "open shipments"}</span>
+        <div className="grid items-start gap-5 sm:grid-cols-[minmax(0,11rem)_1fr]">
+            <div>
+                <p className="font-display text-4xl leading-none tabular-nums">
+                    <Count value={data.total} />
+                </p>
+                <p className="mt-1.5 text-xs text-(--ink-soft)">units on hand</p>
+                <div className="mt-4 flex h-2 overflow-hidden rounded-full bg-(--chip)">
+                    <div className="h-full origin-left bg-emerald-500 animate-[dash-bar_1s_ease-out_both]" style={{ width: `${freeShare}%` }} />
                 </div>
+                <p className="mt-1.5 text-xs text-(--ink-soft)">
+                    <span className="font-semibold text-emerald-700">{Math.round(free).toLocaleString("en-US")}</span> free to sell ({freeShare.toFixed(0)}%)
+                    <br />
+                    {Math.round(data.reserved).toLocaleString("en-US")} reserved for orders
+                </p>
             </div>
-
-            <ul className="min-w-40 flex-1 space-y-1.5 text-sm">
-                {slices.map((slice, index) => (
-                    <li
-                        key={slice.label}
-                        onMouseEnter={() => slice.value > 0 && setHover(index)}
-                        onMouseLeave={() => setHover(null)}
-                        className={`flex items-center gap-2 rounded-lg px-1.5 py-0.5 transition ${hover === index ? "bg-(--chip)" : ""} ${slice.value === 0 ? "opacity-50" : ""}`}
-                    >
-                        <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: slice.color }} />
-                        <span className="min-w-0 flex-1 truncate text-(--ink-soft)">{slice.label}</span>
-                        <span className="font-semibold tabular-nums">{slice.value}</span>
-                        <span className="w-9 text-right text-xs text-(--ink-soft) tabular-nums">{Math.round((slice.value / total) * 100)}%</span>
+            <ul className="space-y-3">
+                {data.warehouses.map((item, index) => (
+                    <li key={item.name}>
+                        <div className="flex items-baseline justify-between gap-3 text-sm">
+                            <span className="min-w-0 truncate font-medium">{item.name}</span>
+                            <span className="shrink-0 tabular-nums">
+                                {Math.round(item.units).toLocaleString("en-US")} <span className="text-xs text-(--ink-soft)">{((item.units / data.total) * 100).toFixed(0)}%</span>
+                            </span>
+                        </div>
+                        <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-(--chip)">
+                            <div
+                                className="h-full origin-left rounded-full bg-gradient-to-r from-(--brand) to-orange-400 animate-[dash-bar_0.9s_ease-out_both]"
+                                style={{ width: `${Math.max(3, (item.units / top) * 100)}%`, animationDelay: `${index * 80}ms` }}
+                            />
+                        </div>
                     </li>
                 ))}
-                {data.unitsWeek > 0 ? <li className="px-1.5 pt-1 text-xs text-(--ink-soft)">~{data.unitsWeek.toLocaleString("en-US")} units arriving this week</li> : null}
             </ul>
         </div>
     );
@@ -422,10 +388,8 @@ function CardBody({ id, data }: { id: DashboardCardId; data: unknown }) {
                 </Stat>
             );
         }
-        case "shipments": {
-            const d = data as DashboardCardData["shipments"];
-            return <ShipmentsDonut data={d} />;
-        }
+        case "stock":
+            return <StockCard data={data as DashboardCardData["stock"]} />;
         case "topProducts":
         case "topBrands": {
             const rows = (data as DashboardCardData["topProducts"]).rows;
@@ -472,7 +436,7 @@ export default function DashboardPage() {
         return () => window.clearInterval(timer);
     }, []);
 
-    const storageKey = user ? `dashboard-saved-v7-${user.uid}` : null;
+    const storageKey = user ? `dashboard-saved-v8-${user.uid}` : null;
     const persist = useCallback(
         (cards: Record<string, CardState>) => {
             if (!storageKey) return;
