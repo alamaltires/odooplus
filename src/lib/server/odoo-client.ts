@@ -11885,6 +11885,11 @@ export async function refineAgedStock(
     const events = new Map<string, Array<{ ms: number; quantity: number; moveId: number }>>();
 
     if (productIds.length > 0) {
+        // Plain id lists are far cheaper for Odoo than joining on location usage for every movement line.
+        const internal = await searchReadAll(credentials, uid, "stock.location", [["usage", "=", "internal"]], ["id"]);
+        const internalIds = new Set(internal.map((location) => Number(location.id)));
+        const internalList = Array.from(internalIds);
+
         const lines = await searchReadAll(
             credentials,
             uid,
@@ -11893,10 +11898,10 @@ export async function refineAgedStock(
                 ["product_id", "in", productIds],
                 ["state", "=", "done"],
                 "|",
-                ["location_id.usage", "=", "internal"],
-                ["location_dest_id.usage", "=", "internal"],
+                ["location_id", "in", internalList],
+                ["location_dest_id", "in", internalList],
             ],
-            ["product_id", "lot_id", "move_id", "quantity", "qty_done", "date", "location_id", "location_dest_id", "location_usage", "location_dest_usage"],
+            ["product_id", "lot_id", "move_id", "quantity", "qty_done", "date", "location_id", "location_dest_id"],
             { order: "date asc, id asc" }
         );
 
@@ -11912,8 +11917,10 @@ export async function refineAgedStock(
             if (!(quantity > 0) || Number.isNaN(date)) continue;
             const productId = getRelationalId(line.product_id) ?? 0;
             const lotName = getRelationalName(line.lot_id);
-            const from = line.location_usage === "internal" ? getRelationalName(line.location_id).split("/")[0].trim() : "";
-            const to = line.location_dest_usage === "internal" ? getRelationalName(line.location_dest_id).split("/")[0].trim() : "";
+            const fromId = getRelationalId(line.location_id);
+            const toId = getRelationalId(line.location_dest_id);
+            const from = fromId && internalIds.has(fromId) ? getRelationalName(line.location_id).split("/")[0].trim() : "";
+            const to = toId && internalIds.has(toId) ? getRelationalName(line.location_dest_id).split("/")[0].trim() : "";
             if (from === to) continue; // moves inside one warehouse do not change its stock
             if (to) push(`${productId}|${lotName}|${to}`, { ms: date, quantity, moveId: getRelationalId(line.move_id) ?? 0 });
             if (from) push(`${productId}|${lotName}|${from}`, { ms: date, quantity: -quantity, moveId: 0 });

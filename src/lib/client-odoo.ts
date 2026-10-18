@@ -969,6 +969,7 @@ type AgedStockBase = Omit<AgedStockResponse, "rows" | "truncated" | "scannedAt" 
 type AgedStockRefined = { rows: AgedStockRow[]; bucketUnits: number[]; agedUnits: number; warehouseAged: Record<string, number> };
 
 const AGED_BATCH_SIZE = 150;
+const AGED_PARALLEL = 3;
 
 /**
  * On-hand stock older than `minAgeDays`, per product / lot / warehouse. Done in several short requests
@@ -996,21 +997,28 @@ export async function getAgedStock(
     let done = 0;
     onProgress?.(0, batches.length);
 
-    for (const batch of batches) {
-        const refined = await post<AgedStockRefined>("/api/odoo/aged-stock", {
-            stage: "refine",
-            minAgeDays: base.minAgeDays,
-            candidates: batch,
-        });
-        rows.push(...refined.rows);
-        agedUnits += refined.agedUnits;
-        refined.bucketUnits.forEach((units, index) => {
-            if (buckets[index]) buckets[index].units += units;
-        });
-        for (const [name, units] of Object.entries(refined.warehouseAged)) warehouseAged.set(name, (warehouseAged.get(name) ?? 0) + units);
-        done += 1;
-        onProgress?.(done, batches.length);
+    // A few batches at a time: faster overall, while still gentle on the Odoo server.
+    let next = 0;
+    async function worker() {
+        while (next < batches.length) {
+            const batch = batches[next];
+            next += 1;
+            const refined = await post<AgedStockRefined>("/api/odoo/aged-stock", {
+                stage: "refine",
+                minAgeDays: base.minAgeDays,
+                candidates: batch,
+            });
+            rows.push(...refined.rows);
+            agedUnits += refined.agedUnits;
+            refined.bucketUnits.forEach((units, index) => {
+                if (buckets[index]) buckets[index].units += units;
+            });
+            for (const [name, units] of Object.entries(refined.warehouseAged)) warehouseAged.set(name, (warehouseAged.get(name) ?? 0) + units);
+            done += 1;
+            onProgress?.(done, batches.length);
+        }
     }
+    await Promise.all(Array.from({ length: Math.min(AGED_PARALLEL, batches.length) }, () => worker()));
 
     rows.sort((a, b) => b.ageDays - a.ageDays || b.quantity - a.quantity);
     const limited = rows.slice(0, 5000);
