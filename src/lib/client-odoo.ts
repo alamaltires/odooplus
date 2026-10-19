@@ -1000,11 +1000,27 @@ export function getPricelists() {
     return post<{ pricelists: PricelistOption[] }>("/api/odoo/pricelists", {});
 }
 
+export type PriceListFilterOptions = {
+    categories: Array<{ id: number; name: string }>;
+    oe: { label: string; options: Array<{ id: number | string; name: string }> } | null;
+    lots: string[];
+};
+
+export function getPriceListFilterOptions() {
+    return post<PriceListFilterOptions>("/api/odoo/price-list-filters", {});
+}
+
 export function getPriceListRequest(input: {
     brandIds: number[];
     excludeBrandIds: number[];
     originIds: number[];
     excludeOriginIds: number[];
+    categoryIds: number[];
+    excludeCategoryIds: number[];
+    oeValues: Array<number | string>;
+    excludeOeValues: Array<number | string>;
+    lotNames: string[];
+    excludeLotNames: string[];
     pricelistIds: number[];
     inStockOnly: boolean;
     onlyPriced: boolean;

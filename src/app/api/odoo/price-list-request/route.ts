@@ -15,9 +15,15 @@ export async function POST(request: Request) {
                 excludeBrandIds: body.excludeBrandIds ?? [],
                 originIds: body.originIds ?? [],
                 excludeOriginIds: body.excludeOriginIds ?? [],
+                categoryIds: body.categoryIds ?? [],
+                excludeCategoryIds: body.excludeCategoryIds ?? [],
+                oeValues: body.oeValues ?? [],
+                excludeOeValues: body.excludeOeValues ?? [],
+                lotNames: body.lotNames ?? [],
+                excludeLotNames: body.excludeLotNames ?? [],
                 pricelistIds: body.pricelistIds ?? [],
                 inStockOnly: Boolean(body.inStockOnly),
-                onlyPriced: body.onlyPriced !== false,
+                onlyPriced: body.onlyPriced === true,
             })
         );
         return NextResponse.json(result);

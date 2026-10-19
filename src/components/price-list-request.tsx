@@ -1,18 +1,22 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, Check, ChevronDown, Download, FileSpreadsheet, Search, X } from "lucide-react";
+import { AlertCircle, ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, Download, FileSpreadsheet, Search, X } from "lucide-react";
 import {
+    getPriceListFilterOptions,
     getPriceListRequest,
     getPricelists,
     getProductBrands,
     getProductOrigins,
+    type PriceListFilterOptions,
     type PriceListResponse,
     type PriceListRow,
     type PricelistOption,
 } from "@/lib/client-odoo";
 
-type Option = { id: number; name: string };
+type Option = { id: number | string; name: string };
+// Very long lists (lot numbers) only render the first matches; typing narrows them.
+const MAX_SHOWN = 200;
 // 0 means "show all".
 const PAGE_SIZES = [25, 50, 100, 250, 0];
 
@@ -29,8 +33,8 @@ function MultiPick({
     hint: string;
     tone: "include" | "exclude";
     options: Option[];
-    value: number[];
-    onChange: (next: number[]) => void;
+    value: Array<number | string>;
+    onChange: (next: Array<number | string>) => void;
 }) {
     const [open, setOpen] = useState(false);
     const [search, setSearch] = useState("");
@@ -57,7 +61,10 @@ function MultiPick({
         return query ? options.filter((option) => option.name.toLowerCase().includes(query)) : options;
     }, [options, search]);
     const chipTone = tone === "include" ? "bg-[rgba(74,184,72,0.14)] text-emerald-800" : "bg-[rgba(229,26,39,0.1)] text-(--brand)";
-    const picked = options.filter((option) => value.includes(option.id));
+    const picked = useMemo(() => {
+        const byId = new Map(options.map((option) => [option.id, option]));
+        return value.map((id) => byId.get(id) ?? { id, name: String(id) });
+    }, [options, value]);
 
     return (
         <div ref={ref} className="relative">
@@ -86,7 +93,7 @@ function MultiPick({
                     </div>
                     <ul className="max-h-60 overflow-x-hidden overflow-y-auto p-1">
                         {filtered.length === 0 ? <li className="px-3 py-2 text-sm text-(--ink-soft)">No matches.</li> : null}
-                        {filtered.map((option) => {
+                        {filtered.slice(0, MAX_SHOWN).map((option) => {
                             const checked = value.includes(option.id);
                             return (
                                 <li key={option.id}>
@@ -102,6 +109,11 @@ function MultiPick({
                                 </li>
                             );
                         })}
+                        {filtered.length > MAX_SHOWN ? (
+                            <li className="px-3 py-2 text-center text-xs text-(--ink-soft)">
+                                Showing {MAX_SHOWN} of {filtered.length.toLocaleString("en-US")} — keep typing to narrow down.
+                            </li>
+                        ) : null}
                     </ul>
                 </div>
             ) : null}
@@ -146,13 +158,21 @@ export function PriceListRequest() {
     const [optionsError, setOptionsError] = useState<string | null>(null);
     const [listsLoaded, setListsLoaded] = useState(false);
 
-    const [brandIds, setBrandIds] = useState<number[]>([]);
-    const [excludeBrandIds, setExcludeBrandIds] = useState<number[]>([]);
-    const [originIds, setOriginIds] = useState<number[]>([]);
-    const [excludeOriginIds, setExcludeOriginIds] = useState<number[]>([]);
+    const [filterOptions, setFilterOptions] = useState<PriceListFilterOptions | null>(null);
+    const [brandIds, setBrandIds] = useState<Array<number | string>>([]);
+    const [excludeBrandIds, setExcludeBrandIds] = useState<Array<number | string>>([]);
+    const [originIds, setOriginIds] = useState<Array<number | string>>([]);
+    const [excludeOriginIds, setExcludeOriginIds] = useState<Array<number | string>>([]);
+    const [categoryIds, setCategoryIds] = useState<Array<number | string>>([]);
+    const [excludeCategoryIds, setExcludeCategoryIds] = useState<Array<number | string>>([]);
+    const [oeValues, setOeValues] = useState<Array<number | string>>([]);
+    const [excludeOeValues, setExcludeOeValues] = useState<Array<number | string>>([]);
+    const lotOptions = useMemo(() => (filterOptions?.lots ?? []).map((name) => ({ id: name, name })), [filterOptions]);
+    const [lotNames, setLotNames] = useState<Array<number | string>>([]);
+    const [excludeLotNames, setExcludeLotNames] = useState<Array<number | string>>([]);
     const [pricelistIds, setPricelistIds] = useState<number[]>([]);
-    const [inStockOnly, setInStockOnly] = useState(false);
-    const [onlyPriced, setOnlyPriced] = useState(false);
+    const [hideOutOfStock, setHideOutOfStock] = useState(true);
+    const [hideUnpriced, setHideUnpriced] = useState(true);
 
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -160,6 +180,8 @@ export function PriceListRequest() {
     const [search, setSearch] = useState("");
     const [page, setPage] = useState(1);
     const [pageSize, setPageSize] = useState(50);
+    // null = the order Odoo data came in (brand, then product). The same order is used for the Excel file.
+    const [sort, setSort] = useState<{ key: string; dir: "asc" | "desc" } | null>(null);
     const [exporting, setExporting] = useState(false);
 
     // Each list loads on its own, so one failing never hides the others (the pricelists in particular).
@@ -167,13 +189,15 @@ export function PriceListRequest() {
         const failures: string[] = [];
         const report = (what: string, reason: unknown) =>
             failures.push(`${what}: ${reason instanceof Error ? reason.message : "failed to load"}`);
-        Promise.allSettled([getProductBrands(), getProductOrigins(), getPricelists()]).then(([brandData, originData, listData]) => {
+        Promise.allSettled([getProductBrands(), getProductOrigins(), getPricelists(), getPriceListFilterOptions()]).then(([brandData, originData, listData, extraData]) => {
             if (brandData.status === "fulfilled") setBrands(brandData.value.brands);
             else report("Brands", brandData.reason);
             if (originData.status === "fulfilled") setOrigins(originData.value.origins);
             else report("Origins", originData.reason);
             if (listData.status === "fulfilled") setPricelists(listData.value.pricelists);
             else report("Pricelists", listData.reason);
+            if (extraData.status === "fulfilled") setFilterOptions(extraData.value);
+            else report("Categories / OE / lots", extraData.reason);
             setListsLoaded(true);
             if (failures.length > 0) setOptionsError(failures.join(" · "));
         });
@@ -187,7 +211,22 @@ export function PriceListRequest() {
         setLoading(true);
         setError(null);
         try {
-            const data = await getPriceListRequest({ brandIds, excludeBrandIds, originIds, excludeOriginIds, pricelistIds, inStockOnly, onlyPriced });
+            const numbers = (values: Array<number | string>) => values.map(Number);
+            const data = await getPriceListRequest({
+                brandIds: numbers(brandIds),
+                excludeBrandIds: numbers(excludeBrandIds),
+                originIds: numbers(originIds),
+                excludeOriginIds: numbers(excludeOriginIds),
+                categoryIds: numbers(categoryIds),
+                excludeCategoryIds: numbers(excludeCategoryIds),
+                oeValues,
+                excludeOeValues,
+                lotNames: lotNames.map(String),
+                excludeLotNames: excludeLotNames.map(String),
+                pricelistIds,
+                inStockOnly: hideOutOfStock,
+                onlyPriced: hideUnpriced,
+            });
             setResult(data);
             setPage(1);
             setSearch("");
@@ -201,8 +240,34 @@ export function PriceListRequest() {
     const shownRows = useMemo(() => {
         if (!result) return [];
         const query = search.trim().toLowerCase();
-        return query ? result.rows.filter((row) => `${row.searchName} ${row.name} ${row.brand} ${row.origin} ${row.pattern} ${row.rim} ${row.lotName} ${row.lotYear}`.toLowerCase().includes(query)) : result.rows;
-    }, [result, search]);
+        const filtered = query ? result.rows.filter((row) => `${row.searchName} ${row.name} ${row.category} ${row.brand} ${row.origin} ${row.pattern} ${row.rim} ${row.lotName} ${row.lotYear}`.toLowerCase().includes(query)) : result.rows;
+        if (!sort) return filtered;
+
+        const text = (row: PriceListRow): string | number | null => {
+            switch (sort.key) {
+                case "searchName": return row.searchName;
+                case "name": return row.name;
+                case "category": return row.category;
+                case "brand": return row.brand;
+                case "origin": return row.origin;
+                case "pattern": return row.pattern;
+                case "rim": return row.rim;
+                case "lot": return row.lotName;
+                case "available": return row.available;
+                default: return sort.key.startsWith("price:") ? row.prices[sort.key.slice(6)] ?? null : "";
+            }
+        };
+        const factor = sort.dir === "asc" ? 1 : -1;
+        return [...filtered].sort((a, b) => {
+            const left = text(a);
+            const right = text(b);
+            // Empty values always go last, whichever way it is sorted.
+            if (left === null || left === "") return right === null || right === "" ? 0 : 1;
+            if (right === null || right === "") return -1;
+            if (typeof left === "number" && typeof right === "number") return (left - right) * factor;
+            return String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" }) * factor;
+        });
+    }, [result, search, sort]);
     const pageCount = pageSize === 0 ? 1 : Math.max(1, Math.ceil(shownRows.length / pageSize));
     const currentPage = Math.min(page, pageCount);
     const pageRows = pageSize === 0 ? shownRows : shownRows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
@@ -223,6 +288,33 @@ export function PriceListRequest() {
         return out;
     })();
 
+    function sortBy(key: string) {
+        setSort((current) => (current?.key !== key ? { key, dir: "asc" } : current.dir === "asc" ? { key, dir: "desc" } : null));
+        setPage(1);
+    }
+
+    const sortHeader = (key: string, label: string, align: "left" | "right" = "left") => (
+        <th
+            key={key}
+            aria-sort={sort?.key === key ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}
+            className={`whitespace-nowrap border border-(--line) p-0 font-medium ${align === "right" ? "text-right" : ""}`}
+        >
+            <button
+                type="button"
+                onClick={() => sortBy(key)}
+                className={`flex w-full items-center gap-1 px-3 py-2 transition hover:bg-white/70 hover:text-(--ink) ${align === "right" ? "justify-end" : ""} ${sort?.key === key ? "text-(--brand)" : ""}`}
+                title="Click to sort; click again to reverse, and a third time to clear"
+            >
+                {label}
+                {sort?.key === key ? (
+                    sort.dir === "asc" ? <ArrowUp className="h-3 w-3" aria-hidden="true" /> : <ArrowDown className="h-3 w-3" aria-hidden="true" />
+                ) : (
+                    <ArrowUpDown className="h-3 w-3 opacity-40" aria-hidden="true" />
+                )}
+            </button>
+        </th>
+    );
+
     const priceHeader = (list: PricelistOption) => (list.currency ? `${list.name} (${list.currency})` : list.name);
 
     async function download() {
@@ -234,6 +326,7 @@ export function PriceListRequest() {
                 const out: Record<string, string | number> = {
                     "Search Name": row.searchName,
                     Product: row.name,
+                    Category: row.category,
                     Brand: row.brand,
                     Origin: row.origin,
                     Pattern: row.pattern,
@@ -245,7 +338,7 @@ export function PriceListRequest() {
                 return out;
             });
             const worksheet = XLSX.utils.json_to_sheet(sheetRows);
-            worksheet["!cols"] = [{ wch: 24 }, { wch: 46 }, { wch: 16 }, { wch: 14 }, { wch: 18 }, { wch: 8 }, { wch: 8 }, { wch: 12 }, ...result.pricelists.map(() => ({ wch: 18 }))];
+            worksheet["!cols"] = [{ wch: 24 }, { wch: 46 }, { wch: 18 }, { wch: 16 }, { wch: 14 }, { wch: 18 }, { wch: 8 }, { wch: 8 }, { wch: 12 }, ...result.pricelists.map(() => ({ wch: 18 }))];
             const workbook = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(workbook, worksheet, "Price List");
             XLSX.writeFile(workbook, `price-list-${new Date().toISOString().slice(0, 10)}.xlsx`);
@@ -276,6 +369,20 @@ export function PriceListRequest() {
                     <MultiPick label="Exclude brands" hint="None excluded" tone="exclude" options={brands} value={excludeBrandIds} onChange={setExcludeBrandIds} />
                     <MultiPick label="Origin" hint="All origins" tone="include" options={origins} value={originIds} onChange={setOriginIds} />
                     <MultiPick label="Exclude origin" hint="None excluded" tone="exclude" options={origins} value={excludeOriginIds} onChange={setExcludeOriginIds} />
+                    <MultiPick label="Category" hint="All categories" tone="include" options={filterOptions?.categories ?? []} value={categoryIds} onChange={setCategoryIds} />
+                    <MultiPick label="Exclude category" hint="None excluded" tone="exclude" options={filterOptions?.categories ?? []} value={excludeCategoryIds} onChange={setExcludeCategoryIds} />
+                    {filterOptions && !filterOptions.oe ? (
+                        <p className="rounded-xl bg-(--chip) px-3 py-2 text-xs text-(--ink-soft) sm:col-span-2">
+                            The &ldquo;OE Specifications&rdquo; field was not found on products in Odoo, so that filter is not available.
+                        </p>
+                    ) : (
+                        <>
+                            <MultiPick label={filterOptions?.oe?.label ?? "OE Specifications"} hint="Any" tone="include" options={filterOptions?.oe?.options ?? []} value={oeValues} onChange={setOeValues} />
+                            <MultiPick label={`Exclude ${filterOptions?.oe?.label ?? "OE Specifications"}`} hint="None excluded" tone="exclude" options={filterOptions?.oe?.options ?? []} value={excludeOeValues} onChange={setExcludeOeValues} />
+                        </>
+                    )}
+                    <MultiPick label="Lot" hint="All lots" tone="include" options={lotOptions} value={lotNames} onChange={setLotNames} />
+                    <MultiPick label="Exclude lot" hint="None excluded" tone="exclude" options={lotOptions} value={excludeLotNames} onChange={setExcludeLotNames} />
                 </div>
 
                 <div className="mt-5">
@@ -312,12 +419,12 @@ export function PriceListRequest() {
                 <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-(--line) pt-4">
                     <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
                         <label className="inline-flex cursor-pointer items-center gap-2">
-                            <input type="checkbox" checked={inStockOnly} onChange={(event) => setInStockOnly(event.target.checked)} className="h-4 w-4 rounded border-(--line)" />
-                            Only products in stock
+                            <input type="checkbox" checked={hideOutOfStock} onChange={(event) => setHideOutOfStock(event.target.checked)} className="h-4 w-4 rounded border-(--line)" />
+                            Hide out of stock products
                         </label>
                         <label className="inline-flex cursor-pointer items-center gap-2">
-                            <input type="checkbox" checked={onlyPriced} onChange={(event) => setOnlyPriced(event.target.checked)} className="h-4 w-4 rounded border-(--line)" />
-                            Only products with list prices
+                            <input type="checkbox" checked={hideUnpriced} onChange={(event) => setHideUnpriced(event.target.checked)} className="h-4 w-4 rounded border-(--line)" />
+                            Hide products without list prices
                         </label>
                     </div>
                     <button
@@ -469,19 +576,16 @@ export function PriceListRequest() {
                             <table className="min-w-full border-collapse text-left text-sm">
                                 <thead className="bg-(--chip) text-xs text-(--ink-soft)">
                                     <tr>
-                                        <th className="border border-(--line) px-3 py-2 font-medium">Search name</th>
-                                        <th className="border border-(--line) px-3 py-2 font-medium">Product</th>
-                                        <th className="border border-(--line) px-3 py-2 font-medium">Brand</th>
-                                        <th className="border border-(--line) px-3 py-2 font-medium">Origin</th>
-                                        <th className="border border-(--line) px-3 py-2 font-medium">Pattern</th>
-                                        <th className="border border-(--line) px-3 py-2 font-medium">Rim</th>
-                                        <th className="border border-(--line) px-3 py-2 font-medium">Lot (Year)</th>
-                                        <th className="border border-(--line) px-3 py-2 text-right font-medium">Available</th>
-                                        {result.pricelists.map((list) => (
-                                            <th key={list.id} className="whitespace-nowrap border border-(--line) px-3 py-2 text-right font-medium">
-                                                {priceHeader(list)}
-                                            </th>
-                                        ))}
+                                        {sortHeader("searchName", "Search name")}
+                                        {sortHeader("name", "Product")}
+                                        {sortHeader("category", "Category")}
+                                        {sortHeader("brand", "Brand")}
+                                        {sortHeader("origin", "Origin")}
+                                        {sortHeader("pattern", "Pattern")}
+                                        {sortHeader("rim", "Rim")}
+                                        {sortHeader("lot", "Lot (Year)")}
+                                        {sortHeader("available", "Available", "right")}
+                                        {result.pricelists.map((list) => sortHeader(`price:${list.id}`, priceHeader(list), "right"))}
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -489,6 +593,7 @@ export function PriceListRequest() {
                                         <tr key={row.key} className="hover:bg-(--chip)/40">
                                             <td className="whitespace-nowrap border border-(--line)/70 px-3 py-2 text-(--ink-soft)">{row.searchName || "-"}</td>
                                             <td className="border border-(--line)/70 px-3 py-2 font-medium">{row.name}</td>
+                                            <td className="whitespace-nowrap border border-(--line)/70 px-3 py-2">{row.category || "-"}</td>
                                             <td className="whitespace-nowrap border border-(--line)/70 px-3 py-2">{row.brand || "-"}</td>
                                             <td className="whitespace-nowrap border border-(--line)/70 px-3 py-2">{row.origin || "-"}</td>
                                             <td className="whitespace-nowrap border border-(--line)/70 px-3 py-2">{row.pattern || "-"}</td>
