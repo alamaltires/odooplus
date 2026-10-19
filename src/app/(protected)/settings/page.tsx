@@ -30,7 +30,7 @@ const ROLE_OPTIONS: Select2Option[] = [
     { value: "accountant", label: "Accountant" },
     { value: "manager", label: "Manager" },
     { value: "store", label: "Store" },
-    { value: "user", label: "User (Sales Orders only)" },
+    { value: "user", label: "User (Fast Orders only)" },
     { value: "admin", label: "Admin" },
 ];
 

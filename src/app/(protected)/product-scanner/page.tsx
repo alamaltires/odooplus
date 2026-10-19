@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertCircle, ChevronLeft, ChevronRight, Download, RefreshCw, Search, Warehouse } from "lucide-react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { AlertCircle, ChevronDown, ChevronLeft, ChevronRight, Download, RefreshCw, Search, Warehouse } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { getAgedStock, type AgedStockResponse, type AgedStockRow } from "@/lib/client-odoo";
 
@@ -117,9 +117,48 @@ export default function ProductScannerPage() {
             .sort((a, b) => (sort === "age" ? b.ageDays - a.ageDays || b.quantity - a.quantity : b.quantity - a.quantity || b.ageDays - a.ageDays));
     }, [aged, warehouse, brand, search, sort]);
 
-    const pageCount = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+    // A product that appears on several rows (lots / warehouses) is folded into one expandable line.
+    const groups = useMemo(() => {
+        const byProduct = new Map<number, AgedStockRow[]>();
+        for (const row of rows) {
+            const list = byProduct.get(row.productId);
+            if (list) list.push(row);
+            else byProduct.set(row.productId, [row]);
+        }
+        return Array.from(byProduct, ([productId, items]) => {
+            const quantity = items.reduce((total, item) => total + item.quantity, 0);
+            const cost = items.reduce((total, item) => total + (item.unitCost ?? 0) * item.quantity, 0);
+            const lasts = items.map((item) => item.lastReceivedDate).filter((value): value is string => Boolean(value)).sort();
+            const firsts = items.map((item) => item.firstReceivedDate).filter((value): value is string => Boolean(value)).sort();
+            return {
+                productId,
+                rows: items,
+                summary: {
+                    ...items[0],
+                    lotName: "",
+                    unitCost: cost > 0 ? cost / quantity : null,
+                    warehouse: Array.from(new Set(items.map((item) => item.warehouse))).join(", "),
+                    locations: [],
+                    quantity,
+                    ageDays: Math.max(...items.map((item) => item.ageDays)),
+                    lastReceivedDate: lasts[lasts.length - 1] ?? "",
+                    firstReceivedDate: firsts[0] ?? "",
+                } as AgedStockRow,
+            };
+        });
+    }, [rows]);
+    const [expanded, setExpanded] = useState<Set<number>>(new Set());
+    const toggleGroup = (productId: number) =>
+        setExpanded((current) => {
+            const next = new Set(current);
+            if (next.has(productId)) next.delete(productId);
+            else next.add(productId);
+            return next;
+        });
+
+    const pageCount = Math.max(1, Math.ceil(groups.length / PAGE_SIZE));
     const currentPage = Math.min(page, pageCount);
-    const pageRows = rows.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+    const pageGroups = groups.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
     const shownUnits = rows.reduce((total, row) => total + row.quantity, 0);
     const maxAge = Math.max(...aged.map((row) => row.ageDays), 1);
     const bucketTotal = result ? result.buckets.reduce((total, bucket) => total + bucket.units, 0) : 0;
@@ -380,37 +419,74 @@ export default function ProductScannerPage() {
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {pageRows.map((row) => (
-                                            <tr key={`${row.productId}-${row.lotName}-${row.warehouse}`} className="border-b border-(--line)/60 transition hover:bg-(--chip)/50">
-                                                <td className="py-3 pr-3">
-                                                    <p className="font-medium leading-snug">{row.productName}</p>
-                                                    {row.brand ? <p className="text-xs text-(--ink-soft)">{row.brand}</p> : null}
-                                                </td>
-                                                <td className="px-3 py-3 text-(--ink-soft)">{row.lotName || "-"}</td>
-                                                <td className="px-3 py-3 text-right tabular-nums">
-                                                    {row.unitCost ? row.unitCost.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "-"}
-                                                </td>
-                                                <td className="px-3 py-3">
-                                                    <p>{row.warehouse}</p>
-                                                    <p className="max-w-48 truncate text-xs text-(--ink-soft)" title={row.locations.join(", ")}>
-                                                        {row.locations.map((location) => location.split("/").slice(1).join("/")).filter(Boolean).join(", ")}
-                                                    </p>
-                                                </td>
-                                                <td className="px-3 py-3 text-right font-semibold tabular-nums">{Math.round(row.quantity).toLocaleString("en-US")}</td>
-                                                <td className="px-3 py-3 tabular-nums">{row.lastReceivedDate || "-"}</td>
-                                                <td className="px-3 py-3 tabular-nums">{row.firstReceivedDate || "-"}</td>
-                                                <td className="py-3 pl-3">
-                                                    <div className="flex items-center gap-3">
-                                                        <div className="h-1.5 w-24 shrink-0 overflow-hidden rounded-full bg-(--chip)">
-                                                            <div className={`h-full rounded-full ${ageTone(row.ageDays)}`} style={{ width: `${Math.max(6, (row.ageDays / maxAge) * 100)}%` }} />
-                                                        </div>
-                                                        <div>
+                                        {pageGroups.map((group) => {
+                                            const folded = group.rows.length > 1;
+                                            const open = expanded.has(group.productId);
+                                            const renderCells = (row: AgedStockRow, child: boolean, summary: boolean) => (
+                                                <>
+                                                    <td className={`py-3 pr-3 ${child ? "pl-7" : ""}`}>
+                                                        {child ? null : (
+                                                            <div className="flex items-start gap-2">
+                                                                {summary ? <ChevronDown className={`mt-1 h-4 w-4 shrink-0 text-(--ink-soft) transition ${open ? "" : "-rotate-90"}`} /> : null}
+                                                                <div>
+                                                                    <p className="font-medium leading-snug">{row.productName}</p>
+                                                                    {row.brand ? <p className="text-xs text-(--ink-soft)">{row.brand}</p> : null}
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                    </td>
+                                                    <td className="px-3 py-3 text-(--ink-soft)">{summary ? `${group.rows.length} lots / warehouses` : row.lotName || "-"}</td>
+                                                    <td className="px-3 py-3 text-right tabular-nums">
+                                                        {row.unitCost ? row.unitCost.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "-"}
+                                                    </td>
+                                                    <td className="px-3 py-3">
+                                                        <p>{row.warehouse}</p>
+                                                        {summary ? null : (
+                                                            <p className="max-w-48 truncate text-xs text-(--ink-soft)" title={row.locations.join(", ")}>
+                                                                {row.locations.map((location) => location.split("/").slice(1).join("/")).filter(Boolean).join(", ")}
+                                                            </p>
+                                                        )}
+                                                    </td>
+                                                    <td className="px-3 py-3 text-right font-semibold tabular-nums">{Math.round(row.quantity).toLocaleString("en-US")}</td>
+                                                    <td className="px-3 py-3 tabular-nums">{row.lastReceivedDate || "-"}</td>
+                                                    <td className="px-3 py-3 tabular-nums">{row.firstReceivedDate || "-"}</td>
+                                                    <td className="py-3 pl-3">
+                                                        <div className="flex items-center gap-3">
+                                                            <div className="h-1.5 w-24 shrink-0 overflow-hidden rounded-full bg-(--chip)">
+                                                                <div className={`h-full rounded-full ${ageTone(row.ageDays)}`} style={{ width: `${Math.max(6, (row.ageDays / maxAge) * 100)}%` }} />
+                                                            </div>
                                                             <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${ageBadge(row.ageDays)}`}>{ageText(row.ageDays)}</span>
                                                         </div>
-                                                    </div>
-                                                </td>
-                                            </tr>
-                                        ))}
+                                                    </td>
+                                                </>
+                                            );
+                                            if (!folded) {
+                                                const row = group.rows[0];
+                                                return (
+                                                    <tr key={`${row.productId}-${row.lotName}-${row.warehouse}`} className="border-b border-(--line)/60 transition hover:bg-(--chip)/50">
+                                                        {renderCells(row, false, false)}
+                                                    </tr>
+                                                );
+                                            }
+                                            return (
+                                                <Fragment key={group.productId}>
+                                                    <tr
+                                                        onClick={() => toggleGroup(group.productId)}
+                                                        className="cursor-pointer border-b border-(--line)/60 bg-(--chip)/30 transition hover:bg-(--chip)/60"
+                                                        aria-expanded={open}
+                                                    >
+                                                        {renderCells(group.summary, false, true)}
+                                                    </tr>
+                                                    {open
+                                                        ? group.rows.map((row) => (
+                                                              <tr key={`${row.productId}-${row.lotName}-${row.warehouse}`} className="border-b border-(--line)/40 bg-white/60">
+                                                                  {renderCells(row, true, false)}
+                                                              </tr>
+                                                          ))
+                                                        : null}
+                                                </Fragment>
+                                            );
+                                        })}
                                     </tbody>
                                 </table>
                             </div>

@@ -10,7 +10,7 @@ export const APP_DEFINITIONS: Array<{ href: string; label: string }> = [
     { href: "/dashboard", label: "Dashboard" },
     { href: "/orders/pending", label: "Pending Orders" },
     { href: "/product-scanner", label: "Aged Stock" },
-    { href: "/product-requests", label: "Sales Orders" },
+    { href: "/product-requests", label: "Fast Orders" },
     { href: "/msrp-finder", label: "MSRP Finder" },
     { href: "/purchase-order", label: "Purchase Order" },
     { href: "/po-tracking", label: "PO Tracking" },

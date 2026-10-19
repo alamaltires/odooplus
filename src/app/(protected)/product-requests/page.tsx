@@ -1,11 +1,10 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import {
     CheckCircle2,
     ClipboardList,
     Eye,
-    Link2,
     PackageSearch,
     Plus,
     Search,
@@ -28,10 +27,10 @@ import { SalesStockBrowser } from "@/components/sales-stock-browser";
 type ReferenceProduct = { id: number; name: string; brandName: string };
 
 const REQUEST_TYPE_OPTIONS: Array<{ value: ProductRequestType; label: string; hint: string }> = [
-    { value: "new_product", label: "New Product", hint: "This product doesn't exist in the catalogue at all." },
-    { value: "missing_size", label: "Missing Size", hint: "The brand/pattern exists, but not in this size." },
-    { value: "missing_pattern", label: "Missing Pattern", hint: "The brand exists, but not this tread pattern." },
-    { value: "more_quantity", label: "More Quantity", hint: "It exists, but there isn't enough stock — say how many you need in Notes." },
+    { value: "missing_size", label: "Size", hint: "The brand/pattern exists, but not in this size." },
+    { value: "missing_pattern", label: "Pattern", hint: "The brand exists, but not this tread pattern." },
+    { value: "more_quantity", label: "Quantity", hint: "It exists, but there isn't enough stock." },
+    { value: "new_product", label: "New product", hint: "This product doesn't exist in the catalogue at all." },
 ];
 
 const REQUEST_TYPE_LABELS: Record<ProductRequestType, string> = {
@@ -69,6 +68,7 @@ function composeAutoNotes(input: {
     brand: string;
     size: string;
     pattern: string;
+    quantity: string;
     referenceProduct: ReferenceProduct | null;
     searchQuery: string;
 }): string {
@@ -81,7 +81,7 @@ function composeAutoNotes(input: {
     } else if (input.requestType === "missing_pattern") {
         parts.push(`Missing pattern${input.brand ? ` for ${input.brand}` : ""}: ${input.pattern || "?"}`);
     } else if (input.requestType === "more_quantity") {
-        parts.push(`Need more stock${input.searchQuery ? ` of ${input.searchQuery}` : ""}`);
+        parts.push(`Need ${input.quantity ? `${input.quantity} more` : "more stock"}${!input.referenceProduct && input.searchQuery ? ` of ${input.searchQuery}` : ""}`);
     } else {
         const bits = [input.brand, input.size, input.pattern].filter(Boolean);
         if (bits.length > 0) {
@@ -104,14 +104,13 @@ export default function ProductRequestsPage() {
 
     // --- Request panel state ---
     const [panelOpen, setPanelOpen] = useState(false);
-    const panelRef = useRef<HTMLDivElement>(null);
+    const firstFieldRef = useRef<HTMLInputElement>(null);
     const [requestType, setRequestType] = useState<ProductRequestType>("new_product");
     const [brand, setBrand] = useState("");
     const [size, setSize] = useState("");
     const [pattern, setPattern] = useState("");
+    const [quantity, setQuantity] = useState("");
     const [notes, setNotes] = useState("");
-    const [notesTouched, setNotesTouched] = useState(false);
-    const autoNotesRef = useRef("");
     const [referenceProduct, setReferenceProduct] = useState<ReferenceProduct | null>(null);
     const [submitting, setSubmitting] = useState(false);
     const [submitError, setSubmitError] = useState<string | null>(null);
@@ -150,10 +149,18 @@ export default function ProductRequestsPage() {
             .finally(() => setRequestsLoading(false));
     }
 
+    // Esc closes the request window; the first empty field is focused when it opens.
     useEffect(() => {
-        if (panelOpen) {
-            panelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        if (!panelOpen) return;
+        function onKey(event: KeyboardEvent) {
+            if (event.key === "Escape") setPanelOpen(false);
         }
+        window.addEventListener("keydown", onKey);
+        const timer = window.setTimeout(() => firstFieldRef.current?.focus(), 60);
+        return () => {
+            window.removeEventListener("keydown", onKey);
+            window.clearTimeout(timer);
+        };
     }, [panelOpen]);
 
     useEffect(() => {
@@ -163,24 +170,12 @@ export default function ProductRequestsPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [activeTab, user]);
 
-    // Keeps Notes in sync with the fields above it until the user actually
-    // types something of their own into it — at that point their edits win
-    // and auto-updates stop, so we never clobber what they've continued.
-    useEffect(() => {
-        if (notesTouched) {
-            return;
-        }
-        const draft = composeAutoNotes({ requestType, brand, size, pattern, referenceProduct, searchQuery: query });
-        autoNotesRef.current = draft;
-        setNotes(draft);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [requestType, brand, size, pattern, referenceProduct, notesTouched]);
-
     function openRequestPanel(type?: ProductRequestType) {
         if (type) {
             setRequestType(type);
         }
         setSubmitSuccess(false);
+        setSubmitError(null);
         setPanelOpen(true);
     }
 
@@ -194,15 +189,12 @@ export default function ProductRequestsPage() {
         setBrand(product.brand && product.brand !== "No Brand" ? product.brand : "");
         setPattern("");
         setSize("");
-        setNotesTouched(false);
+        setQuantity("");
+        setNotes("");
         setReferenceProduct({ id: product.productId, name: product.productName, brandName: product.brand });
         setSubmitSuccess(false);
         setSubmitError(null);
         setPanelOpen(true);
-    }
-
-    function closeRequestPanel() {
-        setPanelOpen(false);
     }
 
     function clearReference() {
@@ -214,8 +206,8 @@ export default function ProductRequestsPage() {
         setBrand("");
         setSize("");
         setPattern("");
+        setQuantity("");
         setNotes("");
-        setNotesTouched(false);
         setReferenceProduct(null);
     }
 
@@ -231,13 +223,15 @@ export default function ProductRequestsPage() {
                 brand: brand.trim(),
                 size: size.trim(),
                 pattern: pattern.trim(),
-                notes: notes.trim(),
+                // The structured fields travel on their own; when no note is typed, a one-line summary is saved.
+                notes: notes.trim() || composeAutoNotes({ requestType, brand, size, pattern, quantity, referenceProduct, searchQuery: query }),
                 searchQuery: query.trim(),
                 referenceProductId: referenceProduct?.id ?? null,
                 referenceProductName: referenceProduct?.name ?? "",
             });
             setSubmitSuccess(true);
             resetForm();
+            window.setTimeout(() => setPanelOpen(false), 1400);
             setRequestsLoaded(false);
             if (activeTab === "requests") {
                 loadMyRequests();
@@ -276,19 +270,18 @@ export default function ProductRequestsPage() {
         }
     }
 
-    const activeTypeHint = useMemo(
-        () => REQUEST_TYPE_OPTIONS.find((option) => option.value === requestType)?.hint ?? "",
-        [requestType]
-    );
-
-    const showSizeField = requestType !== "missing_pattern";
-    const showPatternField = true;
+    // Only ask for what the chosen kind of request needs.
+    const hasReference = referenceProduct !== null;
+    const showBrand = !hasReference || requestType === "new_product";
+    const showSize = requestType === "missing_size" || requestType === "new_product";
+    const showPattern = requestType === "missing_pattern" || requestType === "new_product";
+    const showQuantity = requestType === "more_quantity";
 
     return (
         <section>
             <div className="flex items-start justify-between gap-4">
                 <div>
-                    <h1 className="font-display text-3xl">Sales Orders</h1>
+                    <h1 className="font-display text-3xl">Fast Orders</h1>
                     <p className="mt-1 text-sm text-(--ink-soft)">
                         Search stock, add products to the cart and create a quotation in Odoo. If what you need isn&rsquo;t
                         there — wrong size, wrong pattern, not enough quantity, or entirely new — request it in a few clicks.
@@ -326,139 +319,6 @@ export default function ProductRequestsPage() {
 
             {activeTab === "search" ? (
                 <div className="mt-6 space-y-4">
-                    {panelOpen ? (
-                        <div ref={panelRef} className="rounded-2xl border border-(--line) bg-(--card) p-5">
-                            <div className="flex items-start justify-between gap-3">
-                                <div>
-                                    <h2 className="font-display text-xl">Request a Product</h2>
-                                    <p className="mt-1 text-sm text-(--ink-soft)">
-                                        Pick what best describes the gap, add whatever details you have — Notes drafts
-                                        itself from what you fill in below, just keep typing from there.
-                                    </p>
-                                </div>
-                                <button
-                                    type="button"
-                                    onClick={closeRequestPanel}
-                                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-(--ink-soft) hover:bg-(--chip)"
-                                    aria-label="Close"
-                                >
-                                    <X className="h-4 w-4" aria-hidden="true" />
-                                </button>
-                            </div>
-
-                            <form onSubmit={handleSubmitRequest} className="mt-4 space-y-4">
-                                {referenceProduct ? (
-                                    <div className="flex items-center gap-2 rounded-xl border border-(--brand) bg-[rgba(229,26,39,0.06)] px-3 py-2 text-sm">
-                                        <Link2 className="h-4 w-4 shrink-0 text-(--brand)" aria-hidden="true" />
-                                        <span className="min-w-0 flex-1 truncate">
-                                            Reference: <span className="font-medium">{referenceProduct.name}</span>
-                                        </span>
-                                        <button
-                                            type="button"
-                                            onClick={clearReference}
-                                            className="shrink-0 text-xs font-medium text-(--ink-soft) hover:text-(--ink)"
-                                        >
-                                            Remove
-                                        </button>
-                                    </div>
-                                ) : null}
-
-                                <div className="grid gap-2 sm:grid-cols-3">
-                                    {REQUEST_TYPE_OPTIONS.map((option) => (
-                                        <button
-                                            key={option.value}
-                                            type="button"
-                                            onClick={() => setRequestType(option.value)}
-                                            className={`rounded-xl border px-4 py-2.5 text-left text-sm font-medium transition ${
-                                                requestType === option.value
-                                                    ? "border-(--brand) bg-[rgba(229,26,39,0.08)] text-(--brand)"
-                                                    : "border-(--line) bg-white text-(--ink) hover:bg-(--chip)"
-                                            }`}
-                                        >
-                                            {option.label}
-                                        </button>
-                                    ))}
-                                </div>
-                                <p className="text-xs text-(--ink-soft)">{activeTypeHint}</p>
-
-                                <div className="grid gap-4 sm:grid-cols-3">
-                                    <label className="block">
-                                        <span className="mb-1.5 block text-sm font-medium">Brand</span>
-                                        <input
-                                            value={brand}
-                                            onChange={(event) => setBrand(event.target.value)}
-                                            placeholder="e.g. Michelin"
-                                            list="product-request-brand-options"
-                                            className="w-full rounded-xl border border-(--line) bg-white px-3 py-2"
-                                        />
-                                        <datalist id="product-request-brand-options">
-                                            {brands.map((option) => (
-                                                <option key={option.id} value={option.name} />
-                                            ))}
-                                        </datalist>
-                                    </label>
-                                    {showSizeField ? (
-                                        <label className="block">
-                                            <span className="mb-1.5 block text-sm font-medium">Size</span>
-                                            <input
-                                                value={size}
-                                                onChange={(event) => setSize(event.target.value)}
-                                                placeholder="e.g. 265/65R17"
-                                                className="w-full rounded-xl border border-(--line) bg-white px-3 py-2"
-                                            />
-                                        </label>
-                                    ) : null}
-                                    {showPatternField ? (
-                                        <label className="block">
-                                            <span className="mb-1.5 block text-sm font-medium">Pattern</span>
-                                            <input
-                                                value={pattern}
-                                                onChange={(event) => setPattern(event.target.value)}
-                                                placeholder="e.g. Primacy 4"
-                                                className="w-full rounded-xl border border-(--line) bg-white px-3 py-2"
-                                            />
-                                        </label>
-                                    ) : null}
-                                </div>
-
-                                <label className="block">
-                                    <span className="mb-1.5 block text-sm font-medium">Notes</span>
-                                    <textarea
-                                        value={notes}
-                                        onChange={(event) => {
-                                            const value = event.target.value;
-                                            setNotes(value);
-                                            if (value !== autoNotesRef.current) {
-                                                setNotesTouched(true);
-                                            }
-                                        }}
-                                        rows={3}
-                                        placeholder="Auto-fills from the fields above — keep typing to add customer, quantity, urgency…"
-                                        className="w-full rounded-xl border border-(--line) bg-white px-3 py-2"
-                                    />
-                                </label>
-
-                                {submitError ? <p className="text-sm text-red-600">{submitError}</p> : null}
-
-                                <div className="flex items-center gap-3">
-                                    <button
-                                        type="submit"
-                                        disabled={submitting}
-                                        className="rounded-xl bg-(--brand) px-5 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
-                                    >
-                                        {submitting ? "Submitting..." : "Submit Request"}
-                                    </button>
-                                    {submitSuccess ? (
-                                        <span className="inline-flex items-center gap-1.5 text-sm text-(--accent)">
-                                            <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-                                            Request saved.
-                                        </span>
-                                    ) : null}
-                                </div>
-                            </form>
-                        </div>
-                    ) : null}
-
                     <SalesStockBrowser
                         query={query}
                         onQueryChange={setQuery}
@@ -480,10 +340,7 @@ export default function ProductRequestsPage() {
                         <div className="flex flex-wrap items-center gap-2">
                             <button
                                 type="button"
-                                onClick={() => {
-                                    setActiveTab("search");
-                                    openRequestPanel();
-                                }}
+                                onClick={() => openRequestPanel()}
                                 className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-(--line) bg-white px-4 py-2 text-sm font-medium text-(--ink) hover:bg-(--chip)"
                             >
                                 <Plus className="h-4 w-4" aria-hidden="true" />
@@ -623,6 +480,170 @@ export default function ProductRequestsPage() {
                     )}
                 </div>
             )}
+
+            {panelOpen ? (
+                <div
+                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-[2px] animate-[dash-fade_0.2s_ease-out_both]"
+                    onClick={() => setPanelOpen(false)}
+                >
+                    <div
+                        role="dialog"
+                        aria-modal="true"
+                        aria-label="Request a product"
+                        className="w-full max-w-md rounded-2xl border border-(--line) bg-(--card) shadow-2xl animate-[dash-rise_0.25s_ease-out_both]"
+                        onClick={(event) => event.stopPropagation()}
+                    >
+                        {submitSuccess ? (
+                            <div className="px-6 py-10 text-center">
+                                <CheckCircle2 className="mx-auto h-10 w-10 text-(--accent)" aria-hidden="true" />
+                                <p className="mt-3 font-display text-xl">Request sent</p>
+                                <p className="mt-1 text-sm text-(--ink-soft)">We&rsquo;ll look into it.</p>
+                            </div>
+                        ) : (
+                            <form onSubmit={handleSubmitRequest}>
+                                <div className="flex items-center justify-between gap-3 px-6 pt-5">
+                                    <h2 className="font-display text-xl">Request</h2>
+                                    <button
+                                        type="button"
+                                        onClick={() => setPanelOpen(false)}
+                                        className="inline-flex h-8 w-8 items-center justify-center rounded-full text-(--ink-soft) hover:bg-(--chip)"
+                                        aria-label="Close"
+                                    >
+                                        <X className="h-4 w-4" aria-hidden="true" />
+                                    </button>
+                                </div>
+
+                                <div className="space-y-4 px-6 pb-2 pt-3">
+                                    {referenceProduct ? (
+                                        <div className="flex items-center gap-2 rounded-xl bg-(--chip) px-3 py-2 text-sm">
+                                            <span className="min-w-0 flex-1 truncate font-medium" title={referenceProduct.name}>
+                                                {referenceProduct.name}
+                                            </span>
+                                            <button
+                                                type="button"
+                                                onClick={clearReference}
+                                                className="shrink-0 rounded-full p-1 text-(--ink-soft) hover:bg-white hover:text-(--ink)"
+                                                aria-label="Remove reference product"
+                                                title="Remove reference product"
+                                            >
+                                                <X className="h-3.5 w-3.5" aria-hidden="true" />
+                                            </button>
+                                        </div>
+                                    ) : null}
+
+                                    <div className="grid grid-cols-4 gap-1 rounded-xl bg-(--chip) p-1" role="tablist" aria-label="What do you need?">
+                                        {REQUEST_TYPE_OPTIONS.map((option) => (
+                                            <button
+                                                key={option.value}
+                                                type="button"
+                                                role="tab"
+                                                aria-selected={requestType === option.value}
+                                                title={option.hint}
+                                                onClick={() => setRequestType(option.value)}
+                                                className={`rounded-lg px-2 py-1.5 text-xs font-medium transition ${
+                                                    requestType === option.value ? "bg-white text-(--brand) shadow-sm" : "text-(--ink-soft) hover:text-(--ink)"
+                                                }`}
+                                            >
+                                                {option.label}
+                                            </button>
+                                        ))}
+                                    </div>
+
+                                    {showBrand ? (
+                                        <label className="block">
+                                            <span className="mb-1 block text-xs font-medium text-(--ink-soft)">Brand</span>
+                                            <input
+                                                ref={firstFieldRef}
+                                                value={brand}
+                                                onChange={(event) => setBrand(event.target.value)}
+                                                placeholder="Michelin"
+                                                list="product-request-brand-options"
+                                                className="w-full rounded-xl border border-(--line) bg-white px-3 py-2 text-sm"
+                                            />
+                                            <datalist id="product-request-brand-options">
+                                                {brands.map((option) => (
+                                                    <option key={option.id} value={option.name} />
+                                                ))}
+                                            </datalist>
+                                        </label>
+                                    ) : null}
+                                    {showSize || showPattern ? (
+                                        <div className={`grid gap-3 ${showSize && showPattern ? "grid-cols-2" : ""}`}>
+                                            {showSize ? (
+                                                <label className="block">
+                                                    <span className="mb-1 block text-xs font-medium text-(--ink-soft)">Size</span>
+                                                    <input
+                                                        ref={showBrand ? undefined : firstFieldRef}
+                                                        value={size}
+                                                        onChange={(event) => setSize(event.target.value)}
+                                                        placeholder="265/65R17"
+                                                        className="w-full rounded-xl border border-(--line) bg-white px-3 py-2 text-sm"
+                                                    />
+                                                </label>
+                                            ) : null}
+                                            {showPattern ? (
+                                                <label className="block">
+                                                    <span className="mb-1 block text-xs font-medium text-(--ink-soft)">Pattern</span>
+                                                    <input
+                                                        ref={showBrand || showSize ? undefined : firstFieldRef}
+                                                        value={pattern}
+                                                        onChange={(event) => setPattern(event.target.value)}
+                                                        placeholder="Primacy 4"
+                                                        className="w-full rounded-xl border border-(--line) bg-white px-3 py-2 text-sm"
+                                                    />
+                                                </label>
+                                            ) : null}
+                                        </div>
+                                    ) : null}
+                                    {showQuantity ? (
+                                        <label className="block">
+                                            <span className="mb-1 block text-xs font-medium text-(--ink-soft)">How many do you need?</span>
+                                            <input
+                                                ref={showBrand ? undefined : firstFieldRef}
+                                                value={quantity}
+                                                onChange={(event) => setQuantity(event.target.value.replace(/[^\d]/g, ""))}
+                                                inputMode="numeric"
+                                                placeholder="40"
+                                                className="w-full rounded-xl border border-(--line) bg-white px-3 py-2 text-sm"
+                                            />
+                                        </label>
+                                    ) : null}
+
+                                    <label className="block">
+                                        <span className="mb-1 block text-xs font-medium text-(--ink-soft)">Note (optional)</span>
+                                        <textarea
+                                            value={notes}
+                                            onChange={(event) => setNotes(event.target.value)}
+                                            rows={2}
+                                            placeholder="Customer, urgency…"
+                                            className="w-full resize-none rounded-xl border border-(--line) bg-white px-3 py-2 text-sm"
+                                        />
+                                    </label>
+
+                                    {submitError ? <p className="text-sm text-red-600">{submitError}</p> : null}
+                                </div>
+
+                                <div className="flex items-center justify-end gap-2 px-6 pb-5 pt-3">
+                                    <button
+                                        type="button"
+                                        onClick={() => setPanelOpen(false)}
+                                        className="rounded-xl px-4 py-2 text-sm font-medium text-(--ink-soft) hover:bg-(--chip)"
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        type="submit"
+                                        disabled={submitting}
+                                        className="rounded-xl bg-(--brand) px-5 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
+                                    >
+                                        {submitting ? "Sending..." : "Send request"}
+                                    </button>
+                                </div>
+                            </form>
+                        )}
+                    </div>
+                </div>
+            ) : null}
         </section>
     );
 }

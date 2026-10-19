@@ -1,11 +1,15 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
     CheckCircle2,
+    ChevronDown,
+    ChevronsDownUp,
+    ChevronsUpDown,
     Copy,
     LayoutGrid,
     List,
+    MessageSquarePlus,
     Minus,
     Package,
     Plus,
@@ -34,7 +38,9 @@ import {
 import { Select2, type Select2Option } from "@/components/select2";
 
 const MIN_SEARCH_QUERY_LENGTH = 2;
-const PAGE_SIZE = 30;
+const PAGE_SIZES = [20, 30, 50, 100];
+const DEFAULT_PAGE_SIZE = 30;
+const PAGE_SIZE_STORAGE_KEY = "fast-orders:page-size";
 const CART_STORAGE_KEY = "odoopp:salesCart";
 const VIEW_STORAGE_KEY = "odoopp:salesView";
 
@@ -100,6 +106,10 @@ function formatMoney(value: number | null) {
     return value === null ? "-" : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+type SearchAnswer = Awaited<ReturnType<typeof searchSalesStock>>;
+/** Recent searches of this visit (cleared on reload, so stock changes show up after a refresh). */
+const searchCache = new Map<string, SearchAnswer>();
+
 export function SalesStockBrowser({
     query,
     onQueryChange,
@@ -118,10 +128,11 @@ export function SalesStockBrowser({
     const [view, setView] = useState<ViewMode>("list");
     const [rows, setRows] = useState<SalesStockRow[]>([]);
     const [loading, setLoading] = useState(false);
-    const [loadingMore, setLoadingMore] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [hasMore, setHasMore] = useState(false);
     const [totalCount, setTotalCount] = useState(0);
+    const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+    // The page number belongs to one search; a new keyword / filter / page size starts again at page 1.
+    const [pageState, setPageState] = useState<{ key: string; page: number }>({ key: "", page: 1 });
     const [unresolved, setUnresolved] = useState<string[]>([]);
     // Smart Search: `smartDraft` is what's being edited in the modal,
     // `smartApplied` is what the search actually uses.
@@ -149,6 +160,8 @@ export function SalesStockBrowser({
 
     useEffect(() => {
         setView(readStorage<ViewMode>(VIEW_STORAGE_KEY, "list"));
+        const savedSize = readStorage<number>(PAGE_SIZE_STORAGE_KEY, DEFAULT_PAGE_SIZE);
+        if (PAGE_SIZES.includes(savedSize)) setPageSize(savedSize);
         setCart(readStorage<CartLine[]>(CART_STORAGE_KEY, []));
         setCartLoaded(true);
     }, []);
@@ -210,33 +223,55 @@ export function SalesStockBrowser({
             .finally(() => setSmartLoading(false));
     }, [smartOpen, smartOptions, smartLoading]);
 
+    const searchKey = JSON.stringify([trimmed, smartFilters, pageSize]);
+    const page = pageState.key === searchKey ? pageState.page : 1;
+    const pageCount = Math.max(1, Math.ceil(totalCount / pageSize));
+
     useEffect(() => {
         if (!canSearch) {
             setRows([]);
-            setHasMore(false);
             setTotalCount(0);
             setError(null);
             return;
         }
+        // Pages already seen in this visit come back instantly; a slow older answer can never replace a newer one.
+        const cacheKey = JSON.stringify([searchKey, page]);
+        const cachedAnswer = searchCache.get(cacheKey);
+        let stale = false;
         const debounceId = window.setTimeout(() => {
+            if (cachedAnswer) {
+                setRows(cachedAnswer.rows);
+                setTotalCount(cachedAnswer.totalCount);
+                setUnresolved(cachedAnswer.unresolvedFields);
+                setError(null);
+                setLoading(false);
+                return;
+            }
             setLoading(true);
             setError(null);
-            searchSalesStock({ query: trimmed, limit: PAGE_SIZE, offset: 0, filters: smartFilters })
+            searchSalesStock({ query: trimmed, limit: pageSize, offset: (page - 1) * pageSize, filters: smartFilters })
                 .then((data) => {
+                    if (stale) return;
+                    searchCache.set(cacheKey, data);
+                    if (searchCache.size > 60) searchCache.delete(searchCache.keys().next().value as string);
                     setRows(data.rows);
-                    setHasMore(data.hasMore);
                     setTotalCount(data.totalCount);
                     setUnresolved(data.unresolvedFields);
                 })
                 .catch((fetchError) => {
+                    if (stale) return;
                     setError(fetchError instanceof Error ? fetchError.message : "Failed to search products.");
                     setRows([]);
-                    setHasMore(false);
                 })
-                .finally(() => setLoading(false));
-        }, 300);
-        return () => window.clearTimeout(debounceId);
-    }, [trimmed, canSearch, smartFilters]);
+                .finally(() => {
+                    if (!stale) setLoading(false);
+                });
+        }, cachedAnswer || page > 1 ? 0 : 180);
+        return () => {
+            stale = true;
+            window.clearTimeout(debounceId);
+        };
+    }, [trimmed, canSearch, smartFilters, searchKey, page, pageSize]);
 
     useEffect(() => {
         const missing = Array.from(
@@ -276,17 +311,28 @@ export function SalesStockBrowser({
         );
     }
 
-    function loadMore() {
-        if (loading || loadingMore || !hasMore) return;
-        setLoadingMore(true);
-        searchSalesStock({ query: trimmed, limit: PAGE_SIZE, offset: rows.length, filters: smartFilters })
-            .then((data) => {
-                setRows((current) => [...current, ...data.rows]);
-                setHasMore(data.hasMore);
-            })
-            .catch(() => setHasMore(false))
-            .finally(() => setLoadingMore(false));
+    function goToPage(next: number) {
+        setPageState({ key: searchKey, page: Math.min(Math.max(1, next), pageCount) });
     }
+
+    function changePageSize(next: number) {
+        setPageSize(next);
+        writeStorage(PAGE_SIZE_STORAGE_KEY, next);
+    }
+
+    // First, last, and a window of pages around the current one.
+    const pageNumbers = (() => {
+        const numbers = new Set<number>([1, pageCount, page - 1, page, page + 1]);
+        if (page <= 3) [2, 3, 4].forEach((n) => numbers.add(n));
+        if (page >= pageCount - 2) [pageCount - 1, pageCount - 2, pageCount - 3].forEach((n) => numbers.add(n));
+        const sorted = Array.from(numbers).filter((n) => n >= 1 && n <= pageCount).sort((a, b) => a - b);
+        const out: Array<number | "gap"> = [];
+        sorted.forEach((n, index) => {
+            if (index > 0 && n - sorted[index - 1] > 1) out.push("gap");
+            out.push(n);
+        });
+        return out;
+    })();
 
     // --- Cart ---
     const cartByQuantId = useMemo(() => new Map(cart.map((line) => [line.quantId, line])), [cart]);
@@ -383,10 +429,11 @@ export function SalesStockBrowser({
                     type="button"
                     disabled={max <= 0}
                     onClick={() => setLineQty(row, 1)}
-                    className="inline-flex items-center gap-1 rounded-lg bg-(--brand) px-2.5 py-1 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-(--brand) text-white shadow-sm transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+                    aria-label="Add to cart"
+                    title={max <= 0 ? "Nothing available to add" : "Add to cart"}
                 >
-                    <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                    Add
+                    <Plus className="h-4 w-4" aria-hidden="true" />
                 </button>
             );
         }
@@ -417,42 +464,136 @@ export function SalesStockBrowser({
         );
     }
 
+    // The same product and lot sitting in several locations is folded into one line; opening it shows each location.
+    const groups = useMemo(() => {
+        const byKey = new Map<string, SalesStockRow[]>();
+        for (const row of rows) {
+            const key = `${row.productId}|${row.lotName}`;
+            const list = byKey.get(key);
+            if (list) list.push(row);
+            else byKey.set(key, [row]);
+        }
+        return Array.from(byKey, ([key, items]) => ({
+            key,
+            rows: items,
+            summary: {
+                ...items[0],
+                location: `${items.length} locations`,
+                availableQty: items.reduce((total, item) => total + item.availableQty, 0),
+                onHandQty: items.reduce((total, item) => total + item.onHandQty, 0),
+                reservedQty: items.reduce((total, item) => total + item.reservedQty, 0),
+            } as SalesStockRow,
+        }));
+    }, [rows]);
+    const [expanded, setExpanded] = useState<Set<string>>(new Set());
+    const toggleGroup = (key: string) =>
+        setExpanded((current) => {
+            const next = new Set(current);
+            if (next.has(key)) next.delete(key);
+            else next.add(key);
+            return next;
+        });
+
+    // Related fields share a column (stacked on two or three lines) so the whole row fits without sideways scrolling.
+    const pair = (label: string, value: React.ReactNode) => (
+        <div className="flex items-baseline justify-between gap-3 whitespace-nowrap">
+            <span className="text-[10px] uppercase tracking-wide text-(--ink-soft)">{label}</span>
+            <span className="tabular-nums">{value}</span>
+        </div>
+    );
     const columns: Array<{ label: string; render: (row: SalesStockRow) => React.ReactNode; align?: "right" }> = [
-        { label: "Image", render: (row) => renderPatternImage(row, "thumb") },
-        { label: "Location", render: (row) => row.location || "-" },
-        { label: "Product", render: (row) => <span className="font-medium">{row.productName}</span> },
         {
-            label: "Copy Name",
+            label: "Product",
             render: (row) => (
-                <span className="inline-flex items-center gap-1.5">
-                    <span>{row.copyName || row.productName}</span>
-                    <button type="button" onClick={() => void copyName(row)} className="text-(--ink-soft) hover:text-(--brand)" aria-label="Copy name">
-                        {copiedId === row.id ? <CheckCircle2 className="h-3.5 w-3.5 text-(--accent)" aria-hidden="true" /> : <Copy className="h-3.5 w-3.5" aria-hidden="true" />}
-                    </button>
-                </span>
+                <div className="flex min-w-0 items-start gap-3">
+                    {renderPatternImage(row, "thumb")}
+                    <div className="min-w-0">
+                        <div className="flex items-start gap-1.5">
+                            <span className="font-semibold leading-snug">{row.productName}</span>
+                            <button
+                                type="button"
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    void copyName(row);
+                                }}
+                                className="mt-0.5 shrink-0 text-(--ink-soft) hover:text-(--brand)"
+                                aria-label="Copy name"
+                                title={row.copyName || row.productName}
+                            >
+                                {copiedId === row.id ? <CheckCircle2 className="h-3.5 w-3.5 text-(--accent)" aria-hidden="true" /> : <Copy className="h-3.5 w-3.5" aria-hidden="true" />}
+                            </button>
+                        </div>
+                        <div className="mt-1 flex flex-wrap gap-1">
+                            {[row.brand, row.pattern, row.country, row.lotYear && `Lot ${row.lotYear}`].filter(Boolean).map((chip) => (
+                                <span key={String(chip)} className="rounded-full bg-(--chip) px-2 py-0.5 text-[11px] font-medium">
+                                    {chip}
+                                </span>
+                            ))}
+                        </div>
+                        {row.categoryName ? <p className="mt-1 text-[11px] text-(--ink-soft)">{row.categoryName}</p> : null}
+                    </div>
+                </div>
             ),
         },
-        { label: "Country", render: (row) => row.country || "-" },
-        { label: "Product Category", render: (row) => row.categoryName || "-" },
-        { label: "Brand", render: (row) => row.brand || "-" },
-        { label: "Lot Year", render: (row) => row.lotYear || "-" },
-        { label: "Pattern", render: (row) => row.pattern || "-" },
-        { label: "Company", render: (row) => row.companyName || "-" },
-        { label: "Lot/Serial Number", render: (row) => row.lotName || "-" },
-        { label: "Available Qty", align: "right", render: (row) => <span className="font-semibold text-(--accent)">{formatQty(row.availableQty)}</span> },
-        { label: "Incoming", align: "right", render: (row) => formatQty(row.incomingQty) },
-        { label: "Forecasted", align: "right", render: (row) => formatQty(row.forecastedQty) },
-        { label: "Reserved", align: "right", render: (row) => formatQty(row.reservedQty) },
-        { label: "On Hand Qty", align: "right", render: (row) => formatQty(row.onHandQty) },
+        {
+            label: "Location",
+            render: (row) => (
+                <div>
+                    <p className="font-medium">{row.location || "-"}</p>
+                    <p className="text-[11px] text-(--ink-soft)">{row.companyName || "-"}</p>
+                    {row.lotName ? (
+                        <span className="mt-1.5 inline-flex items-center gap-1 rounded-full border border-[rgba(229,26,39,0.25)] bg-[rgba(229,26,39,0.08)] px-2.5 py-0.5 text-[11px] font-semibold text-(--brand)">
+                            <span className="text-[9px] font-medium uppercase tracking-wider opacity-70">Lot</span>
+                            {row.lotName}
+                        </span>
+                    ) : (
+                        <span className="mt-1.5 inline-flex rounded-full bg-(--chip) px-2.5 py-0.5 text-[11px] text-(--ink-soft)">No lot</span>
+                    )}
+                </div>
+            ),
+        },
+        {
+            label: "Stock",
+            render: (row) => (
+                <div className="min-w-28">
+                    {pair("Available", <span className="font-bold text-(--accent)">{formatQty(row.availableQty)}</span>)}
+                    {pair("On hand", formatQty(row.onHandQty))}
+                    {pair("Reserved", formatQty(row.reservedQty))}
+                </div>
+            ),
+        },
+        {
+            label: "Incoming",
+            render: (row) => (
+                <div className="min-w-24">
+                    {pair("Incoming", formatQty(row.incomingQty))}
+                    {pair("Forecast", formatQty(row.forecastedQty))}
+                </div>
+            ),
+        },
+        {
+            label: "Prices",
+            render: (row) => (
+                <div className="min-w-32">
+                    {pair("Retail", <span className="font-semibold">{formatMoney(row.retailPrice)}</span>)}
+                    {pair("Wholesale", formatMoney(row.wholesalePrice))}
+                    {pair("Special", formatMoney(row.specialPrice))}
+                </div>
+            ),
+        },
         ...(showCosts
             ? [
-                  { label: "Real Cost Lot", align: "right" as const, render: (row: SalesStockRow) => formatMoney(row.realCostLot) },
-                  { label: "Lot Average Cost", align: "right" as const, render: (row: SalesStockRow) => formatMoney(row.lotAverageCost) },
+                  {
+                      label: "Cost",
+                      render: (row: SalesStockRow) => (
+                          <div className="min-w-32">
+                              {pair("Real", formatMoney(row.realCostLot))}
+                              {pair("Average", formatMoney(row.lotAverageCost))}
+                          </div>
+                      ),
+                  },
               ]
             : []),
-        { label: "Retail Price", align: "right", render: (row) => formatMoney(row.retailPrice) },
-        { label: "Wholesale Price", align: "right", render: (row) => formatMoney(row.wholesalePrice) },
-        { label: "Special Price", align: "right", render: (row) => formatMoney(row.specialPrice) },
     ];
 
     return (
@@ -549,7 +690,7 @@ export function SalesStockBrowser({
                 <p className="rounded-2xl border border-dashed border-(--line) bg-(--card) p-8 text-center text-sm text-(--ink-soft)">
                     Type at least {MIN_SEARCH_QUERY_LENGTH} characters, or use Smart Search, to find stock.
                 </p>
-            ) : loading ? (
+            ) : loading && rows.length === 0 ? (
                 <p className="rounded-2xl border border-dashed border-(--line) bg-(--card) p-8 text-center text-sm text-(--ink-soft)">Searching...</p>
             ) : rows.length === 0 && !error ? (
                 <div className="rounded-2xl border border-dashed border-(--line) bg-(--card) p-8 text-center">
@@ -578,10 +719,66 @@ export function SalesStockBrowser({
                     </div>
                 </div>
             ) : rows.length > 0 ? (
-                <>
-                    <p className="text-xs text-(--ink-soft)">
-                        Showing {rows.length} of {totalCount} stock line{totalCount === 1 ? "" : "s"}.
-                    </p>
+                <div className={`space-y-4 transition-opacity duration-200 ${loading ? "pointer-events-none opacity-60" : ""}`}>
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                        <p className="text-xs text-(--ink-soft)">
+                            Showing {(page - 1) * pageSize + 1}&ndash;{(page - 1) * pageSize + rows.length} of {totalCount} stock line{totalCount === 1 ? "" : "s"}.
+                        </p>
+                        <div className="flex flex-wrap items-center justify-end gap-3 text-xs">
+                            <label className="inline-flex items-center gap-2 text-(--ink-soft)">
+                                Show
+                                <select
+                                    value={pageSize}
+                                    onChange={(event) => changePageSize(Number(event.target.value))}
+                                    className="rounded-lg border border-(--line) bg-white px-2 py-1.5 text-(--ink)"
+                                >
+                                    {PAGE_SIZES.map((size) => (
+                                        <option key={size} value={size}>
+                                            {size}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+                            {pageCount > 1 ? (
+                                <nav className="inline-flex items-center gap-1" aria-label="Pagination">
+                                    <button
+                                        type="button"
+                                        onClick={() => goToPage(page - 1)}
+                                        disabled={page <= 1 || loading}
+                                        className="rounded-lg border border-(--line) bg-white px-2.5 py-1.5 font-medium disabled:cursor-not-allowed disabled:opacity-40"
+                                    >
+                                        Prev
+                                    </button>
+                                    {pageNumbers.map((entry, index) =>
+                                        entry === "gap" ? (
+                                            <span key={`gap-${index}`} className="px-1 text-(--ink-soft)">
+                                                &hellip;
+                                            </span>
+                                        ) : (
+                                            <button
+                                                key={entry}
+                                                type="button"
+                                                onClick={() => goToPage(entry)}
+                                                disabled={loading}
+                                                aria-current={entry === page ? "page" : undefined}
+                                                className={`min-w-8 rounded-lg border px-2 py-1.5 font-medium transition ${entry === page ? "border-(--brand) bg-(--brand) text-white shadow-sm" : "border-(--line) bg-white hover:bg-(--chip)"}`}
+                                            >
+                                                {entry}
+                                            </button>
+                                        )
+                                    )}
+                                    <button
+                                        type="button"
+                                        onClick={() => goToPage(page + 1)}
+                                        disabled={page >= pageCount || loading}
+                                        className="rounded-lg border border-(--line) bg-white px-2.5 py-1.5 font-medium disabled:cursor-not-allowed disabled:opacity-40"
+                                    >
+                                        Next
+                                    </button>
+                                </nav>
+                            ) : null}
+                        </div>
+                    </div>
 
                     {view === "list" ? (
                         <div className="overflow-x-auto rounded-2xl border border-(--line) bg-(--card)">
@@ -589,39 +786,81 @@ export function SalesStockBrowser({
                                 <thead className="bg-(--chip) text-(--ink-soft)">
                                     <tr>
                                         {columns.map((column) => (
-                                            <th key={column.label} className={`whitespace-nowrap px-3 py-2.5 font-medium ${column.align === "right" ? "text-right" : ""}`}>
+                                            <th key={column.label} className="border border-(--line) px-3 py-2.5 font-medium">
                                                 {column.label}
                                             </th>
                                         ))}
-                                        <th className="whitespace-nowrap px-3 py-2.5 font-medium">Cart</th>
-                                        <th className="px-3 py-2.5" />
+                                        <th className="whitespace-nowrap border border-(--line) px-3 py-2.5 font-medium">Cart</th>
+                                        <th className="border border-(--line) px-3 py-2.5" />
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {rows.map((row) => (
-                                        <tr key={row.id} className="border-t border-(--line)">
-                                            {columns.map((column) => (
-                                                <td key={column.label} className={`whitespace-nowrap px-3 py-2 ${column.align === "right" ? "text-right" : ""}`}>
-                                                    {column.render(row)}
+                                    {groups.map((group) => {
+                                        const renderRow = (row: SalesStockRow, mode: "single" | "parent" | "child") => (
+                                            <tr
+                                                key={mode === "parent" ? `group-${group.key}` : row.id}
+                                                onClick={mode === "parent" ? () => toggleGroup(group.key) : undefined}
+                                                className={`${mode === "parent" ? "cursor-pointer bg-(--chip)/40 hover:bg-(--chip)/70" : ""} ${mode === "child" ? "bg-white/60" : ""}`}
+                                                aria-expanded={mode === "parent" ? expanded.has(group.key) : undefined}
+                                            >
+                                                {columns.map((column, index) => (
+                                                    <td key={column.label} className={`border border-(--line)/70 px-3 py-2.5 align-top ${mode === "child" && index === 0 ? "pl-8" : ""}`}>
+                                                        {mode === "parent" && index === 0 ? (
+                                                            <span className="inline-flex items-center gap-1.5">
+                                                                <ChevronDown className={`h-4 w-4 text-(--ink-soft) transition ${expanded.has(group.key) ? "" : "-rotate-90"}`} aria-hidden="true" />
+                                                                {column.render(row)}
+                                                            </span>
+                                                        ) : (
+                                                            column.render(row)
+                                                        )}
+                                                    </td>
+                                                ))}
+                                                <td className="border border-(--line)/70 px-3 py-2.5 align-top" onClick={(event) => event.stopPropagation()}>
+                                                    {mode === "parent" ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => toggleGroup(group.key)}
+                                                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-(--line) bg-white text-(--ink-soft) transition hover:border-(--brand) hover:text-(--brand)"
+                                                            aria-label={expanded.has(group.key) ? "Hide locations" : "Show locations to add"}
+                                                            title={expanded.has(group.key) ? "Hide locations" : "Show locations to add"}
+                                                        >
+                                                            {expanded.has(group.key) ? <ChevronsDownUp className="h-4 w-4" aria-hidden="true" /> : <ChevronsUpDown className="h-4 w-4" aria-hidden="true" />}
+                                                        </button>
+                                                    ) : (
+                                                        renderCartControl(row)
+                                                    )}
                                                 </td>
-                                            ))}
-                                            <td className="whitespace-nowrap px-3 py-2">
-                                                {renderCartControl(row)}
-                                            </td>
-                                            <td className="whitespace-nowrap px-3 py-2">
-                                                <button type="button" onClick={() => onRequestFromRow(row)} className="text-(--ink-soft) hover:text-(--brand)">
-                                                    Request size/pattern
-                                                </button>
-                                            </td>
-                                        </tr>
-                                    ))}
+                                                <td className="border border-(--line)/70 px-3 py-2.5 align-top" onClick={(event) => event.stopPropagation()}>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => onRequestFromRow(row)}
+                                                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-(--line) bg-white text-(--ink-soft) shadow-sm transition hover:border-(--brand) hover:bg-[rgba(229,26,39,0.06)] hover:text-(--brand)"
+                                                        aria-label="Request a different size, pattern or quantity"
+                                                        title="Request a different size, pattern or quantity"
+                                                    >
+                                                        <MessageSquarePlus className="h-4 w-4" aria-hidden="true" />
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        );
+                                        if (group.rows.length === 1) return renderRow(group.rows[0], "single");
+                                        return (
+                                            <Fragment key={group.key}>
+                                                {renderRow(group.summary, "parent")}
+                                                {expanded.has(group.key) ? group.rows.map((row) => renderRow(row, "child")) : null}
+                                            </Fragment>
+                                        );
+                                    })}
                                 </tbody>
                             </table>
                         </div>
                     ) : (
                         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                            {rows.map((row) => (
-                                <article key={row.id} className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
+                            {groups.map((group) => {
+                                const row = group.rows.length > 1 ? group.summary : group.rows[0];
+                                const folded = group.rows.length > 1;
+                                return (
+                                <article key={group.key} className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
                                     <div className="mb-3">{renderPatternImage(row, "large")}</div>
                                     <div className="flex items-start justify-between gap-2">
                                         <h3 className="text-base font-bold leading-snug">{row.productName}</h3>
@@ -639,8 +878,25 @@ export function SalesStockBrowser({
                                     <p className="mt-2 text-xs text-(--ink-soft)">{row.categoryName}</p>
                                     <p className="mt-1 text-xs text-(--ink-soft)">
                                         {row.location} · {row.companyName}
-                                        {row.lotName ? ` · ${row.lotName}` : ""}
                                     </p>
+                                    {row.lotName ? (
+                                        <span className="mt-1.5 inline-flex items-center gap-1 rounded-full border border-[rgba(229,26,39,0.25)] bg-[rgba(229,26,39,0.08)] px-2.5 py-0.5 text-[11px] font-semibold text-(--brand)">
+                                            <span className="text-[9px] font-medium uppercase tracking-wider opacity-70">Lot</span>
+                                            {row.lotName}
+                                        </span>
+                                    ) : null}
+                                    {folded ? (
+                                        <ul className="mt-2 space-y-1.5 rounded-xl bg-(--chip)/50 p-2 text-xs">
+                                            {group.rows.map((item) => (
+                                                <li key={item.id} className="flex items-center justify-between gap-2">
+                                                    <span className="min-w-0 truncate" title={item.location}>
+                                                        {item.location} <span className="font-semibold text-(--accent)">· {formatQty(item.availableQty)}</span>
+                                                    </span>
+                                                    {renderCartControl(item)}
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    ) : null}
 
                                     <div className="mt-3 grid grid-cols-3 gap-2 border-t border-(--line) pt-3 text-center">
                                         <div>
@@ -693,29 +949,23 @@ export function SalesStockBrowser({
                                     ) : null}
 
                                     <div className="mt-3 flex items-center justify-between gap-2 border-t border-(--line) pt-3">
-                                        {renderCartControl(row)}
-                                        <button type="button" onClick={() => onRequestFromRow(row)} className="text-xs text-(--ink-soft) hover:text-(--brand)">
-                                            Request size/pattern
+                                        {folded ? <span className="text-xs text-(--ink-soft)">Add from a location above</span> : renderCartControl(row)}
+                                        <button
+                                            type="button"
+                                            onClick={() => onRequestFromRow(row)}
+                                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-(--line) bg-white text-(--ink-soft) shadow-sm transition hover:border-(--brand) hover:bg-[rgba(229,26,39,0.06)] hover:text-(--brand)"
+                                            aria-label="Request a different size, pattern or quantity"
+                                            title="Request a different size, pattern or quantity"
+                                        >
+                                            <MessageSquarePlus className="h-4 w-4" aria-hidden="true" />
                                         </button>
                                     </div>
                                 </article>
-                            ))}
+                                );
+                            })}
                         </div>
                     )}
-
-                    {hasMore ? (
-                        <div className="flex justify-center">
-                            <button
-                                type="button"
-                                onClick={loadMore}
-                                disabled={loadingMore}
-                                className="rounded-xl border border-(--line) bg-white px-5 py-2 text-sm font-medium text-(--ink) disabled:cursor-not-allowed disabled:opacity-70"
-                            >
-                                {loadingMore ? "Loading..." : "Load more"}
-                            </button>
-                        </div>
-                    ) : null}
-                </>
+                </div>
             ) : null}
 
             {smartOpen ? (

@@ -2413,8 +2413,6 @@ export async function searchSalesStock(
         quantDomain.push(["company_id", "in", activeCompanyIds]);
     }
 
-    const totalCount = await executeKw<number>(credentials, uid, "stock.quant", "search_count", [quantDomain]);
-
     const quantFields = new Set(
         ["product_id", "location_id", "lot_id", "company_id", "quantity", "reserved_quantity", "available_quantity", "product_categ_id"].filter(
             (name) => quantMeta[name]
@@ -2424,14 +2422,16 @@ export async function searchSalesStock(
         if (source === "quant") quantFields.add(field);
     }
 
-    const quants = await executeKw<Array<Record<string, unknown>>>(
-        credentials,
-        uid,
-        "stock.quant",
-        "search_read",
-        [quantDomain],
-        { fields: Array.from(quantFields), order: "quantity desc, id asc", limit, offset }
-    );
+    // The total and the page of rows are independent: ask Odoo for both at once.
+    const [totalCount, quants] = await Promise.all([
+        executeKw<number>(credentials, uid, "stock.quant", "search_count", [quantDomain]),
+        executeKw<Array<Record<string, unknown>>>(credentials, uid, "stock.quant", "search_read", [quantDomain], {
+            fields: Array.from(quantFields),
+            order: "quantity desc, id asc",
+            limit,
+            offset,
+        }),
+    ]);
 
     const lotIds = Array.from(new Set(quants.map((quant) => getRelationalId(quant.lot_id)).filter((id): id is number => Boolean(id))));
     const productIds = Array.from(new Set(quants.map((quant) => getRelationalId(quant.product_id)).filter((id): id is number => Boolean(id))));

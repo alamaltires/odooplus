@@ -3,7 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useMemo, useCallback, useState } from "react";
+import { useEffect, useMemo, useCallback, useRef, useState } from "react";
 import { ClipboardList, HandCoins, LayoutDashboard, LogOut, Menu, PackageSearch, Percent, Ship, ScanSearch, Settings, ShoppingBasket, Tag, Target, TrendingUp, UserSearch, Users, X, type LucideIcon } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { CompanySelector } from "@/components/company-selector";
@@ -39,6 +39,45 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     const router = useRouter();
     const { user, role, enabledApps, loading, logout } = useAuth();
     const [mobileNavOpen, setMobileNavOpen] = useState(false);
+    // Desktop rail: icons only, widens over the page while the mouse is on it and folds again after opening an app.
+    const [expanded, setExpanded] = useState(false);
+    const [labelsVisible, setLabelsVisible] = useState(false);
+    const hoverTimer = useRef<number | null>(null);
+    const lockedUntilLeave = useRef(false);
+
+    const clearHoverTimer = () => {
+        if (hoverTimer.current !== null) {
+            window.clearTimeout(hoverTimer.current);
+            hoverTimer.current = null;
+        }
+    };
+    const openRail = () => {
+        if (lockedUntilLeave.current) return;
+        clearHoverTimer();
+        hoverTimer.current = window.setTimeout(() => setExpanded(true), 70);
+    };
+    const closeRail = () => {
+        clearHoverTimer();
+        hoverTimer.current = window.setTimeout(() => setExpanded(false), 120);
+    };
+
+    // Labels that need a real "show/hide" (company selector) appear once the rail is mostly open.
+    useEffect(() => {
+        if (!expanded) {
+            const timer = window.setTimeout(() => setLabelsVisible(false), 0);
+            return () => window.clearTimeout(timer);
+        }
+        const timer = window.setTimeout(() => setLabelsVisible(true), 140);
+        return () => window.clearTimeout(timer);
+    }, [expanded]);
+
+    // Any navigation (link, redirect, back button) folds the rail again.
+    useEffect(() => {
+        const timer = window.setTimeout(() => setExpanded(false), 0);
+        return () => window.clearTimeout(timer);
+    }, [pathname]);
+
+    useEffect(() => clearHoverTimer, []);
 
     const visibleLinks = useMemo(() => {
         if (role === "admin") {
@@ -96,58 +135,76 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         );
     }
 
-    const brandBlock = (
-        <div className="flex items-center gap-3 px-5 pt-6 pb-5">
+    const fade = (full: boolean, index = 0) => ({
+        className: `overflow-hidden whitespace-nowrap transition-[max-width,opacity,transform] duration-300 ease-out motion-reduce:transition-none ${full ? "max-w-48 translate-x-0 opacity-100" : "max-w-0 -translate-x-2 opacity-0"}`,
+        style: { transitionDelay: full ? `${40 + index * 18}ms` : "0ms" },
+    });
+
+    const renderBrand = (full: boolean) => (
+        <div className="flex items-center px-4 pt-6 pb-5">
             <div className="shrink-0 overflow-hidden rounded-2xl shadow-[0_10px_24px_rgba(229,26,39,0.18)]">
                 <Image src="/logo.png" alt="Al Amal Odoo++ logo" width={40} height={40} className="h-10 w-10" priority unoptimized />
             </div>
-            <div className="min-w-0">
-                <p className="truncate font-display text-lg tracking-tight text-(--brand)">Al Amal Tyres</p>
-                <span className="inline-flex rounded-full bg-[rgba(74,184,72,0.12)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.12em] text-(--accent)">
-                    Odoo++ Hub
-                </span>
+            <div className={`min-w-0 ${full ? "ml-3" : "ml-0"} transition-[margin] duration-300`}>
+                <div {...fade(full)}>
+                    <p className="truncate font-display text-lg tracking-tight text-(--brand)">Al Amal Tyres</p>
+                    <span className="inline-flex rounded-full bg-[rgba(74,184,72,0.12)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.12em] text-(--accent)">
+                        Odoo++ Hub
+                    </span>
+                </div>
             </div>
         </div>
     );
 
-    const navList = (
-        <nav className="flex-1 space-y-1 overflow-y-auto px-3">
-            {visibleLinks.map((link) => {
+    const renderNav = (full: boolean, desktop: boolean) => (
+        <nav className="flex-1 space-y-1 overflow-y-auto overflow-x-hidden px-3">
+            {visibleLinks.map((link, index) => {
                 const active = pathname.startsWith(link.href);
                 const Icon = link.icon;
                 return (
                     <Link
                         key={link.href}
                         href={link.href}
+                        title={full ? undefined : link.label}
                         onClick={() => {
                             setMobileNavOpen(false);
+                            if (desktop) {
+                                // Fold right away and stay folded until the mouse leaves and comes back.
+                                lockedUntilLeave.current = true;
+                                clearHoverTimer();
+                                setExpanded(false);
+                            }
                             if (link.href === "/orders/pending") {
                                 window.dispatchEvent(new Event("pending-orders-reset-to-first-page"));
                             }
                         }}
-                        className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${active
+                        className={`group flex items-center rounded-xl px-3.5 py-2.5 text-sm font-medium transition-colors ${active
                             ? "bg-(--brand) text-white shadow-[0_8px_20px_rgba(229,26,39,0.24)]"
                             : "text-(--ink) hover:bg-(--chip)"
                             }`}
                     >
-                        <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
-                        <span className="truncate">{link.label}</span>
+                        <Icon className="h-5 w-5 shrink-0 transition-transform duration-200 group-hover:scale-110" aria-hidden="true" />
+                        <span className={`${full ? "ml-3" : "ml-0"} transition-[margin] duration-300`}>
+                            <span {...fade(full, index)} className={`block ${fade(full, index).className}`}>
+                                {link.label}
+                            </span>
+                        </span>
                     </Link>
                 );
             })}
         </nav>
     );
 
-    const userBlock = (
-        <div className="flex items-center gap-3 border-t border-(--line) px-4 py-4">
-            <div className="min-w-0 flex-1">
+    const renderUser = (full: boolean) => (
+        <div className="flex items-center border-t border-(--line) px-4 py-4">
+            <div className={`min-w-0 ${full ? "mr-3 flex-1" : "mr-0"} overflow-hidden whitespace-nowrap transition-[max-width,opacity,margin] duration-300 ease-out motion-reduce:transition-none ${full ? "max-w-56 opacity-100" : "max-w-0 opacity-0"}`}>
                 <p className="text-[11px] uppercase tracking-widest text-(--ink-soft)">Signed in as</p>
                 <p className="truncate text-sm font-semibold text-(--ink)">{user?.email}</p>
             </div>
             <button
                 type="button"
                 onClick={() => logout()}
-                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[rgba(229,26,39,0.2)] bg-white text-(--brand) transition hover:bg-(--chip) hover:text-(--ink)"
+                className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[rgba(229,26,39,0.2)] bg-white text-(--brand) transition hover:bg-(--chip) hover:text-(--ink)"
                 aria-label="Sign out"
                 title="Sign out"
             >
@@ -156,15 +213,41 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
     );
 
+    // The company selector keeps its own state, so it stays mounted; in the folded rail only its icon shows.
+    const renderCompany = (full: boolean) => (
+        <div
+            className={
+                full
+                    ? ""
+                    : "[&_button]:justify-center [&_button]:px-0 [&_button>span]:hidden [&_button>svg:last-child]:hidden"
+            }
+        >
+            <CompanySelector />
+        </div>
+    );
+
     return (
         <div className="min-h-screen bg-(--bg) text-(--ink) lg:flex">
-            {/* Desktop sidebar */}
-            <aside className="hidden lg:flex lg:w-64 lg:shrink-0 lg:flex-col lg:border-r lg:border-(--line) lg:bg-(--card)">
-                {brandBlock}
-                <CompanySelector />
-                {navList}
-                {userBlock}
-            </aside>
+            {/* Desktop rail: reserves a slim column; the sidebar widens OVER the page on hover so tables keep their space. */}
+            <div className="hidden lg:relative lg:z-40 lg:block lg:w-18 lg:shrink-0">
+                <aside
+                    onMouseEnter={openRail}
+                    onMouseLeave={() => {
+                        lockedUntilLeave.current = false;
+                        closeRail();
+                    }}
+                    onFocus={openRail}
+                    onBlur={(event) => {
+                        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) closeRail();
+                    }}
+                    className={`sticky top-0 flex h-screen flex-col border-r border-(--line) bg-(--card) transition-[width,box-shadow] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${expanded ? "w-64 shadow-[12px_0_40px_rgba(8,23,41,0.14)]" : "w-18"}`}
+                >
+                    {renderBrand(expanded)}
+                    {renderCompany(labelsVisible)}
+                    {renderNav(expanded, true)}
+                    {renderUser(expanded)}
+                </aside>
+            </div>
 
             {/* Mobile top bar */}
             <header className="flex items-center gap-2.5 border-b border-(--line) bg-(--card)/90 px-4 py-3 shadow-[0_10px_35px_rgba(229,26,39,0.08)] backdrop-blur lg:hidden">
@@ -203,7 +286,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                         }`}
                 >
                     <div className="flex items-center justify-between px-2">
-                        {brandBlock}
+                        {renderBrand(true)}
                         <button
                             type="button"
                             onClick={() => setMobileNavOpen(false)}
@@ -213,9 +296,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                             <X className="h-4 w-4" aria-hidden="true" />
                         </button>
                     </div>
-                    <CompanySelector />
-                    {navList}
-                    {userBlock}
+                    {renderCompany(true)}
+                    {renderNav(true, false)}
+                    {renderUser(true)}
                 </aside>
             </div>
 
