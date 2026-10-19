@@ -373,17 +373,25 @@ function normalizeUrl(url: string) {
 
 async function jsonRpc<T>(baseUrl: string, payload: RpcRequestBody): Promise<T> {
     const endpoint = `${normalizeUrl(baseUrl)}/jsonrpc`;
-    const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            jsonrpc: "2.0",
-            method: "call",
-            params: payload,
-            id: Date.now(),
-        }),
-        cache: "no-store",
-    });
+    let response: Response;
+    try {
+        response = await fetch(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                jsonrpc: "2.0",
+                method: "call",
+                params: payload,
+                id: Date.now(),
+            }),
+            cache: "no-store",
+        });
+    } catch (error) {
+        // "fetch failed" alone hides the real reason (refused, reset, timed out, DNS, TLS...): it is in `cause`.
+        const cause = (error as { cause?: { code?: string; message?: string } } | undefined)?.cause;
+        const reason = [cause?.code, cause?.message].filter(Boolean).join(" ") || (error instanceof Error ? error.message : String(error));
+        throw new Error(`Cannot reach the Odoo server (${reason}).`);
+    }
 
     if (!response.ok) {
         throw new Error(`Odoo HTTP error: ${response.status}`);
@@ -418,6 +426,10 @@ async function authenticate(credentials: OdooCredentials) {
             args: [credentials.db, credentials.username, credentials.password, {}],
         });
     } catch (error) {
+        if (error instanceof Error && error.message.startsWith("Cannot reach the Odoo server")) {
+            // A network problem, not a wrong password: say so instead of blaming the login.
+            throw error;
+        }
         throw new Error(
             `Failed to authenticate with Odoo. Check your database, username, and password. Details: ${error instanceof Error ? error.message : String(error)
             }`
