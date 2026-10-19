@@ -12214,3 +12214,349 @@ export async function getAgedStock(credentials: OdooCredentials, minAgeDays: num
         truncated: rows.length > limited.length,
     };
 }
+
+// ---------------------------------------------------------------------------
+// Price list request: products filtered by brand / origin, priced from chosen Odoo pricelists.
+// ---------------------------------------------------------------------------
+
+export type PricelistOption = { id: number; name: string; currency: string };
+
+export async function getPricelistOptions(credentials: OdooCredentials): Promise<PricelistOption[]> {
+    const uid = await authenticate(credentials);
+    const activeCompanyIds = companyContextStorage.getStore();
+    // Same scoping as the stock search: the selected companies' lists plus the shared ones.
+    const domain: unknown[] = activeCompanyIds && activeCompanyIds.length > 0
+        ? ["|", ["company_id", "=", false], ["company_id", "in", activeCompanyIds]]
+        : [];
+    const lists = await executeKw<Array<Record<string, unknown>>>(credentials, uid, "product.pricelist", "search_read", [domain], {
+        fields: ["id", "name", "currency_id"],
+        order: "name asc",
+        limit: 200,
+    });
+    return lists.map((list) => ({
+        id: Number(list.id),
+        name: toDisplayString(list.name) || `Pricelist #${list.id}`,
+        currency: getRelationalName(list.currency_id),
+    }));
+}
+
+export type PriceListInput = {
+    brandIds: number[];
+    excludeBrandIds: number[];
+    originIds: number[];
+    excludeOriginIds: number[];
+    pricelistIds: number[];
+    inStockOnly: boolean;
+    onlyPriced: boolean;
+};
+
+export type PriceListRow = {
+    key: string;
+    productId: number;
+    searchName: string;
+    name: string;
+    brand: string;
+    origin: string;
+    pattern: string;
+    rim: string;
+    category: string;
+    lotName: string;
+    lotYear: string;
+    /** On hand minus reserved, summed over the internal locations. */
+    available: number;
+    prices: Record<string, number | null>;
+};
+
+export type PriceListDiagnostics = {
+    /** Every rule of the chosen pricelists, by how it is priced and what it applies to. */
+    ruleTypes: Array<{ computePrice: string; appliedOn: string; count: number }>;
+    /** Fixed-price rules that belong to the listed products. */
+    matchedRules: number;
+    lotRules: number;
+    skippedQuantityBreaks: number;
+    skippedDates: number;
+    rowsWithPrice: number;
+};
+
+export type PriceListResult = {
+    pricelists: PricelistOption[];
+    rows: PriceListRow[];
+    totalMatched: number;
+    truncated: boolean;
+    diagnostics: PriceListDiagnostics;
+};
+
+const PRICE_LIST_MAX_PRODUCTS = 5000;
+
+type FieldHit = { source: SalesStockSource; field: string };
+
+/** Finds where "Lot Year" and "Pattern" live (quant, lot or product), the same way the stock search does. */
+async function resolveLotYearAndPattern(credentials: OdooCredentials, uid: number) {
+    const [quantMeta, lotMeta, productMeta] = await Promise.all([
+        getModelFieldsMeta(credentials, uid, "stock.quant"),
+        getModelFieldsMeta(credentials, uid, "stock.lot").catch(() => ({} as Record<string, OdooFieldMeta>)),
+        getModelFieldsMeta(credentials, uid, "product.product"),
+    ]);
+    const metas: Array<[SalesStockSource, Record<string, OdooFieldMeta>]> = [["quant", quantMeta], ["lot", lotMeta], ["product", productMeta]];
+    const find = (labels: string[], relation?: string): FieldHit | null => {
+        for (const [source, meta] of metas) {
+            const relationHit = relation
+                ? Object.entries(meta).find(([, fieldMeta]) => fieldMeta?.type === "many2one" && fieldMeta?.relation === relation)?.[0]
+                : undefined;
+            const labelHit = Object.entries(meta).find(([, fieldMeta]) => labels.includes(toDisplayString(fieldMeta?.string).trim().toLowerCase()))?.[0];
+            const field = relationHit ?? labelHit;
+            if (field) return { source, field };
+        }
+        return null;
+    };
+    return {
+        lotYear: find(["lot year"]),
+        pattern: find(["pattern", "tire pattern", "tread pattern"], "tire.pattern"),
+        metas: Object.fromEntries(metas) as Record<SalesStockSource, Record<string, OdooFieldMeta>>,
+    };
+}
+
+export async function getPriceListRequest(credentials: OdooCredentials, input: PriceListInput): Promise<PriceListResult> {
+    const uid = await authenticate(credentials);
+    const ids = (values: unknown) => (Array.isArray(values) ? values.map(Number).filter((id) => Number.isFinite(id) && id > 0) : []);
+    const brandIds = ids(input.brandIds);
+    const excludeBrandIds = ids(input.excludeBrandIds);
+    const originIds = ids(input.originIds);
+    const excludeOriginIds = ids(input.excludeOriginIds);
+    const pricelistIds = ids(input.pricelistIds);
+    if (pricelistIds.length === 0) throw new Error("Choose at least one pricelist.");
+
+    const allLists = await getPricelistOptions(credentials);
+    const pricelists = pricelistIds.map((id) => allLists.find((list) => list.id === id)).filter((list): list is PricelistOption => Boolean(list));
+    if (pricelists.length === 0) throw new Error("The selected pricelists were not found.");
+
+    const domain: unknown[] = [["sale_ok", "=", true]];
+    if (brandIds.length > 0) domain.push(["tire_brand", "in", brandIds]);
+    if (excludeBrandIds.length > 0) domain.push(["tire_brand", "not in", excludeBrandIds]);
+    if (originIds.length > 0) domain.push(["origin", "in", originIds]);
+    if (excludeOriginIds.length > 0) domain.push(["origin", "not in", excludeOriginIds]);
+    if (input.inStockOnly) domain.push(["qty_available", ">", 0]);
+
+    const matchedIds = await executeKw<number[]>(credentials, uid, "product.product", "search", [domain], {
+        order: "id asc",
+        limit: PRICE_LIST_MAX_PRODUCTS + 1,
+    });
+    const truncated = matchedIds.length > PRICE_LIST_MAX_PRODUCTS;
+    const productIds = matchedIds.slice(0, PRICE_LIST_MAX_PRODUCTS);
+
+    const resolved = await resolveLotYearAndPattern(credentials, uid);
+    const productFields = ["name", "tire_brand", "origin", "product_tmpl_id", "categ_id", "rim_diameter"];
+    for (const hit of [resolved.lotYear, resolved.pattern]) if (hit?.source === "product") productFields.push(hit.field);
+    const products = productIds.length > 0
+        ? await readInBatches(credentials, uid, "product.product", productIds, Array.from(new Set(productFields.filter((field) => field === "name" || resolved.metas.product[field]))))
+        : [];
+    const productById = new Map(products.map((product) => [Number(product.id), product]));
+    const templateIdByProduct = new Map<number, number>();
+    for (const product of products) {
+        const templateId = getRelationalId(product.product_tmpl_id);
+        if (templateId) templateIdByProduct.set(Number(product.id), templateId);
+    }
+
+    // "Search name" lives on the template.
+    const templateIds = Array.from(new Set(templateIdByProduct.values()));
+    const templates = templateIds.length > 0
+        ? await readInBatches(credentials, uid, "product.template", templateIds, ["second_name"]).catch(() => [] as Array<Record<string, unknown>>)
+        : [];
+    const searchNameByTemplate = new Map(templates.map((template) => [Number(template.id), toDisplayString(template.second_name)]));
+
+    // Prices in this catalogue are mostly per lot, so a row is one product + lot that is on the shelf.
+    const quantFields = ["product_id", "lot_id", "quantity", "reserved_quantity"];
+    for (const hit of [resolved.lotYear, resolved.pattern]) if (hit?.source === "quant") quantFields.push(hit.field);
+    type StockLot = { productId: number; lotId: number | null; lotName: string; quant: Record<string, unknown>; available: number };
+    const stockLots = new Map<string, StockLot>();
+    for (let start = 0; start < productIds.length; start += 800) {
+        const quants = await searchReadAll(
+            credentials,
+            uid,
+            "stock.quant",
+            [["product_id", "in", productIds.slice(start, start + 800)], ["location_id.usage", "=", "internal"], ["quantity", ">", 0]],
+            Array.from(new Set(quantFields))
+        ).catch(() => [] as Array<Record<string, unknown>>);
+        for (const quant of quants) {
+            const productId = getRelationalId(quant.product_id) ?? 0;
+            const lotId = getRelationalId(quant.lot_id);
+            const key = `${productId}|${lotId ?? 0}`;
+            const free = Number(quant.quantity ?? 0) - Number(quant.reserved_quantity ?? 0);
+            const existing = stockLots.get(key);
+            if (existing) existing.available += free;
+            else stockLots.set(key, { productId, lotId, lotName: getRelationalName(quant.lot_id), quant, available: free });
+        }
+    }
+
+    const lotIds = Array.from(new Set(Array.from(stockLots.values()).map((lot) => lot.lotId).filter((id): id is number => Boolean(id))));
+    const lotFields = ["name"];
+    for (const hit of [resolved.lotYear, resolved.pattern]) if (hit?.source === "lot") lotFields.push(hit.field);
+    const lots = lotIds.length > 0
+        ? await readInBatches(credentials, uid, "stock.lot", lotIds, Array.from(new Set(lotFields))).catch(() => [] as Array<Record<string, unknown>>)
+        : [];
+    const lotById = new Map(lots.map((lot) => [Number(lot.id), lot]));
+
+    // Pricelist rules. A rule can be for one lot, one product or a whole template; the most specific wins.
+    let lotFieldName: string | null = null;
+    try {
+        const itemFields = await getModelFieldsMeta(credentials, uid, "product.pricelist.item");
+        lotFieldName =
+            Object.entries(itemFields).find(
+                ([, meta]) => meta.type === "many2one" && /^stock\.(production\.)?lot$/.test(meta.relation ?? "")
+            )?.[0] ?? null;
+    } catch {
+        lotFieldName = null;
+    }
+
+    const nowStamp = formatOdooDateTime(new Date());
+    const diagnostics: PriceListDiagnostics = { ruleTypes: [], matchedRules: 0, lotRules: 0, skippedQuantityBreaks: 0, skippedDates: 0, rowsWithPrice: 0 };
+    const typeGroups = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "product.pricelist.item",
+        "read_group",
+        [[["pricelist_id", "in", pricelistIds]], ["compute_price"], ["compute_price", "applied_on"]],
+        { lazy: false }
+    ).catch(() => [] as Array<Record<string, unknown>>);
+    diagnostics.ruleTypes = typeGroups.map((group) => ({
+        computePrice: toDisplayString(group.compute_price),
+        appliedOn: toDisplayString(group.applied_on),
+        count: Number(group.__count ?? 0),
+    }));
+    type Best = { price: number; minQty: number };
+    const bestByLot = new Map<string, Best>();
+    const bestByVariant = new Map<string, Best>();
+    const bestByTemplate = new Map<string, Best>();
+    const consider = (target: Map<string, Best>, key: string, price: number, minQty: number) => {
+        const current = target.get(key);
+        if (!current || minQty < current.minQty) target.set(key, { price, minQty });
+    };
+
+    for (let start = 0; start < productIds.length; start += 800) {
+        const slice = productIds.slice(start, start + 800);
+        const sliceTemplates = Array.from(new Set(slice.map((id) => templateIdByProduct.get(id)).filter((id): id is number => Boolean(id))));
+        const items = await searchReadAll(
+            credentials,
+            uid,
+            "product.pricelist.item",
+            [
+                ["pricelist_id", "in", pricelistIds],
+                ["compute_price", "=", "fixed"],
+                "|",
+                ["product_id", "in", slice],
+                "&",
+                ["product_id", "=", false],
+                ["product_tmpl_id", "in", sliceTemplates],
+            ],
+            ["pricelist_id", "product_id", "product_tmpl_id", "fixed_price", "min_quantity", "date_start", "date_end", ...(lotFieldName ? [lotFieldName] : [])]
+        );
+        for (const item of items) {
+            const from = typeof item.date_start === "string" ? item.date_start : "";
+            const to = typeof item.date_end === "string" ? item.date_end : "";
+            if ((from && from > nowStamp) || (to && to < nowStamp)) {
+                diagnostics.skippedDates += 1;
+                continue;
+            }
+            const listId = getRelationalId(item.pricelist_id);
+            if (!listId) continue;
+            const price = Number(item.fixed_price ?? 0);
+            const minQty = Number(item.min_quantity ?? 0);
+            if (minQty > 1) {
+                diagnostics.skippedQuantityBreaks += 1; // a quantity-break price is not the plain list price
+                continue;
+            }
+            const variantId = getRelationalId(item.product_id);
+            // Rules tied to a lot are read separately below (they need not point at any product).
+            if (lotFieldName && getRelationalId(item[lotFieldName])) continue;
+            diagnostics.matchedRules += 1;
+            if (variantId) consider(bestByVariant, `${listId}|${variantId}`, price, minQty);
+            else {
+                const templateId = getRelationalId(item.product_tmpl_id);
+                if (templateId) consider(bestByTemplate, `${listId}|${templateId}`, price, minQty);
+            }
+        }
+    }
+
+    // Lot prices: the rule points at the lot itself, whatever product (or none) it is "applied on".
+    if (lotFieldName && lotIds.length > 0) {
+        for (let start = 0; start < lotIds.length; start += 800) {
+            const items = await searchReadAll(
+                credentials,
+                uid,
+                "product.pricelist.item",
+                [["pricelist_id", "in", pricelistIds], ["compute_price", "=", "fixed"], [lotFieldName, "in", lotIds.slice(start, start + 800)]],
+                ["pricelist_id", "fixed_price", "min_quantity", "date_start", "date_end", lotFieldName]
+            ).catch(() => [] as Array<Record<string, unknown>>);
+            for (const item of items) {
+                const from = typeof item.date_start === "string" ? item.date_start : "";
+                const to = typeof item.date_end === "string" ? item.date_end : "";
+                if ((from && from > nowStamp) || (to && to < nowStamp)) {
+                    diagnostics.skippedDates += 1;
+                    continue;
+                }
+                const minQty = Number(item.min_quantity ?? 0);
+                if (minQty > 1) {
+                    diagnostics.skippedQuantityBreaks += 1;
+                    continue;
+                }
+                const listId = getRelationalId(item.pricelist_id);
+                const itemLotId = getRelationalId(item[lotFieldName]);
+                if (!listId || !itemLotId) continue;
+                diagnostics.matchedRules += 1;
+                diagnostics.lotRules += 1;
+                consider(bestByLot, `${listId}|${itemLotId}`, Number(item.fixed_price ?? 0), minQty);
+            }
+        }
+    }
+
+    const valueOf = (hit: FieldHit | null, quant: Record<string, unknown> | undefined, lot: Record<string, unknown> | undefined, product: Record<string, unknown> | undefined) => {
+        if (!hit) return "";
+        const record = hit.source === "quant" ? quant : hit.source === "lot" ? lot : product;
+        return toDisplayString(normalizeFieldValue(record?.[hit.field], resolved.metas[hit.source][hit.field], "text"));
+    };
+
+    const stockLotsByProduct = new Map<number, StockLot[]>();
+    for (const lot of stockLots.values()) stockLotsByProduct.set(lot.productId, [...(stockLotsByProduct.get(lot.productId) ?? []), lot]);
+
+    const rows: PriceListRow[] = [];
+    for (const productId of productIds) {
+        const product = productById.get(productId);
+        if (!product) continue;
+        const templateId = templateIdByProduct.get(productId);
+        const entries: Array<StockLot | null> = stockLotsByProduct.get(productId) ?? (input.inStockOnly ? [] : [null]);
+        for (const entry of entries) {
+            const lot = entry?.lotId ? lotById.get(entry.lotId) : undefined;
+            const prices: Record<string, number | null> = {};
+            let priced = false;
+            for (const list of pricelists) {
+                const best =
+                    (entry?.lotId ? bestByLot.get(`${list.id}|${entry.lotId}`) : undefined) ??
+                    bestByVariant.get(`${list.id}|${productId}`) ??
+                    (templateId ? bestByTemplate.get(`${list.id}|${templateId}`) : undefined);
+                prices[String(list.id)] = best ? best.price : null;
+                if (best) priced = true;
+            }
+            if (priced) diagnostics.rowsWithPrice += 1;
+            if (input.onlyPriced && !priced) continue;
+            const year = valueOf(resolved.lotYear, entry?.quant, lot, product);
+            rows.push({
+                key: `${productId}|${entry?.lotId ?? 0}`,
+                productId,
+                searchName: templateId ? searchNameByTemplate.get(templateId) ?? "" : "",
+                name: toDisplayString(product.name),
+                brand: getRelationalName(product.tire_brand),
+                origin: getRelationalName(product.origin),
+                pattern: valueOf(resolved.pattern, entry?.quant, lot, product),
+                rim: getRelationalName(product.rim_diameter),
+                category: getRelationalName(product.categ_id),
+                lotName: entry?.lotName ?? "",
+                lotYear: year,
+                available: Math.max(0, entry?.available ?? 0),
+                prices,
+            });
+        }
+    }
+    rows.sort((a, b) => a.brand.localeCompare(b.brand) || a.name.localeCompare(b.name) || a.lotName.localeCompare(b.lotName));
+
+    return { pricelists, rows, totalMatched: matchedIds.length, truncated, diagnostics };
+}

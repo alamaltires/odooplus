@@ -181,7 +181,7 @@ export function Select2({
                             className="w-full rounded-lg border border-(--line) bg-white py-1.5 pl-8 pr-3 text-sm focus:outline-none"
                         />
                     </div>
-                    <ul role="listbox" className="max-h-64 overflow-auto p-1">
+                    <ul role="listbox" className="max-h-64 overflow-x-hidden overflow-y-auto p-1">
                         {visibleOptions.length === 0 ? (
                             <li className="px-3 py-2 text-sm text-(--ink-soft)">{query ? noMatchText : emptyText}</li>
                         ) : (
@@ -197,12 +197,12 @@ export function Select2({
                                             event.preventDefault();
                                             selectOption(option);
                                         }}
-                                        className={`flex w-full flex-col items-start rounded-lg px-3 py-2 text-left text-sm disabled:cursor-not-allowed disabled:opacity-40 ${index === highlightedIndex ? "bg-(--chip)" : ""
+                                        className={`flex w-full min-w-0 flex-col items-start rounded-lg px-3 py-2 text-left text-sm disabled:cursor-not-allowed disabled:opacity-40 ${index === highlightedIndex ? "bg-(--chip)" : ""
                                             } ${option.value === value ? "font-medium text-(--brand)" : ""}`}
                                     >
-                                        <span className="truncate">{option.label}</span>
+                                        <span className="w-full min-w-0 break-words">{option.label}</span>
                                         {option.description ? (
-                                            <span className="truncate text-xs text-(--ink-soft)">{option.description}</span>
+                                            <span className="w-full min-w-0 break-words text-xs text-(--ink-soft)">{option.description}</span>
                                         ) : null}
                                     </button>
                                 </li>

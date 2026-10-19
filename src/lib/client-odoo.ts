@@ -962,3 +962,52 @@ export type AgedStockResponse = {
 export function getAgedStock(input: { minAgeDays: number }) {
     return post<AgedStockResponse>("/api/odoo/aged-stock", input);
 }
+
+export type PricelistOption = { id: number; name: string; currency: string };
+
+export type PriceListRow = {
+    key: string;
+    productId: number;
+    searchName: string;
+    name: string;
+    brand: string;
+    origin: string;
+    pattern: string;
+    rim: string;
+    category: string;
+    lotName: string;
+    lotYear: string;
+    available: number;
+    prices: Record<string, number | null>;
+};
+
+export type PriceListResponse = {
+    pricelists: PricelistOption[];
+    rows: PriceListRow[];
+    totalMatched: number;
+    truncated: boolean;
+    diagnostics: {
+        ruleTypes: Array<{ computePrice: string; appliedOn: string; count: number }>;
+        matchedRules: number;
+        lotRules: number;
+        skippedQuantityBreaks: number;
+        skippedDates: number;
+        rowsWithPrice: number;
+    };
+};
+
+export function getPricelists() {
+    return post<{ pricelists: PricelistOption[] }>("/api/odoo/pricelists", {});
+}
+
+export function getPriceListRequest(input: {
+    brandIds: number[];
+    excludeBrandIds: number[];
+    originIds: number[];
+    excludeOriginIds: number[];
+    pricelistIds: number[];
+    inStockOnly: boolean;
+    onlyPriced: boolean;
+}) {
+    return post<PriceListResponse>("/api/odoo/price-list-request", input);
+}

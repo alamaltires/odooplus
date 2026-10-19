@@ -5,6 +5,7 @@ import {
     CheckCircle2,
     ClipboardList,
     Eye,
+    FileSpreadsheet,
     PackageSearch,
     Plus,
     Search,
@@ -23,6 +24,7 @@ import {
     type SalesStockRow,
 } from "@/lib/client-odoo";
 import { SalesStockBrowser } from "@/components/sales-stock-browser";
+import { PriceListRequest } from "@/components/price-list-request";
 
 type ReferenceProduct = { id: number; name: string; brandName: string };
 
@@ -97,7 +99,7 @@ export default function ProductRequestsPage() {
     const { user, role } = useAuth();
     const isAdmin = role === "admin";
 
-    const [activeTab, setActiveTab] = useState<"search" | "requests">("search");
+    const [activeTab, setActiveTab] = useState<"search" | "requests" | "pricelist">("search");
 
     // --- Search state ---
     const [query, setQuery] = useState("");
@@ -315,6 +317,18 @@ export default function ProductRequestsPage() {
                     <ClipboardList className="h-4 w-4" aria-hidden="true" />
                     {isAdmin ? "All Requests" : "My Requests"}
                 </button>
+                <button
+                    type="button"
+                    onClick={() => setActiveTab("pricelist")}
+                    className={`flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition ${
+                        activeTab === "pricelist"
+                            ? "border-(--brand) text-(--brand)"
+                            : "border-transparent text-(--ink-soft) hover:text-(--ink)"
+                    }`}
+                >
+                    <FileSpreadsheet className="h-4 w-4" aria-hidden="true" />
+                    Price List Request
+                </button>
             </div>
 
             {activeTab === "search" ? (
@@ -325,6 +339,10 @@ export default function ProductRequestsPage() {
                         onRequest={openRequestPanel}
                         onRequestFromRow={openRequestPanelFromRow}
                     />
+                </div>
+            ) : activeTab === "pricelist" ? (
+                <div className="mt-6">
+                    <PriceListRequest />
                 </div>
             ) : (
                 <div className="mt-6 rounded-2xl border border-(--line) bg-(--card) p-5">

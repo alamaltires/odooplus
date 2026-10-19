@@ -42,7 +42,7 @@ const PAGE_SIZES = [20, 30, 50, 100];
 const DEFAULT_PAGE_SIZE = 30;
 const PAGE_SIZE_STORAGE_KEY = "fast-orders:page-size";
 const CART_STORAGE_KEY = "odoopp:salesCart";
-const VIEW_STORAGE_KEY = "odoopp:salesView";
+const VIEW_STORAGE_KEY = "odoopp:salesView:v2";
 
 type CartLine = {
     quantId: number;
@@ -154,6 +154,7 @@ export function SalesStockBrowser({
     const [customers, setCustomers] = useState<Select2Option[]>([]);
     const [customersLoading, setCustomersLoading] = useState(false);
     const [customerId, setCustomerId] = useState("");
+    const [customerMissing, setCustomerMissing] = useState(false);
     const [submitting, setSubmitting] = useState(false);
     const [submitError, setSubmitError] = useState<string | null>(null);
     const [created, setCreated] = useState<Array<{ id: number; name: string; companyName: string }> | null>(null);
@@ -387,7 +388,7 @@ export function SalesStockBrowser({
     async function handleCreateQuotation() {
         setSubmitError(null);
         if (!customerId) {
-            setSubmitError("Select a customer first.");
+            setCustomerMissing(true);
             return;
         }
         setSubmitting(true);
@@ -523,8 +524,14 @@ export function SalesStockBrowser({
                                 {copiedId === row.id ? <CheckCircle2 className="h-3.5 w-3.5 text-(--accent)" aria-hidden="true" /> : <Copy className="h-3.5 w-3.5" aria-hidden="true" />}
                             </button>
                         </div>
-                        <div className="mt-1 flex flex-wrap gap-1">
-                            {[row.brand, row.pattern, row.country, row.lotYear && `Lot ${row.lotYear}`].filter(Boolean).map((chip) => (
+                        <div className="mt-1 flex flex-wrap items-center gap-1">
+                            {row.brand ? (
+                                <span className="inline-flex items-center gap-1 rounded-full border border-(--ink) bg-(--ink) px-2.5 py-0.5 text-[11px] font-semibold text-white">
+                                    <span className="text-[9px] font-medium uppercase tracking-wider opacity-60">Brand</span>
+                                    {row.brand}
+                                </span>
+                            ) : null}
+                            {[row.pattern, row.country, row.lotYear && `Lot ${row.lotYear}`].filter(Boolean).map((chip) => (
                                 <span key={String(chip)} className="rounded-full bg-(--chip) px-2 py-0.5 text-[11px] font-medium">
                                     {chip}
                                 </span>
@@ -804,12 +811,20 @@ export function SalesStockBrowser({
                                                 aria-expanded={mode === "parent" ? expanded.has(group.key) : undefined}
                                             >
                                                 {columns.map((column, index) => (
-                                                    <td key={column.label} className={`border border-(--line)/70 px-3 py-2.5 align-top ${mode === "child" && index === 0 ? "pl-8" : ""}`}>
-                                                        {mode === "parent" && index === 0 ? (
-                                                            <span className="inline-flex items-center gap-1.5">
-                                                                <ChevronDown className={`h-4 w-4 text-(--ink-soft) transition ${expanded.has(group.key) ? "" : "-rotate-90"}`} aria-hidden="true" />
-                                                                {column.render(row)}
-                                                            </span>
+                                                    <td
+                                                        key={column.label}
+                                                        className={`border border-(--line)/70 px-3 py-2.5 align-top ${mode === "child" && index === 0 ? "border-l-2 border-l-(--brand)/40" : ""}`}
+                                                    >
+                                                        {index === 0 ? (
+                                                            // Every row reserves the same slot for the fold arrow, so the images line up.
+                                                            <div className="flex items-start gap-1">
+                                                                <span className="flex h-5 w-5 shrink-0 items-center justify-center pt-0.5">
+                                                                    {mode === "parent" ? (
+                                                                        <ChevronDown className={`h-4 w-4 text-(--ink-soft) transition ${expanded.has(group.key) ? "" : "-rotate-90"}`} aria-hidden="true" />
+                                                                    ) : null}
+                                                                </span>
+                                                                <div className="min-w-0 flex-1">{column.render(row)}</div>
+                                                            </div>
                                                         ) : (
                                                             column.render(row)
                                                         )}
@@ -868,8 +883,14 @@ export function SalesStockBrowser({
                                             {copiedId === row.id ? <CheckCircle2 className="h-4 w-4 text-(--accent)" aria-hidden="true" /> : <Copy className="h-4 w-4" aria-hidden="true" />}
                                         </button>
                                     </div>
-                                    <div className="mt-2 flex flex-wrap gap-1.5">
-                                        {[row.brand, row.pattern, row.country, row.lotYear && `Lot ${row.lotYear}`].filter(Boolean).map((chip) => (
+                                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                        {row.brand ? (
+                                            <span className="inline-flex items-center gap-1 rounded-full border border-(--ink) bg-(--ink) px-2.5 py-0.5 text-[11px] font-semibold text-white">
+                                                <span className="text-[9px] font-medium uppercase tracking-wider opacity-60">Brand</span>
+                                                {row.brand}
+                                            </span>
+                                        ) : null}
+                                        {[row.pattern, row.country, row.lotYear && `Lot ${row.lotYear}`].filter(Boolean).map((chip) => (
                                             <span key={String(chip)} className="rounded-full bg-(--chip) px-2.5 py-1 text-xs font-semibold text-(--ink)">
                                                 {chip}
                                             </span>
@@ -1040,6 +1061,30 @@ export function SalesStockBrowser({
                             </button>
                         </div>
 
+                        {cart.length > 0 ? (
+                            <div className="border-b border-(--line) bg-(--chip)/40 px-5 py-3">
+                                <label className="block">
+                                    <span className="mb-1 flex items-center gap-1 text-sm font-semibold">
+                                        Customer <span className="text-(--brand)" aria-hidden="true">*</span>
+                                        <span className="text-xs font-normal text-(--ink-soft)">required</span>
+                                    </span>
+                                    <div className={`rounded-xl ${customerMissing && !customerId ? "ring-2 ring-red-500" : ""}`}>
+                                        <Select2
+                                            value={customerId}
+                                            onChange={(value) => {
+                                                setCustomerId(value);
+                                                setCustomerMissing(false);
+                                            }}
+                                            options={customers}
+                                            loading={customersLoading}
+                                            placeholder="Select a customer"
+                                        />
+                                    </div>
+                                    {customerMissing && !customerId ? <span className="mt-1 block text-xs text-red-600">Choose the customer before creating the quotation.</span> : null}
+                                </label>
+                            </div>
+                        ) : null}
+
                         <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
                             {cart.length === 0 ? (
                                 <p className="text-sm text-(--ink-soft)">Your cart is empty. Add products from the search results.</p>
@@ -1094,16 +1139,6 @@ export function SalesStockBrowser({
                                         <span className="font-medium">Est. at retail: {formatMoney(cartRetailTotal)}</span>
                                     ) : null}
                                 </div>
-                                <label className="block">
-                                    <span className="mb-1 block text-sm font-medium">Customer</span>
-                                    <Select2
-                                        value={customerId}
-                                        onChange={setCustomerId}
-                                        options={customers}
-                                        loading={customersLoading}
-                                        placeholder="Select a customer"
-                                    />
-                                </label>
                                 {submitError ? <p className="text-sm text-red-600">{submitError}</p> : null}
                                 <div className="flex items-center gap-2">
                                     <button
