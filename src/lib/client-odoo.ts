@@ -1021,9 +1021,31 @@ export function getPriceListRequest(input: {
     excludeOeValues: Array<number | string>;
     lotNames: string[];
     excludeLotNames: string[];
+    searchNames: string[];
+    excludeSearchNames: string[];
     pricelistIds: number[];
     inStockOnly: boolean;
     onlyPriced: boolean;
 }) {
     return post<PriceListResponse>("/api/odoo/price-list-request", input);
+}
+
+export type PriceListFacets = {
+    brands: Array<{ id: number; name: string; count: number }>;
+    origins: Array<{ id: number; name: string; count: number }>;
+    categories: Array<{ id: number; name: string; count: number }>;
+    oe: Array<{ id: number | string; name: string; count: number }> | null;
+    lots: Array<{ id: string; name: string; count: number }>;
+};
+
+/** What the include filters leave available to exclude, with how many products each option covers. */
+export function getPriceListFacets(input: {
+    brandIds: number[];
+    originIds: number[];
+    categoryIds: number[];
+    oeValues: Array<number | string>;
+    lotNames: string[];
+    searchNames: string[];
+}) {
+    return post<PriceListFacets>("/api/odoo/price-list-facets", input);
 }

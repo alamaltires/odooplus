@@ -1,13 +1,15 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, Download, FileSpreadsheet, Search, X } from "lucide-react";
+import { AlertCircle, ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, Download, FileSpreadsheet, Plus, Search, X } from "lucide-react";
 import {
+    getPriceListFacets,
     getPriceListFilterOptions,
     getPriceListRequest,
     getPricelists,
     getProductBrands,
     getProductOrigins,
+    type PriceListFacets,
     type PriceListFilterOptions,
     type PriceListResponse,
     type PriceListRow,
@@ -15,6 +17,8 @@ import {
 } from "@/lib/client-odoo";
 
 type Option = { id: number | string; name: string };
+type FilterField = "brand" | "origin" | "category" | "oe" | "lot" | "searchName";
+type FilterRow = { id: number; field: FilterField; mode: "is" | "isnot"; values: Array<number | string> };
 // Very long lists (lot numbers) only render the first matches; typing narrows them.
 const MAX_SHOWN = 200;
 // 0 means "show all".
@@ -26,15 +30,23 @@ function MultiPick({
     hint,
     tone,
     options,
+    lookup,
     value,
     onChange,
+    disabledHint,
+    hideLabel = false,
 }: {
     label: string;
     hint: string;
     tone: "include" | "exclude";
     options: Option[];
+    /** Every possible option, so chips keep their names when `options` shrinks. */
+    lookup?: Option[];
     value: Array<number | string>;
     onChange: (next: Array<number | string>) => void;
+    /** When set, the picker is locked and shows this instead. */
+    disabledHint?: string;
+    hideLabel?: boolean;
 }) {
     const [open, setOpen] = useState(false);
     const [search, setSearch] = useState("");
@@ -62,20 +74,23 @@ function MultiPick({
     }, [options, search]);
     const chipTone = tone === "include" ? "bg-[rgba(74,184,72,0.14)] text-emerald-800" : "bg-[rgba(229,26,39,0.1)] text-(--brand)";
     const picked = useMemo(() => {
-        const byId = new Map(options.map((option) => [option.id, option]));
+        const byId = new Map((lookup ?? options).map((option) => [option.id, option]));
         return value.map((id) => byId.get(id) ?? { id, name: String(id) });
-    }, [options, value]);
+    }, [options, lookup, value]);
 
     return (
         <div ref={ref} className="relative">
-            <p className="mb-1 text-sm font-medium">{label}</p>
+            {hideLabel ? null : <p className="mb-1 text-sm font-medium">{label}</p>}
             <button
                 type="button"
                 onClick={() => setOpen((current) => !current)}
-                className="flex w-full items-center justify-between gap-2 rounded-xl border border-(--line) bg-white px-3 py-2 text-left text-sm"
+                disabled={Boolean(disabledHint)}
+                className="flex w-full items-center justify-between gap-2 rounded-xl border border-(--line) bg-white px-3 py-2 text-left text-sm disabled:cursor-not-allowed disabled:bg-(--chip)/60"
                 aria-expanded={open}
             >
-                <span className={value.length === 0 ? "text-(--ink-soft)" : "font-medium"}>{value.length === 0 ? hint : `${value.length} selected`}</span>
+                <span className={value.length === 0 || disabledHint ? "text-(--ink-soft)" : "font-medium"}>
+                    {disabledHint ?? (value.length === 0 ? hint : `${value.length} selected`)}
+                </span>
                 <ChevronDown className={`h-4 w-4 text-(--ink-soft) transition ${open ? "rotate-180" : ""}`} aria-hidden="true" />
             </button>
 
@@ -147,6 +162,59 @@ function lotLabel(row: PriceListRow) {
     return row.lotYear ? `${row.lotName} (${row.lotYear})` : row.lotName;
 }
 
+/** Type or paste several texts (comma, semicolon or one per line); each becomes a removable chip. */
+function TextChips({ value, onChange, placeholder }: { value: string[]; onChange: (next: string[]) => void; placeholder: string }) {
+    const [draft, setDraft] = useState("");
+
+    function commit(raw: string) {
+        const parts = raw.split(/[\n\r,;\t]+/).map((part) => part.trim()).filter(Boolean);
+        if (parts.length === 0) return;
+        onChange(Array.from(new Set([...value, ...parts])));
+        setDraft("");
+    }
+
+    return (
+        <div className="flex min-h-10 flex-wrap items-center gap-1.5 rounded-xl border border-(--line) bg-white px-2 py-1.5">
+            {value.map((text) => (
+                <span key={text} className="inline-flex items-center gap-1 rounded-full bg-(--chip) px-2.5 py-0.5 text-xs font-medium">
+                    {text}
+                    <button type="button" onClick={() => onChange(value.filter((item) => item !== text))} aria-label={`Remove ${text}`}>
+                        <X className="h-3 w-3" aria-hidden="true" />
+                    </button>
+                </span>
+            ))}
+            <input
+                value={draft}
+                onChange={(event) => {
+                    const text = event.target.value;
+                    // A comma / semicolon typed at the end closes the current chip.
+                    if (/[,;]$/.test(text)) commit(text);
+                    else setDraft(text);
+                }}
+                onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                        event.preventDefault();
+                        commit(draft);
+                    } else if (event.key === "Backspace" && draft === "" && value.length > 0) {
+                        onChange(value.slice(0, -1));
+                    }
+                }}
+                onPaste={(event) => {
+                    const text = event.clipboardData.getData("text");
+                    if (/[\n\r,;\t]/.test(text)) {
+                        event.preventDefault();
+                        commit(text);
+                    }
+                }}
+                onBlur={() => commit(draft)}
+                placeholder={value.length === 0 ? placeholder : "Add another…"}
+                className="min-w-40 flex-1 bg-transparent px-1 py-0.5 text-sm focus:outline-none"
+                aria-label="Search names"
+            />
+        </div>
+    );
+}
+
 function formatPrice(value: number | null | undefined) {
     return value === null || value === undefined ? "-" : value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
@@ -159,17 +227,26 @@ export function PriceListRequest() {
     const [listsLoaded, setListsLoaded] = useState(false);
 
     const [filterOptions, setFilterOptions] = useState<PriceListFilterOptions | null>(null);
-    const [brandIds, setBrandIds] = useState<Array<number | string>>([]);
-    const [excludeBrandIds, setExcludeBrandIds] = useState<Array<number | string>>([]);
-    const [originIds, setOriginIds] = useState<Array<number | string>>([]);
-    const [excludeOriginIds, setExcludeOriginIds] = useState<Array<number | string>>([]);
-    const [categoryIds, setCategoryIds] = useState<Array<number | string>>([]);
-    const [excludeCategoryIds, setExcludeCategoryIds] = useState<Array<number | string>>([]);
-    const [oeValues, setOeValues] = useState<Array<number | string>>([]);
-    const [excludeOeValues, setExcludeOeValues] = useState<Array<number | string>>([]);
+    const [facets, setFacets] = useState<PriceListFacets | null>(null);
     const lotOptions = useMemo(() => (filterOptions?.lots ?? []).map((name) => ({ id: name, name })), [filterOptions]);
-    const [lotNames, setLotNames] = useState<Array<number | string>>([]);
-    const [excludeLotNames, setExcludeLotNames] = useState<Array<number | string>>([]);
+    // Each row reads "<field> is / is not <values>"; rows combine with AND.
+    const [filterRows, setFilterRows] = useState<FilterRow[]>([]);
+    const nextRowId = useRef(1);
+    const collect = (field: FilterField, mode: "is" | "isnot") =>
+        Array.from(new Set(filterRows.filter((row) => row.field === field && row.mode === mode).flatMap((row) => row.values)));
+    const brandIds = useMemo(() => collect("brand", "is"), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
+    const excludeBrandIds = useMemo(() => collect("brand", "isnot"), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
+    const originIds = useMemo(() => collect("origin", "is"), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
+    const excludeOriginIds = useMemo(() => collect("origin", "isnot"), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
+    const categoryIds = useMemo(() => collect("category", "is"), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
+    const excludeCategoryIds = useMemo(() => collect("category", "isnot"), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
+    const oeValues = useMemo(() => collect("oe", "is"), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
+    const excludeOeValues = useMemo(() => collect("oe", "isnot"), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
+    const lotNames = useMemo(() => collect("lot", "is"), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
+    const excludeLotNames = useMemo(() => collect("lot", "isnot"), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Typed texts: blanks are ignored.
+    const searchNames = useMemo(() => collect("searchName", "is").map(String), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
+    const excludeSearchNames = useMemo(() => collect("searchName", "isnot").map(String), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
     const [pricelistIds, setPricelistIds] = useState<number[]>([]);
     const [hideOutOfStock, setHideOutOfStock] = useState(true);
     const [hideUnpriced, setHideUnpriced] = useState(true);
@@ -183,6 +260,9 @@ export function PriceListRequest() {
     // null = the order Odoo data came in (brand, then product). The same order is used for the Excel file.
     const [sort, setSort] = useState<{ key: string; dir: "asc" | "desc" } | null>(null);
     const [exporting, setExporting] = useState(false);
+    // Rows ticked for the export (by row key). Everything starts ticked after a build.
+    const [selected, setSelected] = useState<Set<string>>(new Set());
+    const headerCheckbox = useRef<HTMLInputElement>(null);
 
     // Each list loads on its own, so one failing never hides the others (the pricelists in particular).
     useEffect(() => {
@@ -203,7 +283,99 @@ export function PriceListRequest() {
         });
     }, []);
 
+    // "Is not" rows only offer what exists inside the products the "is" rows select: ask Odoo which options are left.
+    useEffect(() => {
+        let stale = false;
+        const timer = window.setTimeout(() => {
+            getPriceListFacets({ brandIds: brandIds.map(Number), originIds: originIds.map(Number), categoryIds: categoryIds.map(Number), oeValues, lotNames: lotNames.map(String), searchNames })
+                .then((data) => {
+                    if (!stale) setFacets(data);
+                })
+                .catch(() => {
+                    if (!stale) setFacets(null);
+                });
+        }, 350);
+        return () => {
+            stale = true;
+            window.clearTimeout(timer);
+        };
+    }, [brandIds, originIds, categoryIds, oeValues, lotNames, searchNames]);
+
+    // An "is not" value that no longer exists inside the selection is dropped.
+    useEffect(() => {
+        if (!facets) return;
+        const timer = window.setTimeout(() => {
+            const available: Record<Exclude<FilterField, "searchName">, Array<{ id: number | string }>> = {
+                brand: facets.brands,
+                origin: facets.origins,
+                category: facets.categories,
+                oe: facets.oe ?? [],
+                lot: facets.lots,
+            };
+            setFilterRows((current) => {
+                let changed = false;
+                const next = current.map((row) => {
+                    if (row.mode !== "isnot" || row.field === "searchName") return row;
+                    const ids = new Set(available[row.field].map((item) => item.id));
+                    const values = row.values.filter((value) => ids.has(value));
+                    if (values.length === row.values.length) return row;
+                    changed = true;
+                    return { ...row, values };
+                });
+                return changed ? next : current;
+            });
+        }, 0);
+        return () => window.clearTimeout(timer);
+    }, [facets]);
+
+    const withCounts = (items: Array<{ id: number | string; name: string; count: number }> | undefined, fallback: Option[]): Option[] =>
+        items ? items.map((item) => ({ id: item.id, name: `${item.name} (${item.count.toLocaleString("en-US")})` })) : fallback;
+
+    const oeAvailable = !filterOptions || Boolean(filterOptions.oe);
+    const fieldChoices: Array<{ value: FilterField; label: string }> = [
+        { value: "brand", label: "Brand" },
+        { value: "origin", label: "Origin" },
+        { value: "category", label: "Category" },
+        ...(oeAvailable ? [{ value: "oe" as const, label: filterOptions?.oe?.label ?? "OE Specifications" }] : []),
+        { value: "lot", label: "Lot" },
+        { value: "searchName", label: "Search name" },
+    ];
+    const fieldLabel = (field: FilterField) => fieldChoices.find((choice) => choice.value === field)?.label ?? field;
+    const baseOptions = (field: FilterField): Option[] =>
+        field === "brand" ? brands : field === "origin" ? origins : field === "category" ? filterOptions?.categories ?? [] : field === "oe" ? filterOptions?.oe?.options ?? [] : field === "lot" ? lotOptions : [];
+    const rowOptions = (row: FilterRow): Option[] => {
+        if (row.mode === "is" || row.field === "searchName") return baseOptions(row.field);
+        const items =
+            row.field === "brand" ? facets?.brands : row.field === "origin" ? facets?.origins : row.field === "category" ? facets?.categories : row.field === "oe" ? facets?.oe ?? undefined : facets?.lots;
+        return withCounts(items, baseOptions(row.field));
+    };
+
+    function addFilterRow() {
+        const used = new Set(filterRows.map((row) => row.field));
+        const field = fieldChoices.find((choice) => !used.has(choice.value))?.value ?? "brand";
+        const hasInclude = filterRows.some((row) => row.field === field && row.mode === "is");
+        setFilterRows((current) => [...current, { id: nextRowId.current++, field, mode: hasInclude ? "isnot" : "is", values: [] }]);
+    }
+    const updateFilterRow = (id: number, patch: Partial<FilterRow>) =>
+        setFilterRows((current) => current.map((row) => (row.id === id ? { ...row, ...patch } : row)));
+
+    // One readable sentence of what the filters add up to.
+    const filterSummary = filterRows
+        .filter((row) => row.values.length > 0)
+        .map((row) => {
+            const names = new Map(baseOptions(row.field).map((option) => [option.id, option.name]));
+            const list = row.field === "searchName" ? row.values.map((value) => `“${String(value)}”`).join(" or ") : row.values.map((value) => names.get(value) ?? String(value)).join(" or ");
+            return `${fieldLabel(row.field)} ${row.mode === "is" ? (row.field === "searchName" ? "contains" : "is") : row.field === "searchName" ? "does not contain" : "is not"} ${list}`;
+        });
+
+    // A whole-catalogue list is never what is wanted: at least one filter with a value is required.
+    const hasFilters = filterRows.some((row) => row.values.length > 0);
+
     async function generate() {
+        if (!hasFilters) {
+            setError("Add at least one filter (for example a brand) before building the price list.");
+            return;
+        }
         if (pricelistIds.length === 0) {
             setError("Choose at least one pricelist.");
             return;
@@ -223,11 +395,14 @@ export function PriceListRequest() {
                 excludeOeValues,
                 lotNames: lotNames.map(String),
                 excludeLotNames: excludeLotNames.map(String),
+                searchNames,
+                excludeSearchNames,
                 pricelistIds,
                 inStockOnly: hideOutOfStock,
                 onlyPriced: hideUnpriced,
             });
             setResult(data);
+            setSelected(new Set(data.rows.map((row) => row.key)));
             setPage(1);
             setSearch("");
         } catch (requestError) {
@@ -288,6 +463,31 @@ export function PriceListRequest() {
         return out;
     })();
 
+    // The tick boxes act on what the table currently lists (after the filter box); the export takes those that are ticked.
+    const selectedShown = useMemo(() => shownRows.filter((row) => selected.has(row.key)), [shownRows, selected]);
+    const allShownSelected = shownRows.length > 0 && selectedShown.length === shownRows.length;
+    useEffect(() => {
+        if (headerCheckbox.current) headerCheckbox.current.indeterminate = selectedShown.length > 0 && !allShownSelected;
+    }, [selectedShown.length, allShownSelected]);
+
+    function toggleAllShown() {
+        setSelected((current) => {
+            const next = new Set(current);
+            if (allShownSelected) for (const row of shownRows) next.delete(row.key);
+            else for (const row of shownRows) next.add(row.key);
+            return next;
+        });
+    }
+
+    function toggleRow(key: string) {
+        setSelected((current) => {
+            const next = new Set(current);
+            if (next.has(key)) next.delete(key);
+            else next.add(key);
+            return next;
+        });
+    }
+
     function sortBy(key: string) {
         setSort((current) => (current?.key !== key ? { key, dir: "asc" } : current.dir === "asc" ? { key, dir: "desc" } : null));
         setPage(1);
@@ -318,11 +518,11 @@ export function PriceListRequest() {
     const priceHeader = (list: PricelistOption) => (list.currency ? `${list.name} (${list.currency})` : list.name);
 
     async function download() {
-        if (!result || shownRows.length === 0) return;
+        if (!result || selectedShown.length === 0) return;
         setExporting(true);
         try {
             const XLSX = await import("xlsx");
-            const sheetRows = shownRows.map((row: PriceListRow) => {
+            const sheetRows = selectedShown.map((row: PriceListRow) => {
                 const out: Record<string, string | number> = {
                     "Search Name": row.searchName,
                     Product: row.name,
@@ -364,25 +564,102 @@ export function PriceListRequest() {
 
                 {optionsError ? <p className="mt-3 text-sm text-red-600">{optionsError}</p> : null}
 
-                <div className="mt-5 grid gap-4 sm:grid-cols-2">
-                    <MultiPick label="Brands" hint="All brands" tone="include" options={brands} value={brandIds} onChange={setBrandIds} />
-                    <MultiPick label="Exclude brands" hint="None excluded" tone="exclude" options={brands} value={excludeBrandIds} onChange={setExcludeBrandIds} />
-                    <MultiPick label="Origin" hint="All origins" tone="include" options={origins} value={originIds} onChange={setOriginIds} />
-                    <MultiPick label="Exclude origin" hint="None excluded" tone="exclude" options={origins} value={excludeOriginIds} onChange={setExcludeOriginIds} />
-                    <MultiPick label="Category" hint="All categories" tone="include" options={filterOptions?.categories ?? []} value={categoryIds} onChange={setCategoryIds} />
-                    <MultiPick label="Exclude category" hint="None excluded" tone="exclude" options={filterOptions?.categories ?? []} value={excludeCategoryIds} onChange={setExcludeCategoryIds} />
-                    {filterOptions && !filterOptions.oe ? (
-                        <p className="rounded-xl bg-(--chip) px-3 py-2 text-xs text-(--ink-soft) sm:col-span-2">
-                            The &ldquo;OE Specifications&rdquo; field was not found on products in Odoo, so that filter is not available.
+                <div className="mt-5">
+                    <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm font-medium">
+                            Filters
+                            <span className="ml-1.5 text-xs font-normal text-(--ink-soft)">every row must be true</span>
+                        </p>
+                        <button
+                            type="button"
+                            onClick={addFilterRow}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-(--line) bg-white px-3 py-1.5 text-sm font-medium transition hover:border-(--brand) hover:text-(--brand)"
+                        >
+                            <Plus className="h-4 w-4" aria-hidden="true" />
+                            Add filter
+                        </button>
+                    </div>
+
+                    {filterRows.length === 0 ? (
+                        <p className="mt-2 rounded-xl border border-dashed border-(--line) px-3 py-4 text-center text-sm text-(--ink-soft)">
+                            Add at least one filter to build a price list, for example a brand, a category or a search name.
                         </p>
                     ) : (
-                        <>
-                            <MultiPick label={filterOptions?.oe?.label ?? "OE Specifications"} hint="Any" tone="include" options={filterOptions?.oe?.options ?? []} value={oeValues} onChange={setOeValues} />
-                            <MultiPick label={`Exclude ${filterOptions?.oe?.label ?? "OE Specifications"}`} hint="None excluded" tone="exclude" options={filterOptions?.oe?.options ?? []} value={excludeOeValues} onChange={setExcludeOeValues} />
-                        </>
+                        <div className="mt-2 space-y-2">
+                            {filterRows.map((row) => {
+                                const limitedBy =
+                                    row.mode === "isnot" && row.field !== "category" && row.field !== "searchName" && filterRows.some((other) => other.field === row.field && other.mode === "is" && other.values.length > 0);
+                                return (
+                                    <div key={row.id} className="rounded-xl border border-(--line) bg-white p-2.5">
+                                        <div className="flex flex-wrap items-start gap-2">
+                                            <select
+                                                value={row.field}
+                                                onChange={(event) => updateFilterRow(row.id, { field: event.target.value as FilterField, values: [] })}
+                                                className="rounded-lg border border-(--line) bg-white px-2.5 py-2 text-sm font-medium"
+                                                aria-label="Filter field"
+                                            >
+                                                {fieldChoices.map((choice) => (
+                                                    <option key={choice.value} value={choice.value}>
+                                                        {choice.label}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                            <select
+                                                value={row.mode}
+                                                onChange={(event) => updateFilterRow(row.id, { mode: event.target.value as "is" | "isnot", values: [] })}
+                                                className={`rounded-lg border px-2.5 py-2 text-sm font-semibold ${row.mode === "is" ? "border-emerald-300 bg-emerald-50 text-emerald-800" : "border-red-200 bg-red-50 text-(--brand)"}`}
+                                                aria-label="Is or is not"
+                                            >
+                                                <option value="is">{row.field === "searchName" ? "contains" : "is"}</option>
+                                                <option value="isnot">{row.field === "searchName" ? "does not contain" : "is not"}</option>
+                                            </select>
+                                            <div className="min-w-56 flex-1">
+                                                {row.field === "searchName" ? (
+                                                    <TextChips
+                                                        value={row.values.map(String)}
+                                                        onChange={(values) => updateFilterRow(row.id, { values })}
+                                                        placeholder="Type or paste, e.g. 265/65R17, 235/60R18"
+                                                    />
+                                                ) : (
+                                                <MultiPick
+                                                    label={fieldLabel(row.field)}
+                                                    hideLabel
+                                                    hint={row.mode === "is" ? "Choose…" : "Choose what to leave out…"}
+                                                    tone={row.mode === "is" ? "include" : "exclude"}
+                                                    options={rowOptions(row)}
+                                                    lookup={baseOptions(row.field)}
+                                                    value={row.values}
+                                                    onChange={(values) => updateFilterRow(row.id, { values })}
+                                                />
+                                                )}
+                                            </div>
+                                            <button
+                                                type="button"
+                                                onClick={() => setFilterRows((current) => current.filter((item) => item.id !== row.id))}
+                                                className="mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-(--ink-soft) hover:bg-(--chip) hover:text-(--brand)"
+                                                aria-label="Remove filter"
+                                                title="Remove filter"
+                                            >
+                                                <X className="h-4 w-4" aria-hidden="true" />
+                                            </button>
+                                        </div>
+                                        {limitedBy ? (
+                                            <p className="mt-1.5 text-xs text-amber-700">
+                                                Another row already limits {fieldLabel(row.field)} to chosen values, so there is nothing left to leave out here.
+                                            </p>
+                                        ) : null}
+                                    </div>
+                                );
+                            })}
+                        </div>
                     )}
-                    <MultiPick label="Lot" hint="All lots" tone="include" options={lotOptions} value={lotNames} onChange={setLotNames} />
-                    <MultiPick label="Exclude lot" hint="None excluded" tone="exclude" options={lotOptions} value={excludeLotNames} onChange={setExcludeLotNames} />
+
+                    {filterSummary.length > 0 ? (
+                        <p className="mt-2 text-xs text-(--ink-soft)">
+                            <span className="font-medium text-(--ink)">Result: </span>
+                            {filterSummary.join("  ·  ")}
+                        </p>
+                    ) : null}
                 </div>
 
                 <div className="mt-5">
@@ -430,7 +707,8 @@ export function PriceListRequest() {
                     <button
                         type="button"
                         onClick={() => void generate()}
-                        disabled={loading}
+                        disabled={loading || !hasFilters || pricelistIds.length === 0}
+                        title={!hasFilters ? "Add at least one filter first" : pricelistIds.length === 0 ? "Choose at least one pricelist" : undefined}
                         className="rounded-xl bg-(--brand) px-5 py-2.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
                     >
                         {loading ? "Building..." : "Show price list"}
@@ -466,11 +744,12 @@ export function PriceListRequest() {
                             <button
                                 type="button"
                                 onClick={() => void download()}
-                                disabled={exporting || shownRows.length === 0}
+                                disabled={exporting || selectedShown.length === 0}
+                                title={selectedShown.length === 0 ? "Tick the products to export" : undefined}
                                 className="inline-flex items-center gap-2 rounded-xl bg-(--accent) px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-60"
                             >
                                 <Download className="h-4 w-4" aria-hidden="true" />
-                                {exporting ? "Preparing..." : "Download Excel"}
+                                {exporting ? "Preparing..." : `Download Excel (${selectedShown.length.toLocaleString("en-US")})`}
                             </button>
                         </div>
                     </div>
@@ -506,7 +785,7 @@ export function PriceListRequest() {
                     {shownRows.length > 0 ? (
                         <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
                             <p className="text-xs text-(--ink-soft)">
-                                Showing {firstShown.toLocaleString("en-US")}&ndash;{lastShown.toLocaleString("en-US")} of {shownRows.length.toLocaleString("en-US")}. The Excel file always contains all of them.
+                                Showing {firstShown.toLocaleString("en-US")}&ndash;{lastShown.toLocaleString("en-US")} of {shownRows.length.toLocaleString("en-US")}. The Excel file contains only the ticked products.
                             </p>
                             <div className="flex flex-wrap items-center justify-end gap-3 text-xs">
                                 <label className="inline-flex items-center gap-2 text-(--ink-soft)">
@@ -576,6 +855,17 @@ export function PriceListRequest() {
                             <table className="min-w-full border-collapse text-left text-sm">
                                 <thead className="bg-(--chip) text-xs text-(--ink-soft)">
                                     <tr>
+                                        <th className="w-10 border border-(--line) px-3 py-2">
+                                            <input
+                                                ref={headerCheckbox}
+                                                type="checkbox"
+                                                checked={allShownSelected}
+                                                onChange={toggleAllShown}
+                                                className="h-4 w-4 rounded border-(--line)"
+                                                aria-label={allShownSelected ? "Deselect all products" : "Select all products"}
+                                                title={allShownSelected ? "Deselect all" : "Select all"}
+                                            />
+                                        </th>
                                         {sortHeader("searchName", "Search name")}
                                         {sortHeader("name", "Product")}
                                         {sortHeader("category", "Category")}
@@ -590,7 +880,16 @@ export function PriceListRequest() {
                                 </thead>
                                 <tbody>
                                     {pageRows.map((row) => (
-                                        <tr key={row.key} className="hover:bg-(--chip)/40">
+                                        <tr key={row.key} className={`hover:bg-(--chip)/40 ${selected.has(row.key) ? "" : "opacity-60"}`}>
+                                            <td className="border border-(--line)/70 px-3 py-2">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={selected.has(row.key)}
+                                                    onChange={() => toggleRow(row.key)}
+                                                    className="h-4 w-4 rounded border-(--line)"
+                                                    aria-label="Include in the Excel file"
+                                                />
+                                            </td>
                                             <td className="whitespace-nowrap border border-(--line)/70 px-3 py-2 text-(--ink-soft)">{row.searchName || "-"}</td>
                                             <td className="border border-(--line)/70 px-3 py-2 font-medium">{row.name}</td>
                                             <td className="whitespace-nowrap border border-(--line)/70 px-3 py-2">{row.category || "-"}</td>

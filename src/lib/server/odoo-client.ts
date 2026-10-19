@@ -12252,6 +12252,9 @@ export type PriceListInput = {
     excludeOeValues: Array<number | string>;
     lotNames: string[];
     excludeLotNames: string[];
+    /** Typed search-name texts: every word of a text must be contained (same matching as the Fast Orders search). */
+    searchNames: string[];
+    excludeSearchNames: string[];
     pricelistIds: number[];
     inStockOnly: boolean;
     onlyPriced: boolean;
@@ -12393,6 +12396,123 @@ export async function getPriceListFilterOptions(credentials: OdooCredentials): P
     };
 }
 
+/** Domain terms for one typed search-name text: each word must be part of the template's "Search Name". */
+function searchNameTerms(text: string): unknown[][] {
+    const terms: unknown[][] = [];
+    for (const token of text.split(/\s+/).filter(Boolean)) {
+        const sizeMatch = token.match(/^(\d{3})\/?(\d{2})\s*[A-Za-z]?\s*(\d{2})$/);
+        const keyword = sizeMatch ? `${sizeMatch[1]}${sizeMatch[2]}${sizeMatch[3]}` : token.replace(/[\/\-_.]/g, "");
+        if (keyword) terms.push(["product_tmpl_id.second_name", "ilike", keyword]);
+    }
+    return terms;
+}
+
+/**
+ * Appends the search-name conditions to a product domain: a product must match ANY of the "include" texts
+ * (the words inside one text must all match) and NONE of the "exclude" texts.
+ */
+function applySearchNames(domain: unknown[], include: unknown, exclude: unknown) {
+    const texts = (values: unknown) => (Array.isArray(values) ? values.map((value) => String(value)).slice(0, 300) : []);
+    const groups = texts(include).map(searchNameTerms).filter((terms) => terms.length > 0);
+    if (groups.length > 0) {
+        domain.push(...Array(groups.length - 1).fill("|"));
+        for (const terms of groups) domain.push(...Array(terms.length - 1).fill("&"), ...terms);
+    }
+    for (const text of texts(exclude)) {
+        const terms = searchNameTerms(text);
+        if (terms.length === 0) continue;
+        domain.push("!", ...Array(terms.length - 1).fill("&"), ...terms);
+    }
+}
+
+export type PriceListFacets = {
+    brands: Array<{ id: number; name: string; count: number }>;
+    origins: Array<{ id: number; name: string; count: number }>;
+    categories: Array<{ id: number; name: string; count: number }>;
+    oe: Array<{ id: number | string; name: string; count: number }> | null;
+    lots: Array<{ id: string; name: string; count: number }>;
+};
+
+/** What is left to exclude: the brands / origins / categories / OE values / lots present in the products the include filters select. */
+export async function getPriceListFacets(
+    credentials: OdooCredentials,
+    input: { brandIds: number[]; originIds: number[]; categoryIds: number[]; oeValues: Array<number | string>; lotNames: string[]; searchNames?: string[] }
+): Promise<PriceListFacets> {
+    const uid = await authenticate(credentials);
+    const ids = (values: unknown) => (Array.isArray(values) ? values.map(Number).filter((id) => Number.isFinite(id) && id > 0) : []);
+    const domain: unknown[] = [["sale_ok", "=", true]];
+    const brandIds = ids(input.brandIds);
+    const originIds = ids(input.originIds);
+    const categoryIds = ids(input.categoryIds);
+    if (brandIds.length > 0) domain.push(["tire_brand", "in", brandIds]);
+    if (originIds.length > 0) domain.push(["origin", "in", originIds]);
+    if (categoryIds.length > 0) domain.push(["categ_id", "child_of", categoryIds]);
+    const oeField = await resolveOeField(credentials, uid).catch(() => null);
+    const oeValues = Array.isArray(input.oeValues) ? input.oeValues : [];
+    if (oeField && oeValues.length > 0) domain.push([oeField.field, "in", oeValues]);
+    applySearchNames(domain, input.searchNames, []);
+
+    const group = (field: string) =>
+        executeKw<Array<Record<string, unknown>>>(credentials, uid, "product.product", "read_group", [domain, [field], [field]], { lazy: false, limit: 3000 }).catch(
+            () => [] as Array<Record<string, unknown>>
+        );
+    const relational = (rows: Array<Record<string, unknown>>, field: string) =>
+        rows
+            .map((row) => ({ id: getRelationalId(row[field]) ?? 0, name: getRelationalName(row[field]), count: Number(row.__count ?? 0) }))
+            .filter((row) => row.id > 0 && row.name)
+            .sort((a, b) => a.name.localeCompare(b.name));
+
+    const [brandRows, originRows, categoryRows, oeRows, productIds] = await Promise.all([
+        group("tire_brand"),
+        group("origin"),
+        group("categ_id"),
+        oeField ? group(oeField.field) : Promise.resolve([] as Array<Record<string, unknown>>),
+        executeKw<number[]>(credentials, uid, "product.product", "search", [domain], { limit: PRICE_LIST_MAX_PRODUCTS }),
+    ]);
+
+    let oe: PriceListFacets["oe"] = null;
+    if (oeField) {
+        if (oeField.type === "many2one" || oeField.type === "many2many") {
+            oe = relational(oeRows, oeField.field);
+        } else {
+            oe = oeRows
+                .map((row) => {
+                    const raw = row[oeField.field];
+                    const value = toDisplayString(raw);
+                    const name = oeField.type === "selection" ? (oeField.selection?.find(([key]) => key === raw)?.[1] ?? value) : value;
+                    return { id: value, name, count: Number(row.__count ?? 0) };
+                })
+                .filter((row) => row.name)
+                .sort((a, b) => a.name.localeCompare(b.name));
+        }
+    }
+
+    // Lots on the shelf for those products.
+    const lotCounts = new Map<string, number>();
+    for (let start = 0; start < productIds.length; start += 800) {
+        const rows = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "stock.quant",
+            "read_group",
+            [[["product_id", "in", productIds.slice(start, start + 800)], ["location_id.usage", "=", "internal"], ["quantity", ">", 0], ["lot_id", "!=", false]], ["lot_id"], ["lot_id"]],
+            { lazy: false, limit: 5000 }
+        ).catch(() => [] as Array<Record<string, unknown>>);
+        for (const row of rows) {
+            const name = getRelationalName(row.lot_id);
+            if (name) lotCounts.set(name, (lotCounts.get(name) ?? 0) + Number(row.__count ?? 0));
+        }
+    }
+
+    return {
+        brands: relational(brandRows, "tire_brand"),
+        origins: relational(originRows, "origin"),
+        categories: relational(categoryRows, "categ_id"),
+        oe,
+        lots: Array.from(lotCounts, ([name, count]) => ({ id: name, name, count })).sort((a, b) => a.name.localeCompare(b.name)),
+    };
+}
+
 export async function getPriceListRequest(credentials: OdooCredentials, input: PriceListInput): Promise<PriceListResult> {
     const uid = await authenticate(credentials);
     const ids = (values: unknown) => (Array.isArray(values) ? values.map(Number).filter((id) => Number.isFinite(id) && id > 0) : []);
@@ -12409,6 +12529,11 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
     const excludeLotNames = names(input.excludeLotNames);
     const pricelistIds = ids(input.pricelistIds);
     if (pricelistIds.length === 0) throw new Error("Choose at least one pricelist.");
+    const searchTexts = [...(Array.isArray(input.searchNames) ? input.searchNames : []), ...(Array.isArray(input.excludeSearchNames) ? input.excludeSearchNames : [])];
+    const filterCount =
+        brandIds.length + excludeBrandIds.length + originIds.length + excludeOriginIds.length + categoryIds.length + excludeCategoryIds.length +
+        oeValues.length + excludeOeValues.length + lotNames.length + excludeLotNames.length + searchTexts.filter((text) => String(text).trim()).length;
+    if (filterCount === 0) throw new Error("Add at least one filter before building a price list.");
 
     const allLists = await getPricelistOptions(credentials);
     const pricelists = pricelistIds.map((id) => allLists.find((list) => list.id === id)).filter((list): list is PricelistOption => Boolean(list));
@@ -12421,6 +12546,7 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
     if (excludeOriginIds.length > 0) domain.push(["origin", "not in", excludeOriginIds]);
     if (categoryIds.length > 0) domain.push(["categ_id", "child_of", categoryIds]);
     if (excludeCategoryIds.length > 0) domain.push("!", ["categ_id", "child_of", excludeCategoryIds]);
+    applySearchNames(domain, input.searchNames, input.excludeSearchNames);
     if (oeValues.length > 0 || excludeOeValues.length > 0) {
         const oeField = await resolveOeField(credentials, uid);
         if (!oeField) throw new Error("The OE Specifications field was not found in Odoo.");
@@ -12624,6 +12750,8 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
         // Choosing specific lots means only stock lots count: a product without them is left out.
         const entries: Array<StockLot | null> = stockLotsByProduct.get(productId) ?? (input.inStockOnly || lotNames.length > 0 ? [] : [null]);
         for (const entry of entries) {
+            // "Hide out of stock" also hides what is on hand but fully reserved (nothing available to sell).
+            if (input.inStockOnly && (entry?.available ?? 0) <= 0) continue;
             const lot = entry?.lotId ? lotById.get(entry.lotId) : undefined;
             const prices: Record<string, number | null> = {};
             let priced = false;

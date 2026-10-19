@@ -21,6 +21,8 @@ export async function POST(request: Request) {
                 excludeOeValues: body.excludeOeValues ?? [],
                 lotNames: body.lotNames ?? [],
                 excludeLotNames: body.excludeLotNames ?? [],
+                searchNames: body.searchNames ?? [],
+                excludeSearchNames: body.excludeSearchNames ?? [],
                 pricelistIds: body.pricelistIds ?? [],
                 inStockOnly: Boolean(body.inStockOnly),
                 onlyPriced: body.onlyPriced === true,
