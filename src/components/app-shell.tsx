@@ -4,7 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useCallback, useRef, useState } from "react";
-import { ClipboardList, HandCoins, LayoutDashboard, LogOut, Menu, PackageSearch, Percent, Ship, ScanSearch, Settings, ShoppingBasket, Tag, Target, TrendingUp, UserSearch, Users, X, type LucideIcon } from "lucide-react";
+import { ClipboardList, HandCoins, LayoutDashboard, LogOut, Menu, PackageSearch, Percent, Pin, PinOff, Ship, ScanSearch, Settings, ShoppingBasket, Tag, Target, TrendingUp, UserSearch, Users, X, type LucideIcon } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { CompanySelector } from "@/components/company-selector";
 import { APP_DEFINITIONS, defaultAppHrefsForRole } from "@/lib/app-permissions";
@@ -42,6 +42,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     // Desktop rail: icons only, widens over the page while the mouse is on it and folds again after opening an app.
     const [expanded, setExpanded] = useState(false);
     const [labelsVisible, setLabelsVisible] = useState(false);
+    // Pinned: the sidebar stays open and pushes the page instead of overlaying it.
+    const [pinned, setPinned] = useState(false);
     const hoverTimer = useRef<number | null>(null);
     const lockedUntilLeave = useRef(false);
 
@@ -61,15 +63,39 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         hoverTimer.current = window.setTimeout(() => setExpanded(false), 120);
     };
 
+    // Restore the saved choice after mount (reading storage during render would mismatch SSR).
+    useEffect(() => {
+        const timer = window.setTimeout(() => {
+            try {
+                setPinned(window.localStorage.getItem("odoopp:sidebarPinned") === "1");
+            } catch {
+                // storage unavailable: stay unpinned
+            }
+        }, 0);
+        return () => window.clearTimeout(timer);
+    }, []);
+
+    const togglePin = () => {
+        setPinned((wasPinned) => {
+            const next = !wasPinned;
+            try {
+                window.localStorage.setItem("odoopp:sidebarPinned", next ? "1" : "0");
+            } catch {
+                // ignore
+            }
+            return next;
+        });
+    };
+
     // Labels that need a real "show/hide" (company selector) appear once the rail is mostly open.
     useEffect(() => {
-        if (!expanded) {
+        if (!expanded && !pinned) {
             const timer = window.setTimeout(() => setLabelsVisible(false), 0);
             return () => window.clearTimeout(timer);
         }
         const timer = window.setTimeout(() => setLabelsVisible(true), 140);
         return () => window.clearTimeout(timer);
-    }, [expanded]);
+    }, [expanded, pinned]);
 
     // Any navigation (link, redirect, back button) folds the rail again.
     useEffect(() => {
@@ -135,6 +161,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         );
     }
 
+    const showFull = expanded || pinned;
+
     const fade = (full: boolean, index = 0) => ({
         className: `overflow-hidden whitespace-nowrap transition-[max-width,opacity,transform] duration-300 ease-out motion-reduce:transition-none ${full ? "max-w-48 translate-x-0 opacity-100" : "max-w-0 -translate-x-2 opacity-0"}`,
         style: { transitionDelay: full ? `${40 + index * 18}ms` : "0ms" },
@@ -168,7 +196,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                         title={full ? undefined : link.label}
                         onClick={() => {
                             setMobileNavOpen(false);
-                            if (desktop) {
+                            if (desktop && !pinned) {
                                 // Fold right away and stay folded until the mouse leaves and comes back.
                                 lockedUntilLeave.current = true;
                                 clearHoverTimer();
@@ -229,7 +257,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return (
         <div className="min-h-screen bg-(--bg) text-(--ink) lg:flex">
             {/* Desktop rail: reserves a slim column; the sidebar widens OVER the page on hover so tables keep their space. */}
-            <div className="hidden lg:relative lg:z-40 lg:block lg:w-18 lg:shrink-0">
+            <div className={`hidden lg:relative lg:z-40 lg:block lg:shrink-0 lg:transition-[width] lg:duration-300 ${pinned ? "lg:w-64" : "lg:w-18"}`}>
                 <aside
                     onMouseEnter={openRail}
                     onMouseLeave={() => {
@@ -240,12 +268,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     onBlur={(event) => {
                         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) closeRail();
                     }}
-                    className={`sticky top-0 flex h-screen flex-col border-r border-(--line) bg-(--card) transition-[width,box-shadow] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${expanded ? "w-64 shadow-[12px_0_40px_rgba(8,23,41,0.14)]" : "w-18"}`}
+                    className={`sticky top-0 flex h-screen flex-col border-r border-(--line) bg-(--card) transition-[width,box-shadow] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${showFull ? "w-64" : "w-18"} ${expanded && !pinned ? "shadow-[12px_0_40px_rgba(8,23,41,0.14)]" : ""}`}
                 >
-                    {renderBrand(expanded)}
+                    <button
+                        type="button"
+                        onClick={togglePin}
+                        aria-pressed={pinned}
+                        aria-label={pinned ? "Unpin sidebar" : "Pin sidebar open"}
+                        title={pinned ? "Unpin sidebar" : "Pin sidebar open"}
+                        tabIndex={showFull ? 0 : -1}
+                        className={`absolute right-3 top-3 inline-flex h-7 w-7 items-center justify-center rounded-full border transition-[opacity,background-color,color] duration-200 ${showFull ? "opacity-100" : "pointer-events-none opacity-0"} ${pinned ? "border-transparent bg-(--brand) text-white" : "border-(--line) bg-white text-(--ink-soft) hover:bg-(--chip) hover:text-(--ink)"}`}
+                    >
+                        {pinned ? <PinOff className="h-3.5 w-3.5" aria-hidden="true" /> : <Pin className="h-3.5 w-3.5" aria-hidden="true" />}
+                    </button>
+                    {renderBrand(showFull)}
                     {renderCompany(labelsVisible)}
-                    {renderNav(expanded, true)}
-                    {renderUser(expanded)}
+                    {renderNav(showFull, true)}
+                    {renderUser(showFull)}
                 </aside>
             </div>
 

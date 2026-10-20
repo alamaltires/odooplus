@@ -110,6 +110,53 @@ type SearchAnswer = Awaited<ReturnType<typeof searchSalesStock>>;
 /** Recent searches of this visit (cleared on reload, so stock changes show up after a refresh). */
 const searchCache = new Map<string, SearchAnswer>();
 
+const PLACEHOLDER_EXAMPLES = [
+    "265/65R17 Michelin",
+    "Pilot Sport 4 225/45R17",
+    "Bridgestone 205/55R16",
+    "Hankook LT 245/75R16",
+    "SKU or lot number",
+];
+
+/** Types example searches into the empty search box, then erases them and moves on to the next. */
+function TypingPlaceholder() {
+    const [text, setText] = useState("");
+
+    useEffect(() => {
+        let index = 0;
+        let length = 0;
+        let deleting = false;
+        let timer = 0;
+
+        const tick = () => {
+            const phrase = PLACEHOLDER_EXAMPLES[index];
+            length += deleting ? -1 : 1;
+            setText(phrase.slice(0, length));
+
+            let delay = deleting ? 28 : 65;
+            if (!deleting && length === phrase.length) {
+                deleting = true;
+                delay = 1400;
+            } else if (deleting && length === 0) {
+                deleting = false;
+                index = (index + 1) % PLACEHOLDER_EXAMPLES.length;
+                delay = 350;
+            }
+            timer = window.setTimeout(tick, delay);
+        };
+
+        timer = window.setTimeout(tick, 400);
+        return () => window.clearTimeout(timer);
+    }, []);
+
+    return (
+        <span className="pointer-events-none absolute left-10 right-3 top-1/2 -translate-y-1/2 truncate text-(--ink-soft) opacity-70" aria-hidden="true">
+            Search by size, brand, pattern, or SKU: {text}
+            <span className="ml-px inline-block h-4 w-px translate-y-0.5 animate-pulse bg-(--ink-soft)" />
+        </span>
+    );
+}
+
 export function SalesStockBrowser({
     query,
     onQueryChange,
@@ -548,6 +595,7 @@ export function SalesStockBrowser({
                 <div>
                     <p className="font-medium">{row.location || "-"}</p>
                     <p className="text-[11px] text-(--ink-soft)">{row.companyName || "-"}</p>
+<div className="flex flex-wrap items-center gap-x-1.5">
                     {row.lotName ? (
                         <span className="mt-1.5 inline-flex items-center gap-1 rounded-full border border-[rgba(229,26,39,0.25)] bg-[rgba(229,26,39,0.08)] px-2.5 py-0.5 text-[11px] font-semibold text-(--brand)">
                             <span className="text-[9px] font-medium uppercase tracking-wider opacity-70">Lot</span>
@@ -556,6 +604,13 @@ export function SalesStockBrowser({
                     ) : (
                         <span className="mt-1.5 inline-flex rounded-full bg-(--chip) px-2.5 py-0.5 text-[11px] text-(--ink-soft)">No lot</span>
                     )}
+                    {row.sku ? (
+                        <span className="mt-1.5 inline-flex items-center gap-1 rounded-full border border-[rgba(15,23,42,0.2)] bg-[rgba(15,23,42,0.06)] px-2.5 py-0.5 text-[11px] font-semibold text-(--ink)">
+                            <span className="text-[9px] font-medium uppercase tracking-wider opacity-70">SKU</span>
+                            {row.sku}
+                        </span>
+                    ) : null}
+                    </div>
                 </div>
             ),
         },
@@ -611,9 +666,10 @@ export function SalesStockBrowser({
                     <input
                         value={query}
                         onChange={(event) => onQueryChange(event.target.value)}
-                        placeholder="Search by size, brand, pattern, or SKU (e.g. 265/65R17 Michelin)"
+                        aria-label="Search by size, brand, pattern, or SKU"
                         className="w-full rounded-xl border border-(--line) bg-white py-2.5 pl-10 pr-3"
                     />
+                    {query ? null : <TypingPlaceholder />}
                 </div>
                 <div className="inline-flex shrink-0 overflow-hidden rounded-xl border border-(--line) bg-white" role="group" aria-label="View">
                     <button
@@ -698,7 +754,22 @@ export function SalesStockBrowser({
                     Type at least {MIN_SEARCH_QUERY_LENGTH} characters, or use Smart Search, to find stock.
                 </p>
             ) : loading && rows.length === 0 ? (
-                <p className="rounded-2xl border border-dashed border-(--line) bg-(--card) p-8 text-center text-sm text-(--ink-soft)">Searching...</p>
+                <div className="space-y-2 rounded-2xl border border-(--line) bg-(--card) p-4" role="status" aria-label="Searching">
+                    <p className="flex items-center gap-2 text-sm text-(--ink-soft)">
+                        <Search className="h-4 w-4 animate-pulse" aria-hidden="true" />
+                        Searching stock...
+                    </p>
+                    {[0, 1, 2, 3].map((item) => (
+                        <div key={item} className="flex animate-pulse items-center gap-3" style={{ animationDelay: `${item * 120}ms` }}>
+                            <div className="h-12 w-12 shrink-0 rounded-lg bg-(--chip)" />
+                            <div className="flex-1 space-y-2">
+                                <div className="h-3 w-2/3 rounded bg-(--chip)" />
+                                <div className="h-3 w-1/3 rounded bg-(--chip)" />
+                            </div>
+                            <div className="h-6 w-16 rounded-full bg-(--chip)" />
+                        </div>
+                    ))}
+                </div>
             ) : rows.length === 0 && !error ? (
                 <div className="rounded-2xl border border-dashed border-(--line) bg-(--card) p-8 text-center">
                     <Package className="mx-auto h-8 w-8 text-(--ink-soft)" aria-hidden="true" />
@@ -900,12 +971,20 @@ export function SalesStockBrowser({
                                     <p className="mt-1 text-xs text-(--ink-soft)">
                                         {row.location} · {row.companyName}
                                     </p>
+<div className="flex flex-wrap items-center gap-x-1.5">
                                     {row.lotName ? (
                                         <span className="mt-1.5 inline-flex items-center gap-1 rounded-full border border-[rgba(229,26,39,0.25)] bg-[rgba(229,26,39,0.08)] px-2.5 py-0.5 text-[11px] font-semibold text-(--brand)">
                                             <span className="text-[9px] font-medium uppercase tracking-wider opacity-70">Lot</span>
                                             {row.lotName}
                                         </span>
                                     ) : null}
+                                    {row.sku ? (
+                                        <span className="mt-1.5 inline-flex items-center gap-1 rounded-full border border-[rgba(15,23,42,0.2)] bg-[rgba(15,23,42,0.06)] px-2.5 py-0.5 text-[11px] font-semibold text-(--ink)">
+                            <span className="text-[9px] font-medium uppercase tracking-wider opacity-70">SKU</span>
+                            {row.sku}
+                        </span>
+                                    ) : null}
+                                    </div>
                                     {folded ? (
                                         <ul className="mt-2 space-y-1.5 rounded-xl bg-(--chip)/50 p-2 text-xs">
                                             {group.rows.map((item) => (

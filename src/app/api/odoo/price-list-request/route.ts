@@ -26,6 +26,7 @@ export async function POST(request: Request) {
                 pricelistIds: body.pricelistIds ?? [],
                 inStockOnly: Boolean(body.inStockOnly),
                 onlyPriced: body.onlyPriced === true,
+                onlyUnpriced: body.onlyUnpriced === true,
             })
         );
         return NextResponse.json(result);

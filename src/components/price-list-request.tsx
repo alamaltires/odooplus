@@ -250,6 +250,9 @@ export function PriceListRequest() {
     const [pricelistIds, setPricelistIds] = useState<number[]>([]);
     const [hideOutOfStock, setHideOutOfStock] = useState(true);
     const [hideUnpriced, setHideUnpriced] = useState(true);
+    const [onlyUnpriced, setOnlyUnpriced] = useState(false);
+    // Columns unticked in the table header are left out of the Excel file.
+    const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set());
 
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -399,7 +402,8 @@ export function PriceListRequest() {
                 excludeSearchNames,
                 pricelistIds,
                 inStockOnly: hideOutOfStock,
-                onlyPriced: hideUnpriced,
+                onlyPriced: hideUnpriced && !onlyUnpriced,
+                onlyUnpriced,
             });
             setResult(data);
             setSelected(new Set(data.rows.map((row) => row.key)));
@@ -415,12 +419,14 @@ export function PriceListRequest() {
     const shownRows = useMemo(() => {
         if (!result) return [];
         const query = search.trim().toLowerCase();
-        const filtered = query ? result.rows.filter((row) => `${row.searchName} ${row.name} ${row.category} ${row.brand} ${row.origin} ${row.pattern} ${row.rim} ${row.lotName} ${row.lotYear}`.toLowerCase().includes(query)) : result.rows;
+        const filtered = query ? result.rows.filter((row) => `${row.searchName} ${row.sku} ${row.factoryCode} ${row.name} ${row.category} ${row.brand} ${row.origin} ${row.pattern} ${row.rim} ${row.lotName} ${row.lotYear}`.toLowerCase().includes(query)) : result.rows;
         if (!sort) return filtered;
 
         const text = (row: PriceListRow): string | number | null => {
             switch (sort.key) {
                 case "searchName": return row.searchName;
+                case "sku": return row.sku;
+                case "factoryCode": return row.factoryCode;
                 case "name": return row.name;
                 case "category": return row.category;
                 case "brand": return row.brand;
@@ -499,6 +505,23 @@ export function PriceListRequest() {
             aria-sort={sort?.key === key ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}
             className={`whitespace-nowrap border border-(--line) p-0 font-medium ${align === "right" ? "text-right" : ""}`}
         >
+            <label className={`flex cursor-pointer items-center gap-1.5 border-b border-(--line)/70 px-3 py-1 text-[10px] font-normal uppercase tracking-wide text-(--ink-soft) ${align === "right" ? "justify-end" : ""}`} title="Include this column in the Excel file">
+                <input
+                    type="checkbox"
+                    checked={!hiddenCols.has(key)}
+                    onChange={() =>
+                        setHiddenCols((current) => {
+                            const next = new Set(current);
+                            if (next.has(key)) next.delete(key);
+                            else next.add(key);
+                            return next;
+                        })
+                    }
+                    className="h-3.5 w-3.5 rounded border-(--line)"
+                    aria-label={`Include ${label} in the Excel file`}
+                />
+                Excel
+            </label>
             <button
                 type="button"
                 onClick={() => sortBy(key)}
@@ -522,23 +545,34 @@ export function PriceListRequest() {
         setExporting(true);
         try {
             const XLSX = await import("xlsx");
-            const sheetRows = selectedShown.map((row: PriceListRow) => {
-                const out: Record<string, string | number> = {
-                    "Search Name": row.searchName,
-                    Product: row.name,
-                    Category: row.category,
-                    Brand: row.brand,
-                    Origin: row.origin,
-                    Pattern: row.pattern,
-                    Rim: row.rim,
-                    Year: row.lotYear,
-                    "Available Qty": row.available,
-                };
-                for (const list of result.pricelists) out[priceHeader(list)] = row.prices[String(list.id)] ?? "";
-                return out;
-            });
+            type ExportColumn = { key: string; header: string; width: number; value: (row: PriceListRow) => string | number };
+            const allColumns: ExportColumn[] = [
+                { key: "searchName", header: "Search Name", width: 24, value: (row) => row.searchName },
+                { key: "sku", header: "SKU", width: 18, value: (row) => row.sku },
+                { key: "factoryCode", header: "Factory Code", width: 18, value: (row) => row.factoryCode },
+                { key: "name", header: "Product", width: 46, value: (row) => row.name },
+                { key: "category", header: "Category", width: 18, value: (row) => row.category },
+                { key: "brand", header: "Brand", width: 16, value: (row) => row.brand },
+                { key: "origin", header: "Origin", width: 14, value: (row) => row.origin },
+                { key: "pattern", header: "Pattern", width: 18, value: (row) => row.pattern },
+                { key: "rim", header: "Rim", width: 8, value: (row) => row.rim },
+                { key: "lot", header: "Year", width: 8, value: (row) => row.lotYear },
+                { key: "available", header: "Available Qty", width: 12, value: (row) => row.available },
+                ...result.pricelists.map((list) => ({
+                    key: `price:${list.id}`,
+                    header: priceHeader(list),
+                    width: 18,
+                    value: (row: PriceListRow): string | number => row.prices[String(list.id)] ?? "",
+                })),
+            ];
+            const columns = allColumns.filter((column) => !hiddenCols.has(column.key));
+            if (columns.length === 0) {
+                setError("Tick at least one column to export.");
+                return;
+            }
+            const sheetRows = selectedShown.map((row: PriceListRow) => Object.fromEntries(columns.map((column) => [column.header, column.value(row)])));
             const worksheet = XLSX.utils.json_to_sheet(sheetRows);
-            worksheet["!cols"] = [{ wch: 24 }, { wch: 46 }, { wch: 18 }, { wch: 16 }, { wch: 14 }, { wch: 18 }, { wch: 8 }, { wch: 8 }, { wch: 12 }, ...result.pricelists.map(() => ({ wch: 18 }))];
+            worksheet["!cols"] = columns.map((column) => ({ wch: column.width }));
             const workbook = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(workbook, worksheet, "Price List");
             XLSX.writeFile(workbook, `price-list-${new Date().toISOString().slice(0, 10)}.xlsx`);
@@ -565,20 +599,10 @@ export function PriceListRequest() {
                 {optionsError ? <p className="mt-3 text-sm text-red-600">{optionsError}</p> : null}
 
                 <div className="mt-5">
-                    <div className="flex items-center justify-between gap-3">
-                        <p className="text-sm font-medium">
-                            Filters
-                            <span className="ml-1.5 text-xs font-normal text-(--ink-soft)">every row must be true</span>
-                        </p>
-                        <button
-                            type="button"
-                            onClick={addFilterRow}
-                            className="inline-flex items-center gap-1.5 rounded-lg border border-(--line) bg-white px-3 py-1.5 text-sm font-medium transition hover:border-(--brand) hover:text-(--brand)"
-                        >
-                            <Plus className="h-4 w-4" aria-hidden="true" />
-                            Add filter
-                        </button>
-                    </div>
+                    <p className="text-sm font-medium">
+                        Filters
+                        <span className="ml-1.5 text-xs font-normal text-(--ink-soft)">every row must be true</span>
+                    </p>
 
                     {filterRows.length === 0 ? (
                         <p className="mt-2 rounded-xl border border-dashed border-(--line) px-3 py-4 text-center text-sm text-(--ink-soft)">
@@ -654,6 +678,17 @@ export function PriceListRequest() {
                         </div>
                     )}
 
+                    <div className="mt-3 flex justify-center">
+                        <button
+                            type="button"
+                            onClick={addFilterRow}
+                            className="inline-flex items-center gap-2 rounded-full border border-[rgba(229,26,39,0.3)] bg-[rgba(229,26,39,0.06)] px-5 py-2 text-sm font-semibold text-(--brand) shadow-sm transition hover:bg-(--brand) hover:text-white"
+                        >
+                            <Plus className="h-4 w-4" aria-hidden="true" />
+                            Add filter
+                        </button>
+                    </div>
+
                     {filterSummary.length > 0 ? (
                         <p className="mt-2 text-xs text-(--ink-soft)">
                             <span className="font-medium text-(--ink)">Result: </span>
@@ -700,8 +735,18 @@ export function PriceListRequest() {
                             Hide out of stock products
                         </label>
                         <label className="inline-flex cursor-pointer items-center gap-2">
-                            <input type="checkbox" checked={hideUnpriced} onChange={(event) => setHideUnpriced(event.target.checked)} className="h-4 w-4 rounded border-(--line)" />
+                            <input type="checkbox" checked={hideUnpriced} onChange={(event) => {
+                                setHideUnpriced(event.target.checked);
+                                if (event.target.checked) setOnlyUnpriced(false);
+                            }} className="h-4 w-4 rounded border-(--line)" />
                             Hide products without list prices
+                        </label>
+                        <label className="inline-flex cursor-pointer items-center gap-2">
+                            <input type="checkbox" checked={onlyUnpriced} onChange={(event) => {
+                                setOnlyUnpriced(event.target.checked);
+                                if (event.target.checked) setHideUnpriced(false);
+                            }} className="h-4 w-4 rounded border-(--line)" />
+                            Show only products without list prices
                         </label>
                     </div>
                     <button
@@ -867,6 +912,8 @@ export function PriceListRequest() {
                                             />
                                         </th>
                                         {sortHeader("searchName", "Search name")}
+                                        {sortHeader("sku", "SKU")}
+                                        {sortHeader("factoryCode", "Factory code")}
                                         {sortHeader("name", "Product")}
                                         {sortHeader("category", "Category")}
                                         {sortHeader("brand", "Brand")}
@@ -891,6 +938,8 @@ export function PriceListRequest() {
                                                 />
                                             </td>
                                             <td className="whitespace-nowrap border border-(--line)/70 px-3 py-2 text-(--ink-soft)">{row.searchName || "-"}</td>
+                                            <td className="whitespace-nowrap border border-(--line)/70 px-3 py-2">{row.sku || "-"}</td>
+                                            <td className="whitespace-nowrap border border-(--line)/70 px-3 py-2">{row.factoryCode || "-"}</td>
                                             <td className="border border-(--line)/70 px-3 py-2 font-medium">{row.name}</td>
                                             <td className="whitespace-nowrap border border-(--line)/70 px-3 py-2">{row.category || "-"}</td>
                                             <td className="whitespace-nowrap border border-(--line)/70 px-3 py-2">{row.brand || "-"}</td>

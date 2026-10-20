@@ -1669,6 +1669,32 @@ export async function getCustomerTags(credentials: OdooCredentials): Promise<Arr
     return tags.map((tag) => ({ id: Number(tag.id), name: toDisplayString(tag.display_name || tag.name) }));
 }
 
+/** Whether a customer is visible under the user's customer-tag permission. */
+export async function isCustomerInTagScope(
+    credentials: OdooCredentials,
+    customerId: number,
+    tagFilter: CustomerTagFilter
+): Promise<boolean> {
+    if (tagFilter && "all" in tagFilter) return true;
+    const uid = await authenticate(credentials);
+    const ids = await executeKw<number[]>(
+        credentials,
+        uid,
+        "res.partner",
+        "search",
+        [[
+            "|",
+            ["id", "=", customerId],
+            ["commercial_partner_id", "=", customerId],
+            ...(tagFilter && tagFilter.ids.length > 0
+                ? [["category_id", "in", tagFilter.ids]]
+                : [["category_id.name", "=", DEFAULT_CUSTOMER_TAG]]),
+        ]],
+        { limit: 1, context: { active_test: false } }
+    );
+    return ids.length > 0;
+}
+
 export async function getCustomers(
     credentials: OdooCredentials,
     assignedToUserId?: number | null,
@@ -1683,7 +1709,6 @@ export async function getCustomers(
         "res.partner",
         "search_read",
         [[
-            ["is_company", "=", true],
             ...(tagFilter && "all" in tagFilter
                 ? []
                 : tagFilter && tagFilter.ids.length > 0
@@ -2248,6 +2273,7 @@ export type SalesStockRow = {
     patternId: number | null;
     lotYear: string;
     copyName: string;
+    sku: string;
     availableQty: number;
     incomingQty: number | null;
     forecastedQty: number | null;
@@ -2269,6 +2295,7 @@ type SalesStockSpec = { key: string; tech: string[]; labels: string[]; type: "te
 // looking on the stock line first, then its lot, then the product.
 const SALES_STOCK_SPECS: SalesStockSpec[] = [
     { key: "copyName", tech: [], labels: ["copy name"], type: "text" },
+    { key: "sku", tech: ["x_studio_product_custom_sku"], labels: [], type: "text" },
     { key: "country", tech: [], labels: ["country", "country of origin"], type: "text" },
     { key: "brand", tech: ["tire_brand"], labels: ["brand", "tire brand"], type: "text" },
     { key: "pattern", tech: [], labels: ["pattern", "tire pattern", "tread pattern"], type: "text" },
@@ -2533,6 +2560,7 @@ export async function searchSalesStock(
             patternId,
             lotYear: pick("lotYear", "text") as string,
             copyName: pick("copyName", "text") as string,
+            sku: pick("sku", "text") as string,
             availableQty: Number(quant.available_quantity ?? onHand - reserved),
             incomingQty: pick("incomingQty", "number") as number | null,
             forecastedQty: pick("forecastedQty", "number") as number | null,
@@ -12258,12 +12286,15 @@ export type PriceListInput = {
     pricelistIds: number[];
     inStockOnly: boolean;
     onlyPriced: boolean;
+    onlyUnpriced?: boolean;
 };
 
 export type PriceListRow = {
     key: string;
     productId: number;
     searchName: string;
+    sku: string;
+    factoryCode: string;
     name: string;
     brand: string;
     origin: string;
@@ -12322,6 +12353,15 @@ async function resolveLotYearAndPattern(credentials: OdooCredentials, uid: numbe
     return {
         lotYear: find(["lot year"]),
         pattern: find(["pattern", "tire pattern", "tread pattern"], "tire.pattern"),
+        factoryCode:
+            find(["factory code", "factory", "factory no", "factory no.", "factory number", "factory_code"]) ??
+            ((): FieldHit | null => {
+                for (const [source, meta] of metas) {
+                    const name = Object.keys(meta).find((key) => /factory/i.test(key) && /^x_/.test(key));
+                    if (name) return { source, field: name };
+                }
+                return null;
+            })(),
         metas: Object.fromEntries(metas) as Record<SalesStockSource, Record<string, OdooFieldMeta>>,
     };
 }
@@ -12563,8 +12603,8 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
     const productIds = matchedIds.slice(0, PRICE_LIST_MAX_PRODUCTS);
 
     const resolved = await resolveLotYearAndPattern(credentials, uid);
-    const productFields = ["name", "tire_brand", "origin", "product_tmpl_id", "categ_id", "rim_diameter"];
-    for (const hit of [resolved.lotYear, resolved.pattern]) if (hit?.source === "product") productFields.push(hit.field);
+    const productFields = ["name", "tire_brand", "origin", "product_tmpl_id", "categ_id", "rim_diameter", "x_studio_product_custom_sku"];
+    for (const hit of [resolved.lotYear, resolved.pattern, resolved.factoryCode]) if (hit?.source === "product") productFields.push(hit.field);
     const products = productIds.length > 0
         ? await readInBatches(credentials, uid, "product.product", productIds, Array.from(new Set(productFields.filter((field) => field === "name" || resolved.metas.product[field]))))
         : [];
@@ -12584,7 +12624,7 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
 
     // Prices in this catalogue are mostly per lot, so a row is one product + lot that is on the shelf.
     const quantFields = ["product_id", "lot_id", "quantity", "reserved_quantity"];
-    for (const hit of [resolved.lotYear, resolved.pattern]) if (hit?.source === "quant") quantFields.push(hit.field);
+    for (const hit of [resolved.lotYear, resolved.pattern, resolved.factoryCode]) if (hit?.source === "quant") quantFields.push(hit.field);
     type StockLot = { productId: number; lotId: number | null; lotName: string; quant: Record<string, unknown>; available: number };
     const stockLots = new Map<string, StockLot>();
     for (let start = 0; start < productIds.length; start += 800) {
@@ -12614,7 +12654,7 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
 
     const lotIds = Array.from(new Set(Array.from(stockLots.values()).map((lot) => lot.lotId).filter((id): id is number => Boolean(id))));
     const lotFields = ["name"];
-    for (const hit of [resolved.lotYear, resolved.pattern]) if (hit?.source === "lot") lotFields.push(hit.field);
+    for (const hit of [resolved.lotYear, resolved.pattern, resolved.factoryCode]) if (hit?.source === "lot") lotFields.push(hit.field);
     const lots = lotIds.length > 0
         ? await readInBatches(credentials, uid, "stock.lot", lotIds, Array.from(new Set(lotFields))).catch(() => [] as Array<Record<string, unknown>>)
         : [];
@@ -12765,11 +12805,14 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
             }
             if (priced) diagnostics.rowsWithPrice += 1;
             if (input.onlyPriced && !priced) continue;
+            if (input.onlyUnpriced && priced) continue;
             const year = valueOf(resolved.lotYear, entry?.quant, lot, product);
             rows.push({
                 key: `${productId}|${entry?.lotId ?? 0}`,
                 productId,
                 searchName: templateId ? searchNameByTemplate.get(templateId) ?? "" : "",
+                sku: toDisplayString(product.x_studio_product_custom_sku),
+                factoryCode: valueOf(resolved.factoryCode, entry?.quant, lot, product),
                 name: toDisplayString(product.name),
                 brand: getRelationalName(product.tire_brand),
                 origin: getRelationalName(product.origin),

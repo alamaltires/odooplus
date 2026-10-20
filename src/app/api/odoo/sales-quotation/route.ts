@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
-import { createSalesQuotations, runWithCompanyIds } from "@/lib/server/odoo-client";
+import { createSalesQuotations, isCustomerInTagScope, runWithCompanyIds } from "@/lib/server/odoo-client";
 import type { SalesQuotationLine } from "@/lib/server/odoo-client";
 import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
-import { assertCustomerInScope, getOwnSalespersonScope } from "@/lib/server/salesperson-scope";
+import { assertCustomerInScope, getCustomerTagScope, getOwnSalespersonScope } from "@/lib/server/salesperson-scope";
 
 export async function POST(request: Request) {
     try {
@@ -16,6 +16,9 @@ export async function POST(request: Request) {
             throw new Error("Select a customer first.");
         }
         await assertCustomerInScope(ownUserId, credentials, customerId);
+        if (!(await isCustomerInTagScope(credentials, customerId, await getCustomerTagScope(request)))) {
+            throw new Error("This customer is outside your customer tag permission.");
+        }
 
         const quotations = await runWithCompanyIds(companyIds, () =>
             createSalesQuotations(credentials, {

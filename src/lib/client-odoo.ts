@@ -299,6 +299,7 @@ export type SalesStockRow = {
     patternId: number | null;
     lotYear: string;
     copyName: string;
+    sku: string;
     availableQty: number;
     incomingQty: number | null;
     forecastedQty: number | null;
@@ -969,6 +970,8 @@ export type PriceListRow = {
     key: string;
     productId: number;
     searchName: string;
+    sku: string;
+    factoryCode: string;
     name: string;
     brand: string;
     origin: string;
@@ -1026,6 +1029,7 @@ export function getPriceListRequest(input: {
     pricelistIds: number[];
     inStockOnly: boolean;
     onlyPriced: boolean;
+    onlyUnpriced?: boolean;
 }) {
     return post<PriceListResponse>("/api/odoo/price-list-request", input);
 }
