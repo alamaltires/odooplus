@@ -4,7 +4,6 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import dynamic from "next/dynamic";
 import {
     AlertCircle,
-    CalendarClock,
     Building2,
     CheckCircle2,
     ChevronDown,
@@ -12,6 +11,7 @@ import {
     ChevronRight,
     Container,
     Download,
+    FileText,
     List,
     Map as MapIcon,
     MapPin,
@@ -22,11 +22,12 @@ import {
     Truck,
 } from "lucide-react";
 import {
-    diagnosePoTracking,
     geocodePorts,
     exportPoTrackingExcel,
     getPoBrands,
     getPoBills,
+    getPoDetails,
+    type PoDetails,
     type PoBillStatus,
     getPoTrackingOrders,
     getSeaRoutes,
@@ -35,7 +36,6 @@ import {
     trackShipmentByBl,
     type TrackingCarrier,
     type PoTrackingContainer,
-    type PoTrackingDiagnosis,
     type PoTrackingOrder,
     type ShipmentEvent,
     type ShipmentTracking,
@@ -59,14 +59,18 @@ type BlGroup = {
 };
 
 type Stage = "waiting" | "departed" | "arrived" | "delivered";
-type FilterKey = "all" | "soon" | "transit" | "arrived" | "untracked";
-type TransitSort = "arrival-asc" | "arrival-desc" | "checked-desc" | "checked-asc";
+type FilterKey = "all" | "transit" | "arrived" | "untracked";
+type ShipmentSort = "smart" | "arrival-asc" | "arrival-desc" | "units-desc" | "units-asc" | "order-desc" | "order-asc" | "vendor";
 
-const TRANSIT_SORTS: Array<{ key: TransitSort; label: string }> = [
+const SHIPMENT_SORTS: Array<{ key: ShipmentSort; label: string }> = [
+    { key: "smart", label: "Smart · overdue first, then soonest" },
     { key: "arrival-asc", label: "Arrival date · nearest first" },
     { key: "arrival-desc", label: "Arrival date · furthest first" },
-    { key: "checked-desc", label: "Checked · most recent first" },
-    { key: "checked-asc", label: "Checked · oldest first" },
+    { key: "units-desc", label: "Units · most first" },
+    { key: "units-asc", label: "Units · fewest first" },
+    { key: "order-desc", label: "PO date · newest first" },
+    { key: "order-asc", label: "PO date · oldest first" },
+    { key: "vendor", label: "Vendor · A to Z" },
 ];
 
 const STAGES: Array<{ key: Stage; label: string }> = [
@@ -227,6 +231,7 @@ export default function PoTrackingPage() {
     const [updating, setUpdating] = useState<Set<string>>(new Set());
     const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
     const [confirmBulk, setConfirmBulk] = useState(false);
+    const [poModal, setPoModal] = useState<{ id: number; name: string; loading: boolean; error: string | null; data: PoDetails | null } | null>(null);
 
     const [search, setSearch] = useState("");
     const [filter, setFilter] = useState<FilterKey>("all");
@@ -249,7 +254,7 @@ export default function PoTrackingPage() {
     const [hiddenBls, setHiddenBls] = useState<Set<string>>(new Set());
     const [mapListSearch, setMapListSearch] = useState("");
     const [mapFocus, setMapFocus] = useState<{ blNumber: string; n: number } | null>(null);
-    const [transitSort, setTransitSort] = useState<TransitSort>("arrival-asc");
+    const [shipmentSort, setShipmentSort] = useState<ShipmentSort>("smart");
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
     const [highlighted, setHighlighted] = useState<string | null>(null);
     // The shipment whose tracking result is shown in the panel at the top.
@@ -331,12 +336,11 @@ export default function PoTrackingPage() {
     );
 
     const counts = useMemo(() => {
-        const result = { soon: 0, transit: 0, arrived: 0, untracked: 0 };
-        for (const { tracking, stage, eta, received } of enriched) {
+        const result = { transit: 0, arrived: 0, untracked: 0 };
+        for (const { tracking, stage, received } of enriched) {
             if (!tracking && !received) result.untracked += 1;
             else if (stage === "arrived" || stage === "delivered") result.arrived += 1;
             else result.transit += 1;
-            if (stage !== "arrived" && stage !== "delivered" && eta.days !== null && eta.days <= 7) result.soon += 1;
         }
         return result;
     }, [enriched]);
@@ -363,11 +367,10 @@ export default function PoTrackingPage() {
     const visible = useMemo(() => {
         const query = search.trim().toLowerCase();
         return enriched
-            .filter(({ group, tracking, stage, eta, received }) => {
+            .filter(({ group, tracking, stage, received }) => {
                 if (filter === "untracked" && (tracking || received)) return false;
                 if (filter === "transit" && (!(tracking || received) || stage === "arrived" || stage === "delivered")) return false;
                 if (filter === "arrived" && (!(tracking || received) || (stage !== "arrived" && stage !== "delivered"))) return false;
-                if (filter === "soon" && (stage === "arrived" || stage === "delivered" || eta.days === null || eta.days > 7)) return false;
                 if (!query) return true;
                 return (
                     group.blNumber.toLowerCase().includes(query) ||
@@ -383,19 +386,30 @@ export default function PoTrackingPage() {
             // Tracked shipments first (still travelling by soonest arrival, then
             // arrived ones), then the ones not tracked yet by expected date.
             .sort((a, b) => {
-                // "On the way" view: the user picks what to order by.
-                if (filter === "transit") {
+                if (shipmentSort !== "smart") {
                     const arrival = (item: (typeof enriched)[number]) => item.eta.date?.getTime() ?? Infinity;
-                    const checked = (item: (typeof enriched)[number]) => toDate(item.tracking?.fetchedAt)?.getTime() ?? 0;
-                    switch (transitSort) {
+                    const orderTime = (item: (typeof enriched)[number]) => toDate(item.group.orders[0]?.orderDate)?.getTime() ?? 0;
+                    const vendor = (item: (typeof enriched)[number]) => item.group.orders[0]?.vendorName ?? "";
+                    // Shipments without any arrival date always go last.
+                    const byArrival = (direction: 1 | -1) => {
+                        if (arrival(a) === Infinity || arrival(b) === Infinity) return arrival(a) === arrival(b) ? 0 : arrival(a) === Infinity ? 1 : -1;
+                        return (arrival(a) - arrival(b)) * direction;
+                    };
+                    switch (shipmentSort) {
+                        case "arrival-asc":
+                            return byArrival(1);
                         case "arrival-desc":
-                            // Shipments without any arrival date go last.
-                            if (arrival(a) === Infinity || arrival(b) === Infinity) return arrival(a) === arrival(b) ? 0 : arrival(a) === Infinity ? 1 : -1;
-                            return arrival(b) - arrival(a);
-                        case "checked-desc":
-                            return checked(b) - checked(a);
-                        case "checked-asc":
-                            return checked(a) - checked(b);
+                            return byArrival(-1);
+                        case "units-desc":
+                            return b.group.totalQty - a.group.totalQty;
+                        case "units-asc":
+                            return a.group.totalQty - b.group.totalQty;
+                        case "order-desc":
+                            return orderTime(b) - orderTime(a);
+                        case "order-asc":
+                            return orderTime(a) - orderTime(b);
+                        case "vendor":
+                            return vendor(a).localeCompare(vendor(b));
                         default:
                             break;
                     }
@@ -408,7 +422,7 @@ export default function PoTrackingPage() {
                 const tb = b.eta.date?.getTime() ?? Infinity;
                 return rank(a) === 1 ? tb - ta : ta - tb;
             });
-    }, [enriched, filter, search, transitSort]);
+    }, [enriched, filter, search, shipmentSort]);
 
     const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
     const currentPage = Math.min(page, pageCount);
@@ -417,7 +431,7 @@ export default function PoTrackingPage() {
     // A new filter / search / sort starts again from the first page.
     useEffect(() => {
         setPage(1);
-    }, [filter, search, transitSort, includeReceived]);
+    }, [filter, search, shipmentSort, includeReceived]);
 
     // Open the page that holds the requested shipment, then scroll to it and flash it.
     useEffect(() => {
@@ -540,9 +554,30 @@ export default function PoTrackingPage() {
     }
 
     const busy = bulkProgress !== null;
+
+    function openPo(id: number, name: string) {
+        setPoModal({ id, name, loading: true, error: null, data: null });
+        getPoDetails(id)
+            .then((response) => setPoModal((current) => (current && current.id === id ? { ...current, loading: false, data: response.order } : current)))
+            .catch((loadError) =>
+                setPoModal((current) =>
+                    current && current.id === id
+                        ? { ...current, loading: false, error: loadError instanceof Error ? loadError.message : "Failed to load the purchase order." }
+                        : current
+                )
+            );
+    }
+
+    useEffect(() => {
+        if (!poModal) return undefined;
+        const onKey = (event: KeyboardEvent) => {
+            if (event.key === "Escape") setPoModal(null);
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, [poModal]);
     const filters: Array<{ key: FilterKey; label: string; count: number; tone?: string }> = [
         { key: "all", label: "All", count: enriched.length },
-        { key: "soon", label: "Arriving ≤ 7 days", count: counts.soon, tone: "text-amber-700" },
         { key: "transit", label: "On the way", count: counts.transit },
         { key: "arrived", label: "Arrived", count: counts.arrived },
         { key: "untracked", label: "Not tracked", count: counts.untracked },
@@ -578,7 +613,24 @@ export default function PoTrackingPage() {
                                 <div className="flex flex-wrap items-start justify-between gap-4 p-5">
                                     {/* Who / what */}
                                     <div className="min-w-0">
-                                        <p className="text-xl font-semibold leading-tight">{group.orders.map((order) => order.name).join(" · ")}</p>
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            {group.orders.map((order) => (
+                                                <span key={order.id}>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => openPo(order.id, order.name)}
+                                                        className="group/po flex items-center gap-2 rounded-xl border border-(--line) bg-white py-1 pl-1 pr-2 text-left transition-colors duration-200 hover:border-(--brand) hover:bg-[rgba(229,26,39,0.04)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--brand)"
+                                                        title="Show this purchase order's details"
+                                                    >
+                                                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-(--brand) text-white">
+                                                            <FileText className="h-4 w-4" aria-hidden="true" />
+                                                        </span>
+                                                        <span className="text-base font-semibold leading-none">{order.name}</span>
+                                                        <ChevronRight className="h-4 w-4 shrink-0 text-(--ink-soft) transition duration-200 group-hover/po:translate-x-0.5 group-hover/po:text-(--brand)" aria-hidden="true" />
+                                                    </button>
+                                                </span>
+                                            ))}
+                                        </div>
                                         <p className="mt-0.5 text-sm text-(--ink-soft)">
                                             {Array.from(new Set(group.orders.map((order) => order.vendorName))).join(", ")}
                                         </p>
@@ -1000,8 +1052,7 @@ export default function PoTrackingPage() {
             </div>
 
             {/* Headline numbers */}
-            <div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
-                <Headline icon={<CalendarClock className="h-5 w-5" />} label="Arriving within 7 days" value={counts.soon} tone="amber" />
+            <div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-3">
                 <Headline icon={<Ship className="h-5 w-5" />} label="On the way" value={counts.transit} tone="sky" />
                 <Headline icon={<CheckCircle2 className="h-5 w-5" />} label="Arrived" value={counts.arrived} tone="emerald" />
                 <Headline icon={<Package className="h-5 w-5" />} label="Not tracked yet" value={counts.untracked} tone="slate" />
@@ -1025,22 +1076,20 @@ export default function PoTrackingPage() {
                 ))}
             </div>
 
-            {filter === "transit" ? (
-                <label className="mt-3 flex flex-wrap items-center gap-2 text-sm">
+            <label className="mt-3 flex flex-wrap items-center gap-2 text-sm">
                     <span className="text-(--ink-soft)">Order by</span>
                     <select
-                        value={transitSort}
-                        onChange={(event) => setTransitSort(event.target.value as TransitSort)}
+                        value={shipmentSort}
+                        onChange={(event) => setShipmentSort(event.target.value as ShipmentSort)}
                         className="rounded-xl border border-(--line) bg-white px-3 py-1.5 text-sm"
                     >
-                        {TRANSIT_SORTS.map((option) => (
+                        {SHIPMENT_SORTS.map((option) => (
                             <option key={option.key} value={option.key}>
                                 {option.label}
                             </option>
                         ))}
                     </select>
                 </label>
-            ) : null}
 
             <div className="mt-3 flex flex-wrap items-center gap-3 rounded-2xl border border-(--line) bg-(--card) p-3">
                 <div className="relative min-w-[14rem] flex-1">
@@ -1113,8 +1162,6 @@ export default function PoTrackingPage() {
                 </button>
             </div>
             {exportError ? <p className="mt-2 text-sm text-red-600">{exportError}</p> : null}
-
-            <PoCheck />
 
             {ordersError ? (
                 <p className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{ordersError}</p>
@@ -1329,6 +1376,91 @@ export default function PoTrackingPage() {
                 </div>
             )}
 
+            {poModal ? (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm" onMouseDown={(event) => event.target === event.currentTarget && setPoModal(null)}>
+                    <div role="dialog" aria-modal="true" aria-label={`Purchase order ${poModal.name}`} className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-(--line) bg-(--card) shadow-2xl">
+                        <div className="flex items-start justify-between gap-3 border-b border-(--line) px-5 py-4">
+                            <div>
+                                <h2 className="font-display text-xl">{poModal.name}</h2>
+                                {poModal.data ? <p className="text-sm text-(--ink-soft)">{poModal.data.vendorName}</p> : null}
+                            </div>
+                            <button type="button" onClick={() => setPoModal(null)} className="rounded-full border border-(--line) bg-white px-3 py-1 text-sm" aria-label="Close">
+                                Close
+                            </button>
+                        </div>
+                        <div className="overflow-y-auto p-5">
+                            {poModal.loading ? (
+                                <p className="py-10 text-center text-sm text-(--ink-soft)">Loading purchase order...</p>
+                            ) : poModal.error ? (
+                                <p className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">{poModal.error}</p>
+                            ) : poModal.data ? (
+                                (() => {
+                                    const po = poModal.data;
+                                    const money = (value: number) => `${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${po.currencyCode ? ` ${po.currencyCode}` : ""}`;
+                                    const qty = (value: number) => value.toLocaleString("en-US", { maximumFractionDigits: 2 });
+                                    const facts: Array<[string, string]> = [
+                                        ["Status", po.state.replace(/^./, (char) => char.toUpperCase())],
+                                        ["Vendor ref", po.vendorRef || "—"],
+                                        ["Company", po.companyName || "—"],
+                                        ["Currency", po.currencyCode || "—"],
+                                        ["Order date", formatDate(po.orderDate)],
+                                        ["Expected arrival", formatDate(po.expectedArrival)],
+                                        ["Source document", po.sourceDocument || "—"],
+                                    ];
+                                    return (
+                                        <div className="space-y-5">
+                                            <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                                                {facts.map(([label, value]) => (
+                                                    <div key={label} className="rounded-xl bg-(--chip)/60 px-3 py-2">
+                                                        <dt className="text-[11px] uppercase tracking-wide text-(--ink-soft)">{label}</dt>
+                                                        <dd className="mt-0.5 break-words text-sm font-medium">{value}</dd>
+                                                    </div>
+                                                ))}
+                                            </dl>
+                                            {po.notes ? <p className="rounded-xl border border-(--line) bg-white px-3 py-2 text-sm text-(--ink-soft)">{po.notes}</p> : null}
+                                            <div className="overflow-x-auto rounded-xl border border-(--line)">
+                                                <table className="w-full min-w-[640px] border-collapse text-sm">
+                                                    <thead className="bg-(--chip) text-left text-xs uppercase tracking-wide text-(--ink-soft)">
+                                                        <tr>
+                                                            <th className="px-3 py-2">Product</th>
+                                                            <th className="px-3 py-2 text-right">Ordered</th>
+                                                            <th className="px-3 py-2 text-right">Received</th>
+                                                            <th className="px-3 py-2 text-right">Unit price{po.currencyCode ? ` (${po.currencyCode})` : ""}</th>
+                                                            <th className="px-3 py-2 text-right">Subtotal{po.currencyCode ? ` (${po.currencyCode})` : ""}</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {po.lines.length === 0 ? (
+                                                            <tr>
+                                                                <td colSpan={5} className="px-3 py-6 text-center text-(--ink-soft)">This order has no product lines.</td>
+                                                            </tr>
+                                                        ) : (
+                                                            po.lines.map((line) => (
+                                                                <tr key={line.id} className="border-t border-(--line)">
+                                                                    <td className="px-3 py-2 font-medium">{line.productName || line.description}</td>
+                                                                    <td className="whitespace-nowrap px-3 py-2 text-right">{qty(line.quantity)} {line.uom}</td>
+                                                                    <td className={`whitespace-nowrap px-3 py-2 text-right ${line.received >= line.quantity ? "text-emerald-700" : line.received > 0 ? "text-amber-700" : "text-(--ink-soft)"}`}>{qty(line.received)}</td>
+                                                                    <td className="whitespace-nowrap px-3 py-2 text-right">{line.unitPrice.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                                                    <td className="whitespace-nowrap px-3 py-2 text-right font-medium">{line.subtotal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                                                </tr>
+                                                            ))
+                                                        )}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                            <dl className="ml-auto w-full max-w-xs space-y-1 text-sm">
+                                                <div className="flex justify-between"><dt className="text-(--ink-soft)">Untaxed</dt><dd>{money(po.amountUntaxed)}</dd></div>
+                                                <div className="flex justify-between"><dt className="text-(--ink-soft)">Tax</dt><dd>{money(po.amountTax)}</dd></div>
+                                                <div className="flex justify-between border-t border-(--line) pt-1 text-base font-semibold"><dt>Total</dt><dd>{money(po.amountTotal)}</dd></div>
+                                            </dl>
+                                        </div>
+                                    );
+                                })()
+                            ) : null}
+                        </div>
+                    </div>
+                </div>
+            ) : null}
         </section>
     );
 }
@@ -1491,100 +1623,6 @@ function Headline({ icon, label, value, tone }: { icon: React.ReactNode; label: 
                 <p className="text-2xl font-semibold leading-none">{value}</p>
                 <p className="mt-1 text-xs text-(--ink-soft)">{label}</p>
             </div>
-        </div>
-    );
-}
-
-/** "Why isn't my PO listed?" — looks one purchase order up in Odoo and explains. */
-function PoCheck() {
-    const [open, setOpen] = useState(false);
-    const [poName, setPoName] = useState("");
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState<string | null>(null);
-    const [result, setResult] = useState<PoTrackingDiagnosis | null>(null);
-
-    async function check() {
-        setLoading(true);
-        setError(null);
-        setResult(null);
-        try {
-            setResult(await diagnosePoTracking(poName));
-        } catch (checkError) {
-            setError(checkError instanceof Error ? checkError.message : "Check failed.");
-        } finally {
-            setLoading(false);
-        }
-    }
-
-    return (
-        <div className="mt-3">
-            <button type="button" onClick={() => setOpen((current) => !current)} className="text-sm text-(--ink-soft) underline-offset-2 hover:underline">
-                {open ? "Hide" : "Missing a PO? Check why it isn't listed"}
-            </button>
-
-            {open ? (
-                <div className="mt-2 rounded-2xl border border-(--line) bg-(--card) p-4">
-                    <form
-                        onSubmit={(event) => {
-                            event.preventDefault();
-                            void check();
-                        }}
-                        className="flex flex-wrap gap-2"
-                    >
-                        <input
-                            value={poName}
-                            onChange={(event) => setPoName(event.target.value)}
-                            placeholder="PO number, e.g. P11789"
-                            className="min-w-[12rem] flex-1 rounded-xl border border-(--line) bg-white px-3 py-2 text-sm"
-                        />
-                        <button type="submit" disabled={loading || !poName.trim()} className="rounded-xl bg-(--brand) px-4 py-2 text-sm font-medium text-white disabled:opacity-60">
-                            {loading ? "Checking..." : "Check"}
-                        </button>
-                    </form>
-
-                    {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
-
-                    {result ? (
-                        <div className="mt-4 space-y-3 text-sm">
-                            {result.reasons.length === 0 ? (
-                                <p className="rounded-xl bg-emerald-50 px-3 py-2 font-medium text-emerald-800">
-                                    {result.name} meets every condition — it should be listed (try Reload PO list).
-                                </p>
-                            ) : (
-                                <div className="rounded-xl bg-amber-50 px-3 py-2 text-amber-900">
-                                    <p className="font-medium">{result.name || "This PO"} is not listed because:</p>
-                                    <ul className="mt-1 list-disc space-y-0.5 pl-5">
-                                        {result.reasons.map((reason) => (
-                                            <li key={reason}>{reason}</li>
-                                        ))}
-                                    </ul>
-                                </div>
-                            )}
-
-                            {result.found ? (
-                                <dl className="grid gap-x-6 gap-y-1 sm:grid-cols-[10rem_1fr]">
-                                    <dt className="text-(--ink-soft)">Status</dt>
-                                    <dd>{result.state}{result.receiptStatus ? ` · receipt ${result.receiptStatus}` : ""}</dd>
-                                    <dt className="text-(--ink-soft)">Purchase Type</dt>
-                                    <dd>{result.types.length ? result.types.join(", ") : "—"}</dd>
-                                    <dt className="text-(--ink-soft)">Source Document</dt>
-                                    <dd className="break-words">{result.sourceDocument || "—"}</dd>
-                                    <dt className="text-(--ink-soft)">Notes fields read</dt>
-                                    <dd className="break-words">{result.notesFieldNames.length ? result.notesFieldNames.join(", ") : "none found"}</dd>
-                                    <dt className="text-(--ink-soft)">Notes</dt>
-                                    <dd className="whitespace-pre-wrap break-words">{result.notesPreview || "—"}</dd>
-                                    <dt className="text-(--ink-soft)">B/L found</dt>
-                                    <dd>
-                                        {result.parsed.length
-                                            ? Array.from(new Set(result.parsed.map((entry) => `${entry.blNumber} (from ${entry.from})`))).join(", ")
-                                            : "none"}
-                                    </dd>
-                                </dl>
-                            ) : null}
-                        </div>
-                    ) : null}
-                </div>
-            ) : null}
         </div>
     );
 }

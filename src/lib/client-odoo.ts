@@ -835,6 +835,37 @@ export function getPoBrands(orderIds: number[]) {
     return post<{ brands: Record<string, string[]> }>("/api/odoo/po-tracking/brands", { orderIds });
 }
 
+export type PoDetails = {
+    id: number;
+    name: string;
+    state: string;
+    vendorName: string;
+    vendorRef: string;
+    companyName: string;
+    currencyCode: string;
+    orderDate: string;
+    expectedArrival: string;
+    sourceDocument: string;
+    notes: string;
+    amountUntaxed: number;
+    amountTax: number;
+    amountTotal: number;
+    lines: Array<{
+        id: number;
+        productName: string;
+        description: string;
+        quantity: number;
+        received: number;
+        uom: string;
+        unitPrice: number;
+        subtotal: number;
+    }>;
+};
+
+export function getPoDetails(orderId: number) {
+    return post<{ order: PoDetails }>("/api/odoo/po-tracking/details", { orderId });
+}
+
 export type PoBillStatus = { state: string; count: number; billNames: string[] };
 
 /** Vendor-bill payment status per PO id — only for the arrived orders being shown. */

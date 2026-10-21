@@ -11229,6 +11229,77 @@ export async function getPoBills(credentials: OdooCredentials, orderIds: number[
     return result;
 }
 
+export type PoDetails = {
+    id: number;
+    name: string;
+    state: string;
+    vendorName: string;
+    vendorRef: string;
+    companyName: string;
+    currencyCode: string;
+    orderDate: string;
+    expectedArrival: string;
+    sourceDocument: string;
+    notes: string;
+    amountUntaxed: number;
+    amountTax: number;
+    amountTotal: number;
+    lines: Array<{
+        id: number;
+        productName: string;
+        description: string;
+        quantity: number;
+        received: number;
+        uom: string;
+        unitPrice: number;
+        subtotal: number;
+    }>;
+};
+
+/** One purchase order with its product lines, for the PO Tracking detail popup. */
+export async function getPoDetails(credentials: OdooCredentials, orderId: number): Promise<PoDetails> {
+    const uid = await authenticate(credentials);
+    const meta = await getModelFieldsMeta(credentials, uid, "purchase.order");
+    const wanted = ["name", "state", "partner_id", "partner_ref", "company_id", "currency_id", "date_order", "date_planned", "origin", "notes", "amount_untaxed", "amount_tax", "amount_total", "order_line"];
+    const [order] = await readInBatches(credentials, uid, "purchase.order", [orderId], wanted.filter((field) => meta[field]));
+    if (!order) throw new Error("Purchase order not found.");
+
+    const lineIds = Array.isArray(order.order_line) ? (order.order_line as number[]) : [];
+    const lines = lineIds.length
+        ? await readInBatches(credentials, uid, "purchase.order.line", lineIds, ["product_id", "name", "product_qty", "qty_received", "product_uom", "price_unit", "price_subtotal", "display_type"])
+        : [];
+
+    const text = (value: unknown) => (typeof value === "string" ? value : "");
+    return {
+        id: orderId,
+        name: toDisplayString(order.name),
+        state: toDisplayString(order.state),
+        vendorName: getRelationalName(order.partner_id),
+        vendorRef: text(order.partner_ref),
+        companyName: getRelationalName(order.company_id),
+        currencyCode: getRelationalName(order.currency_id),
+        orderDate: text(order.date_order),
+        expectedArrival: text(order.date_planned),
+        sourceDocument: text(order.origin),
+        notes: text(order.notes).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim(),
+        amountUntaxed: Number(order.amount_untaxed ?? 0),
+        amountTax: Number(order.amount_tax ?? 0),
+        amountTotal: Number(order.amount_total ?? 0),
+        lines: lines
+            .filter((line) => !line.display_type)
+            .map((line) => ({
+                id: Number(line.id),
+                productName: getRelationalName(line.product_id),
+                description: text(line.name),
+                quantity: Number(line.product_qty ?? 0),
+                received: Number(line.qty_received ?? 0),
+                uom: getRelationalName(line.product_uom),
+                unitPrice: Number(line.price_unit ?? 0),
+                subtotal: Number(line.price_subtotal ?? 0),
+            })),
+    };
+}
+
 export type PoTrackingDiagnosis = {
     found: boolean;
     name: string;
