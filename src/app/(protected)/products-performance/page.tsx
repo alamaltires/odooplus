@@ -8,6 +8,7 @@ import { resolveExactNameMatch } from "@/lib/combobox-match";
 import {
     getProductBrands,
     getProductCategories,
+    getProductOrigins,
     getProducts,
     getProductsPerformanceReport,
     searchPurchaseOrders,
@@ -133,6 +134,12 @@ export default function ProductsPerformancePage() {
     const [categoryMenuOpen, setCategoryMenuOpen] = useState(false);
     const [selectedCategories, setSelectedCategories] = useState<Category[]>([]);
 
+    const [origins, setOrigins] = useState<Array<{ id: number; name: string }>>([]);
+    const [originsLoading, setOriginsLoading] = useState(true);
+    const [originQuery, setOriginQuery] = useState("");
+    const [originMenuOpen, setOriginMenuOpen] = useState(false);
+    const [selectedOrigins, setSelectedOrigins] = useState<Array<{ id: number; name: string }>>([]);
+
     const [brands, setBrands] = useState<Brand[]>([]);
     const [brandsLoading, setBrandsLoading] = useState(true);
     const [brandsError, setBrandsError] = useState<string | null>(null);
@@ -206,6 +213,14 @@ export default function ProductsPerformancePage() {
         }
 
         void loadCategories();
+    }, [user]);
+
+    useEffect(() => {
+        if (!user) return;
+        getProductOrigins()
+            .then((data) => setOrigins(data.origins))
+            .catch(() => setOrigins([]))
+            .finally(() => setOriginsLoading(false));
     }, [user]);
 
     useEffect(() => {
@@ -355,6 +370,11 @@ export default function ProductsPerformancePage() {
         return categories.filter((category) => category.name.toLowerCase().includes(query));
     }, [categoryQuery, categories]);
 
+    const filteredOrigins = useMemo(() => {
+        const query = originQuery.trim().toLowerCase();
+        return query ? origins.filter((origin) => origin.name.toLowerCase().includes(query)) : origins;
+    }, [originQuery, origins]);
+
     const filteredBrands = useMemo(() => {
         if (!brandQuery.trim()) {
             return brands;
@@ -372,6 +392,7 @@ export default function ProductsPerformancePage() {
         selectedProduct ||
         selectedBrand ||
         selectedCategories.length > 0 ||
+        selectedOrigins.length > 0 ||
         poQuery.trim() ||
         productQuery.trim() ||
         brandQuery.trim() ||
@@ -410,10 +431,11 @@ export default function ProductsPerformancePage() {
             selectedProduct?.name,
             selectedBrand?.name,
             selectedCategories.length > 0 ? selectedCategories.map((category) => category.name).join("+") : undefined,
+            selectedOrigins.length > 0 ? selectedOrigins.map((origin) => origin.name).join("+") : undefined,
         ].filter(Boolean);
         const scope = parts.join("-") || "products-performance";
         return `products-performance-${sanitizeFileName(scope)}-${startDate}-to-${endDate}`;
-    }, [endDate, selectedBrand?.name, selectedCategories, selectedProduct?.name, selectedPurchaseOrder?.name, startDate]);
+    }, [endDate, selectedBrand?.name, selectedCategories, selectedOrigins, selectedProduct?.name, selectedPurchaseOrder?.name, startDate]);
 
     // Resolves a scanner field that was typed but never clicked: an exact
     // (case/whitespace-insensitive) name match against whatever's already
@@ -483,7 +505,7 @@ export default function ProductsPerformancePage() {
         const resolvedBrand = resolveBrandSelection();
         const resolvedCategories = resolveCategorySelection();
 
-        if (!resolvedPurchaseOrder && !resolvedProduct && !resolvedBrand && resolvedCategories.length === 0) {
+        if (!resolvedPurchaseOrder && !resolvedProduct && !resolvedBrand && resolvedCategories.length === 0 && selectedOrigins.length === 0) {
             return;
         }
 
@@ -532,6 +554,7 @@ export default function ProductsPerformancePage() {
                 productId: resolvedProduct?.id,
                 brandId: resolvedBrand?.id,
                 categoryIds: resolvedCategories.map((category) => category.id),
+                originIds: selectedOrigins.map((origin) => origin.id),
                 startDate: effectiveStartDate,
                 endDate: effectiveEndDate,
                 dateBasis,
@@ -896,6 +919,70 @@ export default function ProductsPerformancePage() {
                                             onClick={() => setSelectedCategories((current) => current.filter((item) => item.id !== category.id))}
                                             className="rounded-full p-0.5 text-(--ink-soft) hover:bg-white hover:text-(--brand)"
                                             aria-label={`Remove ${category.name}`}
+                                        >
+                                            <X className="h-3 w-3" aria-hidden="true" />
+                                        </button>
+                                    </span>
+                                ))}
+                            </div>
+                        ) : null}
+                    </label>
+
+                    <label className="relative block">
+                        <span className="mb-2 block text-sm font-medium">Tire Origin</span>
+                        <div className="relative">
+                            <Search
+                                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-(--ink-soft)"
+                                aria-hidden="true"
+                            />
+                            <input
+                                value={originQuery}
+                                onChange={(event) => {
+                                    setOriginQuery(event.target.value);
+                                    setOriginMenuOpen(true);
+                                }}
+                                onFocus={() => setOriginMenuOpen(true)}
+                                onBlur={() => window.setTimeout(() => setOriginMenuOpen(false), 120)}
+                                placeholder={originsLoading ? "Loading origins..." : "Search origins"}
+                                className="w-full rounded-xl border border-(--line) bg-white py-2 pl-10 pr-3"
+                                disabled={originsLoading}
+                            />
+                        </div>
+
+                        {originMenuOpen && filteredOrigins.length > 0 ? (
+                            <ul className="absolute z-20 mt-2 max-h-64 w-full overflow-auto rounded-xl border border-(--line) bg-white p-1 shadow-lg">
+                                {filteredOrigins.map((origin) => {
+                                    const picked = selectedOrigins.some((item) => item.id === origin.id);
+                                    return (
+                                        <li key={origin.id}>
+                                            <button
+                                                type="button"
+                                                onMouseDown={(event) => {
+                                                    event.preventDefault();
+                                                    setSelectedOrigins((current) =>
+                                                        picked ? current.filter((item) => item.id !== origin.id) : [...current, origin]
+                                                    );
+                                                }}
+                                                className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-(--chip) ${picked ? "bg-(--chip) font-medium text-(--brand)" : ""}`}
+                                            >
+                                                <input type="checkbox" checked={picked} readOnly tabIndex={-1} className="h-4 w-4 shrink-0 rounded border-(--line)" />
+                                                {origin.name}
+                                            </button>
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+                        ) : null}
+                        {selectedOrigins.length > 0 ? (
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                                {selectedOrigins.map((origin) => (
+                                    <span key={origin.id} className="inline-flex items-center gap-1 rounded-full border border-(--line) bg-(--chip) py-0.5 pl-2.5 pr-1 text-xs font-medium">
+                                        {origin.name}
+                                        <button
+                                            type="button"
+                                            onClick={() => setSelectedOrigins((current) => current.filter((item) => item.id !== origin.id))}
+                                            className="rounded-full p-0.5 text-(--ink-soft) hover:bg-white hover:text-(--brand)"
+                                            aria-label={`Remove ${origin.name}`}
                                         >
                                             <X className="h-3 w-3" aria-hidden="true" />
                                         </button>

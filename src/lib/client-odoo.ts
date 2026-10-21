@@ -208,6 +208,7 @@ export function getProductsPerformanceReport(input: {
     brandId?: number | null;
     categoryId?: number | null;
     categoryIds?: number[];
+    originIds?: number[];
     startDate: string;
     endDate: string;
     dateBasis?: "order" | "transaction" | null;

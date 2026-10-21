@@ -7148,6 +7148,7 @@ export async function getProductsPerformanceReport(
         brandId?: number | null;
         categoryId?: number | null;
         categoryIds?: number[];
+        originIds?: number[];
         startDate: string;
         endDate: string;
         /**
@@ -7173,8 +7174,10 @@ export async function getProductsPerformanceReport(
         new Set([...(input.categoryIds ?? []), input.categoryId ?? 0].map(Number).filter((id) => Number.isFinite(id) && id > 0))
     );
     const hasCategory = categoryIds.length > 0;
+    const originIds = Array.from(new Set((input.originIds ?? []).map(Number).filter((id) => Number.isFinite(id) && id > 0)));
+    const hasOrigin = originIds.length > 0;
 
-    if (!hasPurchaseOrder && !hasProduct && !hasBrand && !hasCategory) {
+    if (!hasPurchaseOrder && !hasProduct && !hasBrand && !hasCategory && !hasOrigin) {
         throw new Error("Select a purchase order, product, brand, or category.");
     }
 
@@ -7253,6 +7256,14 @@ export async function getProductsPerformanceReport(
 
     if (hasBrand) {
         const productIds = await getProductIdsForTemplateDomain(credentials, uid, [["tire_brand", "=", brandId]]);
+        if (productIds.length === 0) {
+            return emptyProductsPerformanceReport(startDate, endDate);
+        }
+        idSets.push(new Set(productIds));
+    }
+
+    if (hasOrigin) {
+        const productIds = await getProductIdsForTemplateDomain(credentials, uid, [["origin", "in", originIds]]);
         if (productIds.length === 0) {
             return emptyProductsPerformanceReport(startDate, endDate);
         }
