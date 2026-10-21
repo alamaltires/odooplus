@@ -121,7 +121,9 @@ type ProductPerformanceRow = {
     averageSellingPrice: number;
     purchasedQty: number;
     averagePurchasePrice: number;
+    purchaseValue: number;
     totalStock: number;
+    stockValue: number;
     stockByWarehouse: ProductPerformanceWarehouseStock[];
 };
 
@@ -145,7 +147,9 @@ type ProductsPerformanceReport = {
         soldQty: number;
         salesValue: number;
         purchasedQty: number;
+        purchaseValue: number;
         totalStock: number;
+        stockValue: number;
     };
     unconvertedCurrencyCodes: string[];
     purchaseOrderDetails: ProductsPerformancePurchaseOrderDetails | null;
@@ -7075,7 +7079,7 @@ function emptyProductsPerformanceReport(startDate: string, endDate: string): Pro
         currencyCode: TARGET_CURRENCY_CODE,
         matchedProductCount: 0,
         rows: [],
-        totals: { soldQty: 0, salesValue: 0, purchasedQty: 0, totalStock: 0 },
+        totals: { soldQty: 0, salesValue: 0, purchasedQty: 0, purchaseValue: 0, totalStock: 0, stockValue: 0 },
         unconvertedCurrencyCodes: [],
         purchaseOrderDetails: null,
     };
@@ -7143,6 +7147,7 @@ export async function getProductsPerformanceReport(
         productId?: number | null;
         brandId?: number | null;
         categoryId?: number | null;
+        categoryIds?: number[];
         startDate: string;
         endDate: string;
         /**
@@ -7164,8 +7169,10 @@ export async function getProductsPerformanceReport(
     const hasProduct = Number.isFinite(productId) && productId > 0;
     const brandId = Number(input.brandId);
     const hasBrand = Number.isFinite(brandId) && brandId > 0;
-    const categoryId = Number(input.categoryId);
-    const hasCategory = Number.isFinite(categoryId) && categoryId > 0;
+    const categoryIds = Array.from(
+        new Set([...(input.categoryIds ?? []), input.categoryId ?? 0].map(Number).filter((id) => Number.isFinite(id) && id > 0))
+    );
+    const hasCategory = categoryIds.length > 0;
 
     if (!hasPurchaseOrder && !hasProduct && !hasBrand && !hasCategory) {
         throw new Error("Select a purchase order, product, brand, or category.");
@@ -7253,7 +7260,7 @@ export async function getProductsPerformanceReport(
     }
 
     if (hasCategory) {
-        const productIds = await getProductIdsForTemplateDomain(credentials, uid, [["categ_id", "child_of", categoryId]]);
+        const productIds = await getProductIdsForTemplateDomain(credentials, uid, [["categ_id", "child_of", categoryIds]]);
         if (productIds.length === 0) {
             return emptyProductsPerformanceReport(startDate, endDate);
         }
@@ -7587,10 +7594,47 @@ export async function getProductsPerformanceReport(
             ["location_id.usage", "=", "internal"],
         ]],
         {
-            fields: ["product_id", "quantity", "warehouse_id", "lot_id"],
+            fields: ["product_id", "quantity", "warehouse_id", "lot_id", "company_id"],
             limit: 50000,
         }
     );
+
+    // Stock value = on-hand quantity x the product's cost (its cost is company-specific, so it is
+    // read per company), converted from that company's currency into the report currency.
+    const stockValueByProductId = new Map<number, number>();
+    {
+        const quantCompanyIds = Array.from(new Set(quants.map((quant) => getRelationalId(quant.company_id)).filter((id): id is number => Boolean(id))));
+        const companyRecords = quantCompanyIds.length
+            ? await executeKw<Array<Record<string, unknown>>>(credentials, uid, "res.company", "read", [quantCompanyIds], { fields: ["currency_id"] }).catch(() => [] as Array<Record<string, unknown>>)
+            : [];
+        const currencyByCompany = new Map(companyRecords.map((company) => [Number(company.id), getRelationalId(company.currency_id)]));
+        await ensureCurrencyMultipliers(Array.from(currencyByCompany.values()));
+
+        for (const companyId of quantCompanyIds) {
+            const costByProduct = new Map<number, number>();
+            for (let index = 0; index < finalProductIds.length; index += 1000) {
+                const batch = finalProductIds.slice(index, index + 1000);
+                const products = await executeKw<Array<Record<string, unknown>>>(credentials, uid, "product.product", "read", [batch], {
+                    fields: ["standard_price"],
+                    context: { allowed_company_ids: [companyId], force_company: companyId, active_test: false },
+                }).catch(() => [] as Array<Record<string, unknown>>);
+                for (const product of products) costByProduct.set(Number(product.id), Number(product.standard_price ?? 0));
+            }
+            const currencyId = currencyByCompany.get(companyId);
+            const multiplier = currencyId ? multiplierByCurrencyId.get(currencyId) : undefined;
+            if (multiplier === undefined) {
+                if (currencyId) unconvertedCurrencyCodes.add(`company #${companyId} currency`);
+                continue;
+            }
+            for (const quant of quants) {
+                if (getRelationalId(quant.company_id) !== companyId) continue;
+                const productIdForQuant = getRelationalId(quant.product_id);
+                if (!productIdForQuant) continue;
+                const value = Number(quant.quantity ?? 0) * (costByProduct.get(productIdForQuant) ?? 0) * multiplier;
+                stockValueByProductId.set(productIdForQuant, (stockValueByProductId.get(productIdForQuant) ?? 0) + value);
+            }
+        }
+    }
 
     const stockByProductId = new Map<number, Map<number, { warehouseName: string; quantity: number }>>();
     const lotNamesByProductId = new Map<number, Set<string>>();
@@ -7659,7 +7703,9 @@ export async function getProductsPerformanceReport(
                 averageSellingPrice,
                 purchasedQty,
                 averagePurchasePrice,
+                purchaseValue,
                 totalStock,
+                stockValue: Number((stockValueByProductId.get(id) ?? 0).toFixed(2)),
                 stockByWarehouse,
             };
         })
@@ -7670,10 +7716,12 @@ export async function getProductsPerformanceReport(
             acc.soldQty += row.soldQty;
             acc.salesValue += row.salesValue;
             acc.purchasedQty += row.purchasedQty;
+            acc.purchaseValue += row.purchaseValue;
             acc.totalStock += row.totalStock;
+            acc.stockValue += row.stockValue;
             return acc;
         },
-        { soldQty: 0, salesValue: 0, purchasedQty: 0, totalStock: 0 }
+        { soldQty: 0, salesValue: 0, purchasedQty: 0, purchaseValue: 0, totalStock: 0, stockValue: 0 }
     );
 
     return {
@@ -7686,7 +7734,9 @@ export async function getProductsPerformanceReport(
             soldQty: Number(totals.soldQty.toFixed(2)),
             salesValue: Number(totals.salesValue.toFixed(2)),
             purchasedQty: Number(totals.purchasedQty.toFixed(2)),
+            purchaseValue: Number(totals.purchaseValue.toFixed(2)),
             totalStock: Number(totals.totalStock.toFixed(2)),
+            stockValue: Number(totals.stockValue.toFixed(2)),
         },
         unconvertedCurrencyCodes: Array.from(unconvertedCurrencyCodes),
         purchaseOrderDetails,

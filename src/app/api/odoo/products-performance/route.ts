@@ -11,6 +11,7 @@ export async function POST(request: Request) {
             productId?: number | null;
             brandId?: number | null;
             categoryId?: number | null;
+            categoryIds?: number[];
             startDate: string;
             endDate: string;
             dateBasis?: "order" | "transaction" | null;

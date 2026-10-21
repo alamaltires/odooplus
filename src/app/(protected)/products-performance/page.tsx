@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, FormEvent, UIEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Download, Search, TrendingUp } from "lucide-react";
+import { ChevronDown, ChevronRight, Download, Search, TrendingUp, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { Select2 } from "@/components/select2";
 import { resolveExactNameMatch } from "@/lib/combobox-match";
@@ -53,7 +53,9 @@ type ReportRow = {
     averageSellingPrice: number;
     purchasedQty: number;
     averagePurchasePrice: number;
+    purchaseValue: number;
     totalStock: number;
+    stockValue: number;
     stockByWarehouse: WarehouseStock[];
 };
 
@@ -73,7 +75,7 @@ type Report = {
     currencyCode: string;
     matchedProductCount: number;
     rows: ReportRow[];
-    totals: { soldQty: number; salesValue: number; purchasedQty: number; totalStock: number };
+    totals: { soldQty: number; salesValue: number; purchasedQty: number; purchaseValue: number; totalStock: number; stockValue: number };
     unconvertedCurrencyCodes: string[];
     purchaseOrderDetails: PurchaseOrderDetails | null;
 };
@@ -85,7 +87,9 @@ type SortColumn =
     | "salesValue"
     | "purchasedQty"
     | "averagePurchasePrice"
-    | "totalStock";
+    | "purchaseValue"
+    | "totalStock"
+    | "stockValue";
 type SortDirection = "asc" | "desc";
 
 function todayISO() {
@@ -127,7 +131,7 @@ export default function ProductsPerformancePage() {
     const [categoriesError, setCategoriesError] = useState<string | null>(null);
     const [categoryQuery, setCategoryQuery] = useState("");
     const [categoryMenuOpen, setCategoryMenuOpen] = useState(false);
-    const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
+    const [selectedCategories, setSelectedCategories] = useState<Category[]>([]);
 
     const [brands, setBrands] = useState<Brand[]>([]);
     const [brandsLoading, setBrandsLoading] = useState(true);
@@ -367,7 +371,7 @@ export default function ProductsPerformancePage() {
         selectedPurchaseOrder ||
         selectedProduct ||
         selectedBrand ||
-        selectedCategory ||
+        selectedCategories.length > 0 ||
         poQuery.trim() ||
         productQuery.trim() ||
         brandQuery.trim() ||
@@ -405,11 +409,11 @@ export default function ProductsPerformancePage() {
             selectedPurchaseOrder?.name,
             selectedProduct?.name,
             selectedBrand?.name,
-            selectedCategory?.name,
+            selectedCategories.length > 0 ? selectedCategories.map((category) => category.name).join("+") : undefined,
         ].filter(Boolean);
         const scope = parts.join("-") || "products-performance";
         return `products-performance-${sanitizeFileName(scope)}-${startDate}-to-${endDate}`;
-    }, [endDate, selectedBrand?.name, selectedCategory?.name, selectedProduct?.name, selectedPurchaseOrder?.name, startDate]);
+    }, [endDate, selectedBrand?.name, selectedCategories, selectedProduct?.name, selectedPurchaseOrder?.name, startDate]);
 
     // Resolves a scanner field that was typed but never clicked: an exact
     // (case/whitespace-insensitive) name match against whatever's already
@@ -463,8 +467,10 @@ export default function ProductsPerformancePage() {
         return selectedBrand ?? resolveExactNameMatch(brandQuery, brands);
     }
 
-    function resolveCategorySelection(): Category | null {
-        return selectedCategory ?? resolveExactNameMatch(categoryQuery, categories);
+    // The chosen categories, plus one that was typed in full but never clicked.
+    function resolveCategorySelection(): Category[] {
+        const typed = categoryQuery.trim() ? resolveExactNameMatch(categoryQuery, categories) : null;
+        return typed && !selectedCategories.some((category) => category.id === typed.id) ? [...selectedCategories, typed] : selectedCategories;
     }
 
     async function handleGenerate(event: FormEvent) {
@@ -475,9 +481,9 @@ export default function ProductsPerformancePage() {
             resolveProductSelection(),
         ]);
         const resolvedBrand = resolveBrandSelection();
-        const resolvedCategory = resolveCategorySelection();
+        const resolvedCategories = resolveCategorySelection();
 
-        if (!resolvedPurchaseOrder && !resolvedProduct && !resolvedBrand && !resolvedCategory) {
+        if (!resolvedPurchaseOrder && !resolvedProduct && !resolvedBrand && resolvedCategories.length === 0) {
             return;
         }
 
@@ -510,12 +516,10 @@ export default function ProductsPerformancePage() {
                 setBrandQuery(resolvedBrand.name);
             }
         }
-        if (resolvedCategory !== selectedCategory) {
-            setSelectedCategory(resolvedCategory);
-            if (resolvedCategory) {
-                setCategoryQuery(resolvedCategory.name);
-            }
+        if (resolvedCategories.length !== selectedCategories.length) {
+            setSelectedCategories(resolvedCategories);
         }
+        setCategoryQuery("");
 
         setReportLoading(true);
         setReportError(null);
@@ -527,7 +531,7 @@ export default function ProductsPerformancePage() {
                 purchaseOrderId: resolvedPurchaseOrder?.id,
                 productId: resolvedProduct?.id,
                 brandId: resolvedBrand?.id,
-                categoryId: resolvedCategory?.id,
+                categoryIds: resolvedCategories.map((category) => category.id),
                 startDate: effectiveStartDate,
                 endDate: effectiveEndDate,
                 dateBasis,
@@ -593,7 +597,9 @@ export default function ProductsPerformancePage() {
                 [`Sales Value (${report.currencyCode})`]: row.salesValue,
                 "Purchased Qty": row.purchasedQty,
                 [`Avg Purchase Price (${report.currencyCode})`]: row.averagePurchasePrice,
+                [`Purchase Value (${report.currencyCode})`]: row.purchaseValue,
                 "Total Stock": row.totalStock,
+                [`Stock Value (${report.currencyCode})`]: row.stockValue,
                 Warehouses: row.stockByWarehouse
                     .map((warehouse) => `${warehouse.warehouseName}: ${warehouse.quantity}`)
                     .join("; "),
@@ -846,7 +852,6 @@ export default function ProductsPerformancePage() {
                                 onChange={(event) => {
                                     setCategoryQuery(event.target.value);
                                     setCategoryMenuOpen(true);
-                                    setSelectedCategory(null);
                                 }}
                                 onFocus={() => setCategoryMenuOpen(true)}
                                 onBlur={() => window.setTimeout(() => setCategoryMenuOpen(false), 120)}
@@ -858,22 +863,45 @@ export default function ProductsPerformancePage() {
 
                         {categoryMenuOpen && filteredCategories.length > 0 ? (
                             <ul className="absolute z-20 mt-2 max-h-64 w-full overflow-auto rounded-xl border border-(--line) bg-white p-1 shadow-lg">
-                                {filteredCategories.map((category) => (
-                                    <li key={category.id}>
+                                {filteredCategories.map((category) => {
+                                    const picked = selectedCategories.some((item) => item.id === category.id);
+                                    return (
+                                        <li key={category.id}>
+                                            <button
+                                                type="button"
+                                                onMouseDown={(event) => {
+                                                    // Keep the list open so several categories can be picked in a row.
+                                                    event.preventDefault();
+                                                    setSelectedCategories((current) =>
+                                                        picked ? current.filter((item) => item.id !== category.id) : [...current, category]
+                                                    );
+                                                }}
+                                                className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-(--chip) ${picked ? "bg-(--chip) font-medium text-(--brand)" : ""}`}
+                                            >
+                                                <input type="checkbox" checked={picked} readOnly tabIndex={-1} className="h-4 w-4 shrink-0 rounded border-(--line)" />
+                                                {category.name}
+                                            </button>
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+                        ) : null}
+                        {selectedCategories.length > 0 ? (
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                                {selectedCategories.map((category) => (
+                                    <span key={category.id} className="inline-flex items-center gap-1 rounded-full border border-(--line) bg-(--chip) py-0.5 pl-2.5 pr-1 text-xs font-medium">
+                                        {category.name}
                                         <button
                                             type="button"
-                                            onMouseDown={() => {
-                                                setSelectedCategory(category);
-                                                setCategoryQuery(category.name);
-                                                setCategoryMenuOpen(false);
-                                            }}
-                                            className="w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-(--chip)"
+                                            onClick={() => setSelectedCategories((current) => current.filter((item) => item.id !== category.id))}
+                                            className="rounded-full p-0.5 text-(--ink-soft) hover:bg-white hover:text-(--brand)"
+                                            aria-label={`Remove ${category.name}`}
                                         >
-                                            {category.name}
+                                            <X className="h-3 w-3" aria-hidden="true" />
                                         </button>
-                                    </li>
+                                    </span>
                                 ))}
-                            </ul>
+                            </div>
                         ) : null}
                     </label>
 
@@ -951,7 +979,7 @@ export default function ProductsPerformancePage() {
 
             {report ? (
                 <div className="mt-6 space-y-6">
-                    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                         <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
                             <p className="text-sm text-(--ink-soft)">Sold Qty ({report.startDate} → {report.endDate})</p>
                             <p className="mt-2 font-display text-3xl">{formatNumber(report.totals.soldQty)}</p>
@@ -965,8 +993,16 @@ export default function ProductsPerformancePage() {
                             <p className="mt-2 font-display text-3xl">{formatNumber(report.totals.purchasedQty)}</p>
                         </article>
                         <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
+                            <p className="text-sm text-(--ink-soft)">Purchase Value ({report.currencyCode})</p>
+                            <p className="mt-2 font-display text-3xl">{formatCurrency(report.totals.purchaseValue, report.currencyCode)}</p>
+                        </article>
+                        <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
                             <p className="text-sm text-(--ink-soft)">Current Stock (all warehouses)</p>
                             <p className="mt-2 font-display text-3xl">{formatNumber(report.totals.totalStock)}</p>
+                        </article>
+                        <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
+                            <p className="text-sm text-(--ink-soft)">Stock Value ({report.currencyCode})</p>
+                            <p className="mt-2 font-display text-3xl">{formatCurrency(report.totals.stockValue, report.currencyCode)}</p>
                         </article>
                     </div>
 
@@ -1109,8 +1145,18 @@ export default function ProductsPerformancePage() {
                                                 </button>
                                             </th>
                                             <th className="border border-(--line) px-4 py-3 font-medium">
+                                                <button type="button" onClick={() => handleSort("purchaseValue")} className="cursor-pointer">
+                                                    Purchase Value{getSortIndicator("purchaseValue")}
+                                                </button>
+                                            </th>
+                                            <th className="border border-(--line) px-4 py-3 font-medium">
                                                 <button type="button" onClick={() => handleSort("totalStock")} className="cursor-pointer">
                                                     Total Stock{getSortIndicator("totalStock")}
+                                                </button>
+                                            </th>
+                                            <th className="border border-(--line) px-4 py-3 font-medium">
+                                                <button type="button" onClick={() => handleSort("stockValue")} className="cursor-pointer">
+                                                    Stock Value{getSortIndicator("stockValue")}
                                                 </button>
                                             </th>
                                         </tr>
@@ -1118,7 +1164,7 @@ export default function ProductsPerformancePage() {
                                     <tbody>
                                         {filteredSortedRows.length === 0 ? (
                                             <tr>
-                                                <td colSpan={11} className="border border-(--line) px-4 py-6 text-center text-sm text-(--ink-soft)">
+                                                <td colSpan={13} className="border border-(--line) px-4 py-6 text-center text-sm text-(--ink-soft)">
                                                     No products match &ldquo;{tableSearch}&rdquo;.
                                                 </td>
                                             </tr>
@@ -1163,14 +1209,20 @@ export default function ProductsPerformancePage() {
                                                         <td className="border border-(--line) px-4 py-3">
                                                             {formatCurrency(row.averagePurchasePrice, report.currencyCode)}
                                                         </td>
+                                                        <td className="border border-(--line) px-4 py-3">
+                                                            {formatCurrency(row.purchaseValue, report.currencyCode)}
+                                                        </td>
                                                         <td className="border border-(--line) px-4 py-3 font-medium">
                                                             {formatNumber(row.totalStock)}
+                                                        </td>
+                                                        <td className="border border-(--line) px-4 py-3">
+                                                            {formatCurrency(row.stockValue, report.currencyCode)}
                                                         </td>
                                                     </tr>
                                                     {expanded ? (
                                                         <tr>
                                                             <td className="border border-(--line) bg-(--chip) px-4 py-3" />
-                                                            <td colSpan={10} className="border border-(--line) bg-(--chip) px-4 py-3">
+                                                            <td colSpan={12} className="border border-(--line) bg-(--chip) px-4 py-3">
                                                                 <p className="text-xs font-medium text-(--ink)">
                                                                     Stock by warehouse
                                                                 </p>

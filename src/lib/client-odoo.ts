@@ -207,6 +207,7 @@ export function getProductsPerformanceReport(input: {
     productId?: number | null;
     brandId?: number | null;
     categoryId?: number | null;
+    categoryIds?: number[];
     startDate: string;
     endDate: string;
     dateBasis?: "order" | "transaction" | null;
@@ -227,7 +228,9 @@ export function getProductsPerformanceReport(input: {
             averageSellingPrice: number;
             purchasedQty: number;
             averagePurchasePrice: number;
+            purchaseValue: number;
             totalStock: number;
+            stockValue: number;
             stockByWarehouse: Array<{
                 warehouseId: number;
                 warehouseName: string;
@@ -238,7 +241,9 @@ export function getProductsPerformanceReport(input: {
             soldQty: number;
             salesValue: number;
             purchasedQty: number;
+            purchaseValue: number;
             totalStock: number;
+            stockValue: number;
         };
         unconvertedCurrencyCodes: string[];
         purchaseOrderDetails: {
