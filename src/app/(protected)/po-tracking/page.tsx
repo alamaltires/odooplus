@@ -374,6 +374,7 @@ export default function PoTrackingPage() {
                 if (!query) return true;
                 return (
                     group.blNumber.toLowerCase().includes(query) ||
+                    group.orders.some((order) => (brandsByOrder[order.id] ?? []).some((brand) => brand.toLowerCase().includes(query))) ||
                     group.orders.some((order) =>
                         [order.name, order.vendorName, order.vendorRef].some((text) => text.toLowerCase().includes(query))
                     ) ||
@@ -422,7 +423,7 @@ export default function PoTrackingPage() {
                 const tb = b.eta.date?.getTime() ?? Infinity;
                 return rank(a) === 1 ? tb - ta : ta - tb;
             });
-    }, [enriched, filter, search, shipmentSort]);
+    }, [enriched, filter, search, shipmentSort, brandsByOrder]);
 
     const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
     const currentPage = Math.min(page, pageCount);
@@ -452,6 +453,31 @@ export default function PoTrackingPage() {
         }, 150);
         return () => window.clearTimeout(timer);
     }, [scrollTarget, visible, currentPage, view]);
+
+    // Searching needs every PO's brands (normally only the ones on screen are loaded), so
+    // a search of 2+ characters fetches the missing ones once, in chunks.
+    const brandsRequested = useRef<Set<number>>(new Set());
+    useEffect(() => {
+        if (search.trim().length < 2) return;
+        const missing = orders.map((order) => order.id).filter((id) => brandsByOrder[id] === undefined && !brandsRequested.current.has(id));
+        if (missing.length === 0) return;
+        for (const id of missing) brandsRequested.current.add(id);
+        (async () => {
+            for (let index = 0; index < missing.length; index += 300) {
+                const chunk = missing.slice(index, index + 300);
+                try {
+                    const data = await getPoBrands(chunk);
+                    setBrandsByOrder((current) => {
+                        const next = { ...current };
+                        for (const id of chunk) next[id] = data.brands[String(id)] ?? [];
+                        return next;
+                    });
+                } catch {
+                    for (const id of chunk) brandsRequested.current.delete(id);
+                }
+            }
+        })();
+    }, [search, orders, brandsByOrder]);
 
     // Brands are read from Odoo only for the shipments on screen.
     useEffect(() => {
@@ -1097,7 +1123,7 @@ export default function PoTrackingPage() {
                     <input
                         value={search}
                         onChange={(event) => setSearch(event.target.value)}
-                        placeholder="Search PO, vendor, B/L, container or seal"
+                        placeholder="Search PO, vendor, brand, B/L, container or seal"
                         className="w-full rounded-xl border border-(--line) bg-white py-2 pl-9 pr-3 text-sm"
                     />
                 </div>
