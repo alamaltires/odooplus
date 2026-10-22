@@ -8,7 +8,8 @@ import {
     getSalespersonActivityReport,
 } from "@/lib/client-odoo";
 import { useAuth } from "@/lib/auth-context";
-import { Select2 } from "@/components/select2";
+import { LimitedMultiSelect } from "@/components/limited-multi-select";
+import { ReportTabs } from "@/components/report-tabs";
 import {
     OdooCustomerSummary,
     OdooInactiveCustomer,
@@ -302,10 +303,13 @@ function InactiveCustomersTable({ rows }: { rows: OdooInactiveCustomer[] }) {
 const SESSION_KEY = "salesperson-activity-state";
 
 type SavedActivityState = {
-    selectedSalespersonId: string;
+    selectedSalespersonIds?: string[];
+    /** Older saves held a single id and a single report. */
+    selectedSalespersonId?: string;
+    reports?: OdooSalespersonActivityReport[];
+    report?: OdooSalespersonActivityReport;
     startDate: string;
     endDate: string;
-    report: OdooSalespersonActivityReport;
 };
 
 export default function SalespersonActivityPage() {
@@ -316,7 +320,7 @@ export default function SalespersonActivityPage() {
     const [salespeople, setSalespeople] = useState<OdooSalesperson[]>([]);
     const [salespeopleLoading, setSalespeopleLoading] = useState(true);
     const [salespeopleError, setSalespeopleError] = useState<string | null>(null);
-    const [selectedSalespersonId, setSelectedSalespersonId] = useState("");
+    const [selectedSalespersonIds, setSelectedSalespersonIds] = useState<string[]>([]);
 
     const [startDate, setStartDate] = useState(oneMonthAgoISO);
     const [endDate, setEndDate] = useState(todayISO);
@@ -327,17 +331,19 @@ export default function SalespersonActivityPage() {
             if (saved) {
                 const state = JSON.parse(saved) as SavedActivityState;
                 hasRestoredStateRef.current = true;
-                setSelectedSalespersonId(state.selectedSalespersonId);
+                setSelectedSalespersonIds(state.selectedSalespersonIds ?? (state.selectedSalespersonId ? [state.selectedSalespersonId] : []));
                 setStartDate(state.startDate);
                 setEndDate(state.endDate);
-                setReport(state.report);
+                setReports(state.reports ?? (state.report ? [state.report] : []));
             }
         } catch {
             // ignore corrupt storage
         }
     }, []);
 
-    const [report, setReport] = useState<OdooSalespersonActivityReport | null>(null);
+    const [reports, setReports] = useState<OdooSalespersonActivityReport[]>([]);
+    const [activeIndex, setActiveIndex] = useState(0);
+    const report: OdooSalespersonActivityReport | null = reports[Math.min(activeIndex, reports.length - 1)] ?? null;
     const [reportLoading, setReportLoading] = useState(false);
     const [reportError, setReportError] = useState<string | null>(null);
     const [exportingTable, setExportingTable] = useState<"serviced" | "inactive" | null>(null);
@@ -363,7 +369,7 @@ export default function SalespersonActivityPage() {
                 const data = await getSalespeople();
                 setSalespeople(data.salespeople);
                 if (data.salespeople.length > 0 && !hasRestoredStateRef.current) {
-                    setSelectedSalespersonId(String(data.salespeople[0].id));
+                    setSelectedSalespersonIds([String(data.salespeople[0].id)]);
                 }
             } catch (error) {
                 setSalespeopleError(
@@ -379,25 +385,26 @@ export default function SalespersonActivityPage() {
 
     async function handleSubmit(event: FormEvent) {
         event.preventDefault();
-        if (!selectedSalespersonId) {
+        if (selectedSalespersonIds.length === 0) {
             return;
         }
 
         setReportLoading(true);
         setReportError(null);
-        setReport(null);
+        setReports([]);
+        setActiveIndex(0);
         setServicedSearch("");
         setInactiveSearch("");
 
         try {
-            const data = await getSalespersonActivityReport({
-                salespersonId: Number(selectedSalespersonId),
-                startDate,
-                endDate,
-            });
-            setReport(data);
+            const data = await Promise.all(
+                selectedSalespersonIds.map((id) =>
+                    getSalespersonActivityReport({ salespersonId: Number(id), startDate, endDate })
+                )
+            );
+            setReports(data);
             try {
-                const stateToSave: SavedActivityState = { selectedSalespersonId, startDate, endDate, report: data };
+                const stateToSave: SavedActivityState = { selectedSalespersonIds, startDate, endDate, reports: data };
                 sessionStorage.setItem(SESSION_KEY, JSON.stringify(stateToSave));
             } catch {
                 // ignore storage errors
@@ -499,7 +506,7 @@ export default function SalespersonActivityPage() {
                 <div>
                     <h1 className="font-display text-3xl">Salesperson Activity Report</h1>
                     <p className="mt-1 text-sm text-(--ink-soft)">
-                        Compare serviced customers and assigned inactive customers for a selected salesperson.
+                        Compare serviced customers and assigned inactive customers for up to 4 salespeople.
                     </p>
                 </div>
                 <BarChart3 className="h-8 w-8 text-(--brand)" aria-hidden="true" />
@@ -511,10 +518,11 @@ export default function SalespersonActivityPage() {
             >
                 <div className="grid gap-4 md:grid-cols-4">
                     <label className="block md:col-span-2">
-                        <span className="mb-2 block text-sm font-medium">Salesperson</span>
-                        <Select2
-                            value={selectedSalespersonId}
-                            onChange={setSelectedSalespersonId}
+                        <span className="mb-2 block text-sm font-medium">Salespeople (up to 4)</span>
+                        <LimitedMultiSelect
+                            values={selectedSalespersonIds}
+                            onChange={setSelectedSalespersonIds}
+                            max={4}
                             loading={salespeopleLoading}
                             loadingText="Loading salespeople..."
                             emptyText="No salespeople found"
@@ -553,10 +561,10 @@ export default function SalespersonActivityPage() {
                 <div className="mt-4 flex items-center gap-3">
                     <button
                         type="submit"
-                        disabled={reportLoading || !selectedSalespersonId || salespeopleLoading}
+                        disabled={reportLoading || selectedSalespersonIds.length === 0 || salespeopleLoading}
                         className="rounded-xl bg-(--brand) px-4 py-2.5 font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
                     >
-                        {reportLoading ? "Generating..." : "Generate Report"}
+                        {reportLoading ? "Generating..." : selectedSalespersonIds.length > 1 ? `Generate Report (${selectedSalespersonIds.length})` : "Generate Report"}
                     </button>
 
                     {salespeopleError ? (
@@ -565,6 +573,8 @@ export default function SalespersonActivityPage() {
                     {reportError ? <p className="text-sm text-red-600">{reportError}</p> : null}
                 </div>
             </form>
+
+            <ReportTabs labels={reports.map((item) => item.salesperson.name)} active={Math.min(activeIndex, reports.length - 1)} onChange={setActiveIndex} />
 
             {report ? (
                 <div className="mt-6 space-y-6">

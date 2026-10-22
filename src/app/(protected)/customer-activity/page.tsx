@@ -4,7 +4,8 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { CalendarDays, Download, FileText, Mail, MapPin, Phone, ShoppingCart, Target, UserSearch } from "lucide-react";
 import { getCustomerActivityReport, getCustomers } from "@/lib/client-odoo";
-import { Select2 } from "@/components/select2";
+import { LimitedMultiSelect } from "@/components/limited-multi-select";
+import { ReportTabs } from "@/components/report-tabs";
 import { BrandSalesTree } from "@/components/brand-sales-tree";
 import type { OdooCustomerActivityOrder, OdooCustomerActivityReport, OdooCustomerOption } from "@/types/odoo";
 import { getDisplayCurrency } from "@/lib/display-currency";
@@ -58,11 +59,13 @@ export default function CustomerActivityPage() {
     const [customersLoading, setCustomersLoading] = useState(true);
     const [customersError, setCustomersError] = useState<string | null>(null);
 
-    const [customerId, setCustomerId] = useState("");
+    const [customerIds, setCustomerIds] = useState<string[]>([]);
     const [startDate, setStartDate] = useState(() => monthsAgoISO(6));
     const [endDate, setEndDate] = useState(todayISO);
 
-    const [report, setReport] = useState<OdooCustomerActivityReport | null>(null);
+    const [reports, setReports] = useState<OdooCustomerActivityReport[]>([]);
+    const [activeIndex, setActiveIndex] = useState(0);
+    const report: OdooCustomerActivityReport | null = reports[Math.min(activeIndex, reports.length - 1)] ?? null;
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
@@ -75,14 +78,15 @@ export default function CustomerActivityPage() {
 
     async function handleGenerate(event: FormEvent) {
         event.preventDefault();
-        if (!customerId) return;
+        if (customerIds.length === 0) return;
 
         setLoading(true);
         setError(null);
         try {
-            setReport(await getCustomerActivityReport({ customerId: Number(customerId), startDate, endDate }));
+            setReports(await Promise.all(customerIds.map((id) => getCustomerActivityReport({ customerId: Number(id), startDate, endDate }))));
+            setActiveIndex(0);
         } catch (generateError) {
-            setReport(null);
+            setReports([]);
             setError(generateError instanceof Error ? generateError.message : "Failed to load customer activity.");
         } finally {
             setLoading(false);
@@ -162,7 +166,7 @@ export default function CustomerActivityPage() {
                 <div>
                     <h1 className="font-display text-3xl">Customer Activity</h1>
                     <p className="mt-1 text-sm text-(--ink-soft)">
-                        One customer&apos;s orders and quotations over a period, measured against their monthly target.
+                        Orders and quotations of up to 4 customers over a period, measured against their monthly targets.
                     </p>
                 </div>
                 <UserSearch className="h-8 w-8 shrink-0 text-(--brand)" aria-hidden="true" />
@@ -171,17 +175,18 @@ export default function CustomerActivityPage() {
             <form onSubmit={handleGenerate} className="mt-6 rounded-2xl border border-(--line) bg-(--card) p-5">
                 <div className="grid gap-4 lg:grid-cols-[2fr_1fr_1fr]">
                     <label className="block">
-                        <span className="mb-2 block text-sm font-medium">Customer</span>
-                        <Select2
-                            value={customerId}
-                            onChange={setCustomerId}
+                        <span className="mb-2 block text-sm font-medium">Customers (up to 4)</span>
+                        <LimitedMultiSelect
+                            values={customerIds}
+                            onChange={setCustomerIds}
+                            max={4}
                             options={customers.map((customer) => ({
                                 value: String(customer.id),
                                 label: customer.name,
                                 description: customer.salespersonName || undefined,
                             }))}
                             loading={customersLoading}
-                            placeholder="Select a customer"
+                            placeholder="Select up to 4 customers"
                             searchPlaceholder="Search customers..."
                         />
                     </label>
@@ -211,15 +216,17 @@ export default function CustomerActivityPage() {
                 <div className="mt-5 flex flex-wrap items-center gap-3">
                     <button
                         type="submit"
-                        disabled={loading || !customerId}
+                        disabled={loading || customerIds.length === 0}
                         className="rounded-xl bg-(--brand) px-5 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
                     >
-                        {loading ? "Loading..." : "Generate"}
+                        {loading ? "Loading..." : customerIds.length > 1 ? `Generate (${customerIds.length})` : "Generate"}
                     </button>
                     {customersError ? <p className="text-sm text-red-600">{customersError}</p> : null}
                 </div>
                 {error ? <p className="mt-4 text-sm text-red-600">{error}</p> : null}
             </form>
+
+            <ReportTabs labels={reports.map((item) => item.customer.customerName)} active={Math.min(activeIndex, reports.length - 1)} onChange={setActiveIndex} />
 
             {report ? (
                 <div className="mt-6 space-y-6">
