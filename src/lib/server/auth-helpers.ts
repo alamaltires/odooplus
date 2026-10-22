@@ -1,3 +1,4 @@
+import { randomBytes, scryptSync, timingSafeEqual } from "crypto";
 import { getAdminAuth, getAdminDb } from "@/lib/server/firebase-admin";
 import { OdooCredentials } from "@/types/odoo";
 
@@ -75,6 +76,40 @@ export async function saveOdooSystemSettings(input: { url: string; db: string; u
         },
         { merge: true }
     );
+}
+
+/**
+ * The PO Tracking "Update" password. Only a salted scrypt hash is stored
+ * (`system/po-tracking`); when none is set, updating is unprotected.
+ */
+export async function hasPoTrackingPassword(): Promise<boolean> {
+    const snapshot = await getAdminDb().collection("system").doc("po-tracking").get();
+    return Boolean((snapshot.data() as { passwordHash?: string } | undefined)?.passwordHash);
+}
+
+export async function setPoTrackingPassword(password: string, updatedBy: string): Promise<void> {
+    const ref = getAdminDb().collection("system").doc("po-tracking");
+    if (!password) {
+        await ref.set({ passwordHash: null, passwordSalt: null, updatedBy, updatedAt: new Date().toISOString() }, { merge: true });
+        return;
+    }
+    const salt = randomBytes(16).toString("hex");
+    const hash = scryptSync(password, salt, 64).toString("hex");
+    await ref.set(
+        { passwordHash: hash, passwordSalt: salt, updatedBy, updatedAt: new Date().toISOString() },
+        { merge: true }
+    );
+}
+
+/** True when no password is set, or the given one matches. */
+export async function verifyPoTrackingPassword(password: string | undefined): Promise<boolean> {
+    const snapshot = await getAdminDb().collection("system").doc("po-tracking").get();
+    const data = snapshot.data() as { passwordHash?: string | null; passwordSalt?: string | null } | undefined;
+    if (!data?.passwordHash || !data.passwordSalt) return true;
+    if (!password) return false;
+    const expected = Buffer.from(data.passwordHash, "hex");
+    const actual = scryptSync(password, data.passwordSalt, 64);
+    return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
 /**

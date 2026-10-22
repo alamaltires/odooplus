@@ -5,7 +5,7 @@ import { getAuth } from "firebase/auth";
 import { ChevronDown, Pencil, Shield, Trash2, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { getOdooSettings, saveOdooSettings } from "@/lib/firestore-settings";
-import { getCustomerTags, getSalesTeams, getSystemOdooSettings, saveSystemOdooSettings } from "@/lib/client-odoo";
+import { getCustomerTags, getPoTrackingPasswordStatus, getSalesTeams, getSystemOdooSettings, savePoTrackingPassword, saveSystemOdooSettings } from "@/lib/client-odoo";
 import { OdooUserCredentials } from "@/types/odoo";
 import { APP_DEFINITIONS, defaultAppHrefsForRole } from "@/lib/app-permissions";
 import { Select2, type Select2Option } from "@/components/select2";
@@ -55,6 +55,11 @@ export default function SettingsPage() {
     const [systemLoading, setSystemLoading] = useState(false);
     const [systemSaving, setSystemSaving] = useState(false);
     const [systemMessage, setSystemMessage] = useState<string | null>(null);
+
+    const [poPassword, setPoPassword] = useState("");
+    const [poPasswordSet, setPoPasswordSet] = useState(false);
+    const [poPasswordSaving, setPoPasswordSaving] = useState(false);
+    const [poPasswordMessage, setPoPasswordMessage] = useState<string | null>(null);
 
     const [users, setUsers] = useState<UserRow[]>([]);
     const [usersLoading, setUsersLoading] = useState(false);
@@ -177,6 +182,10 @@ export default function SettingsPage() {
         }
 
         void loadSystemSettings();
+
+        getPoTrackingPasswordStatus()
+            .then(setPoPasswordSet)
+            .catch(() => undefined);
     }, [user, role, loadUsers]);
 
     async function handleSubmit(event: FormEvent) {
@@ -211,6 +220,21 @@ export default function SettingsPage() {
             setSystemMessage(error instanceof Error ? error.message : "Failed to save system settings.");
         } finally {
             setSystemSaving(false);
+        }
+    }
+
+    async function handlePoPassword(clear: boolean) {
+        setPoPasswordSaving(true);
+        setPoPasswordMessage(null);
+        try {
+            const result = await savePoTrackingPassword(clear ? "" : poPassword);
+            setPoPasswordSet(result.isSet);
+            setPoPassword("");
+            setPoPasswordMessage(result.isSet ? "PO Tracking update password saved." : "Password removed — PO Tracking updates are no longer protected.");
+        } catch (error) {
+            setPoPasswordMessage(error instanceof Error ? error.message : "Failed to save the password.");
+        } finally {
+            setPoPasswordSaving(false);
         }
     }
 
@@ -439,6 +463,50 @@ export default function SettingsPage() {
                     </form>
 
                     {systemMessage ? <p className="mt-4 text-sm text-(--ink-soft)">{systemMessage}</p> : null}
+                </article>
+            ) : null}
+
+            {role === "admin" ? (
+                <article className="rounded-3xl border border-(--line) bg-(--card) p-6">
+                    <h2 className="font-display text-2xl">PO Tracking Update Password</h2>
+                    <p className="mt-1 text-sm text-(--ink-soft)">
+                        Updating shipment tracking uses paid API requests. Set a password that users must enter before
+                        they can update. {poPasswordSet ? "A password is currently set." : "No password is set, so anyone can update."}
+                    </p>
+                    <form
+                        onSubmit={(event) => {
+                            event.preventDefault();
+                            void handlePoPassword(false);
+                        }}
+                        className="mt-4 flex flex-wrap gap-3"
+                    >
+                        <input
+                            type="password"
+                            value={poPassword}
+                            onChange={(event) => setPoPassword(event.target.value)}
+                            placeholder={poPasswordSet ? "New password" : "Password"}
+                            autoComplete="new-password"
+                            className="min-w-60 flex-1 rounded-xl border border-(--line) bg-white px-4 py-2.5"
+                        />
+                        <button
+                            type="submit"
+                            disabled={poPasswordSaving || !poPassword}
+                            className="rounded-xl bg-(--brand) px-4 py-2.5 font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
+                        >
+                            {poPasswordSaving ? "Saving..." : poPasswordSet ? "Change password" : "Set password"}
+                        </button>
+                        {poPasswordSet ? (
+                            <button
+                                type="button"
+                                onClick={() => void handlePoPassword(true)}
+                                disabled={poPasswordSaving}
+                                className="rounded-xl border border-(--line) bg-white px-4 py-2.5 font-medium disabled:opacity-70"
+                            >
+                                Remove password
+                            </button>
+                        ) : null}
+                    </form>
+                    {poPasswordMessage ? <p className="mt-4 text-sm text-(--ink-soft)">{poPasswordMessage}</p> : null}
                 </article>
             ) : null}
 

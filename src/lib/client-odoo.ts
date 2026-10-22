@@ -918,8 +918,24 @@ export function getSeaRoutes(routes: Array<{ id: string; stops: Array<[number, n
     return post<{ paths: Record<string, Array<Array<[number, number]>>> }>("/api/po-tracking/sea-route", { routes });
 }
 
-export function trackShipmentByBl(blNumber: string, carrierCode?: string) {
-    return post<ShipmentTracking>("/api/po-tracking/track", { blNumber, carrierCode });
+export function trackShipmentByBl(blNumber: string, carrierCode?: string, password?: string) {
+    return post<ShipmentTracking>("/api/po-tracking/track", { blNumber, carrierCode, password });
+}
+
+export function checkPoTrackingPassword(password?: string) {
+    return post<{ protected: boolean; valid: boolean }>("/api/po-tracking/protection", { password });
+}
+
+export async function getPoTrackingPasswordStatus() {
+    const token = await getAuthToken();
+    const response = await fetch("/api/system-settings/po-tracking-password", { headers: { Authorization: `Bearer ${token}` } });
+    const data = (await response.json()) as { isSet?: boolean; error?: string };
+    if (!response.ok || data.error) throw new Error(data.error ?? "Failed to load");
+    return Boolean(data.isSet);
+}
+
+export function savePoTrackingPassword(password: string) {
+    return post<{ isSet: boolean }>("/api/system-settings/po-tracking-password", { password });
 }
 
 export type TrackingCarrier = { code: string; name: string };

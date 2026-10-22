@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
+import { getOdooCredentialsFromRequest, verifyPoTrackingPassword } from "@/lib/server/auth-helpers";
 import { getAdminDb } from "@/lib/server/firebase-admin";
 
 const QUBICTRON_OCEAN_URL = "https://api.qubictron.com/tracking/v1/ocean";
@@ -174,7 +174,10 @@ export async function POST(request: Request) {
             return NextResponse.json({ error: "QUBICTRON_API_KEY is not configured on the server." }, { status: 500 });
         }
 
-        const { blNumber, carrierCode } = (await request.json()) as { blNumber?: string; carrierCode?: string };
+        const { blNumber, carrierCode, password } = (await request.json()) as { blNumber?: string; carrierCode?: string; password?: string };
+        if (!(await verifyPoTrackingPassword(password))) {
+            return NextResponse.json({ error: "Incorrect update password." }, { status: 403 });
+        }
         const bl = (blNumber ?? "").trim();
         if (!bl) {
             return NextResponse.json({ error: "A B/L number is required." }, { status: 400 });

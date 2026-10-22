@@ -32,6 +32,7 @@ import {
     getPoTrackingOrders,
     getSeaRoutes,
     getSavedShipmentTracking,
+    checkPoTrackingPassword,
     getTrackingCarriers,
     trackShipmentByBl,
     type TrackingCarrier,
@@ -231,6 +232,13 @@ export default function PoTrackingPage() {
     const [updating, setUpdating] = useState<Set<string>>(new Set());
     const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
     const [confirmBulk, setConfirmBulk] = useState(false);
+    // Updating can be protected by an admin-set password: kept in memory for this visit only.
+    const passwordRef = useRef<string | undefined>(undefined);
+    // Whether updating is protected; loaded on arrival so the prompt can open instantly (null = not known yet).
+    const protectedRef = useRef<boolean | null>(null);
+    const passwordResolver = useRef<((value: string | null) => void) | null>(null);
+    const [passwordPrompt, setPasswordPrompt] = useState<{ error: string | null; checking: boolean } | null>(null);
+    const [passwordInput, setPasswordInput] = useState("");
     const [poModal, setPoModal] = useState<{ id: number; name: string; loading: boolean; error: string | null; data: PoDetails | null } | null>(null);
 
     const [search, setSearch] = useState("");
@@ -250,6 +258,13 @@ export default function PoTrackingPage() {
     // Port coordinates for names the built-in list doesn't know (geocoded once on the server, then remembered).
     const [portPoints, setPortPoints] = useState<Record<string, LatLng | null>>({});
     const geocodingRef = useRef(false);
+    useEffect(() => {
+        checkPoTrackingPassword()
+            .then((status) => {
+                protectedRef.current = status.protected;
+            })
+            .catch(() => undefined);
+    }, []);
     // Map side panel: shipments the user hid from the map (none hidden = all shown).
     const [hiddenBls, setHiddenBls] = useState<Set<string>>(new Set());
     const [mapListSearch, setMapListSearch] = useState("");
@@ -533,7 +548,52 @@ export default function PoTrackingPage() {
 
     // Tracking re-sorts the list, so once the new order has rendered, scroll to the
     // card that was just tracked and open its results.
+    // Resolves with the password to send ("" when updating isn't protected), or null if cancelled.
+    const ensurePassword = useCallback(async (): Promise<string | null> => {
+        if (protectedRef.current === null) {
+            try {
+                protectedRef.current = (await checkPoTrackingPassword(passwordRef.current)).protected;
+            } catch {
+                // Let the update itself report the problem.
+                return passwordRef.current ?? "";
+            }
+        }
+        if (!protectedRef.current) return "";
+        // The server re-checks on every update, so a remembered password is trusted here.
+        if (passwordRef.current) return passwordRef.current;
+        setPasswordInput("");
+        setPasswordPrompt({ error: null, checking: false });
+        return new Promise<string | null>((resolve) => {
+            passwordResolver.current = resolve;
+        });
+    }, []);
+
+    async function submitPassword() {
+        setPasswordPrompt({ error: null, checking: true });
+        try {
+            const status = await checkPoTrackingPassword(passwordInput);
+            if (!status.valid) {
+                setPasswordPrompt({ error: "Incorrect password.", checking: false });
+                return;
+            }
+            passwordRef.current = passwordInput;
+            setPasswordPrompt(null);
+            passwordResolver.current?.(passwordInput);
+            passwordResolver.current = null;
+        } catch (error) {
+            setPasswordPrompt({ error: error instanceof Error ? error.message : "Could not check the password.", checking: false });
+        }
+    }
+
+    function cancelPassword() {
+        setPasswordPrompt(null);
+        passwordResolver.current?.(null);
+        passwordResolver.current = null;
+    }
+
     const updateOne = useCallback(async (blNumber: string, chosenCarrier?: string, reveal = true) => {
+        const password = await ensurePassword();
+        if (password === null) return;
         setUpdating((current) => new Set(current).add(blNumber));
         setTrackingErrors((current) => {
             const next = { ...current };
@@ -542,13 +602,14 @@ export default function PoTrackingPage() {
         });
         try {
             const carrier = chosenCarrier ?? carrierByBl[blNumber] ?? carrierFromSeries(blNumber, carrierByBl);
-            const result = await trackShipmentByBl(blNumber, carrier);
+            const result = await trackShipmentByBl(blNumber, carrier, password || undefined);
             setTracked((current) => ({ ...current, [blNumber]: result }));
             const usedCarrier = carrier || result.carrierCode;
             if (usedCarrier) setCarrierByBl((current) => ({ ...current, [blNumber]: usedCarrier }));
             if (reveal) revealResult(blNumber);
         } catch (error) {
             const message = error instanceof Error ? error.message : "Tracking failed.";
+            if (message.includes("update password")) passwordRef.current = undefined;
             if (message.includes("shipping line")) ensureCarriers();
             setTrackingErrors((current) => ({ ...current, [blNumber]: message }));
         } finally {
@@ -558,10 +619,11 @@ export default function PoTrackingPage() {
                 return next;
             });
         }
-    }, [carrierByBl, ensureCarriers, revealResult]);
+    }, [carrierByBl, ensureCarriers, ensurePassword, revealResult]);
 
     async function updateAll() {
         setConfirmBulk(false);
+        if ((await ensurePassword()) === null) return;
         setBulkProgress({ done: 0, total: bulkTargets.length });
         for (let index = 0; index < bulkTargets.length; index += 1) {
             await updateOne(bulkTargets[index], undefined, false);
@@ -1401,6 +1463,43 @@ export default function PoTrackingPage() {
                     </div>
                 </div>
             )}
+
+            {passwordPrompt ? (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={cancelPassword}>
+                    <form
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onSubmit={(event) => {
+                            event.preventDefault();
+                            void submitPassword();
+                        }}
+                        className="w-full max-w-sm rounded-2xl border border-(--line) bg-white p-5 shadow-xl"
+                    >
+                        <h2 className="font-display text-lg">Update password</h2>
+                        <p className="mt-1 text-sm text-(--ink-soft)">Updating tracking uses API requests, so it is protected. Ask an administrator for the password.</p>
+                        <input
+                            type="password"
+                            autoFocus
+                            value={passwordInput}
+                            onChange={(event) => setPasswordInput(event.target.value)}
+                            placeholder="Password"
+                            className="mt-4 w-full rounded-xl border border-(--line) bg-white px-4 py-2.5 text-sm"
+                        />
+                        {passwordPrompt.error ? <p className="mt-2 text-sm text-red-600">{passwordPrompt.error}</p> : null}
+                        <div className="mt-4 flex justify-end gap-2">
+                            <button type="button" onClick={cancelPassword} className="rounded-xl px-3 py-2 text-sm">
+                                Cancel
+                            </button>
+                            <button
+                                type="submit"
+                                disabled={!passwordInput || passwordPrompt.checking}
+                                className="rounded-xl bg-(--brand) px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
+                            >
+                                {passwordPrompt.checking ? "Checking..." : "Continue"}
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            ) : null}
 
             {poModal ? (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm" onMouseDown={(event) => event.target === event.currentTarget && setPoModal(null)}>
