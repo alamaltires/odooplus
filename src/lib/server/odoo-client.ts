@@ -12412,6 +12412,9 @@ export type PriceListInput = {
     excludeOeValues: Array<number | string>;
     lotNames: string[];
     excludeLotNames: string[];
+    /** Internal stock locations (children included) the stock must be in / must not be in. */
+    locationIds: number[];
+    excludeLocationIds: number[];
     /** Typed search-name texts: every word of a text must be contained (same matching as the Fast Orders search). */
     searchNames: string[];
     excludeSearchNames: string[];
@@ -12520,6 +12523,7 @@ async function resolveOeField(credentials: OdooCredentials, uid: number): Promis
 
 export type PriceListFilterOptions = {
     categories: Array<{ id: number; name: string }>;
+    locations: Array<{ id: number; name: string }>;
     oe: { label: string; options: Array<{ id: number | string; name: string }> } | null;
     lots: string[];
 };
@@ -12561,8 +12565,19 @@ export async function getPriceListFilterOptions(credentials: OdooCredentials): P
     );
     const lots = lotRows.map((row) => toDisplayString(row.name)).filter(Boolean).sort((a, b) => a.localeCompare(b));
 
+    // Only the sidebar-selected companies' locations (the context alone doesn't restrict them).
+    const selectedCompanyIds = companyContextStorage.getStore();
+    const locationDomain: unknown[] = [["usage", "=", "internal"]];
+    if (selectedCompanyIds && selectedCompanyIds.length > 0) locationDomain.push(["company_id", "in", selectedCompanyIds]);
+    const locationRows = await executeKw<Array<Record<string, unknown>>>(credentials, uid, "stock.location", "search_read", [locationDomain], {
+        fields: ["id", "complete_name"],
+        order: "complete_name asc",
+        limit: 2000,
+    }).catch(() => [] as Array<Record<string, unknown>>);
+
     return {
         categories: categories.map((category) => ({ id: Number(category.id), name: toDisplayString(category.complete_name) })).filter((category) => category.name),
+        locations: locationRows.map((location) => ({ id: Number(location.id), name: toDisplayString(location.complete_name) })).filter((location) => location.name),
         oe,
         lots,
     };
@@ -12699,12 +12714,14 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
     const names = (values: unknown) => (Array.isArray(values) ? values.map((value) => String(value)).filter(Boolean) : []);
     const lotNames = names(input.lotNames);
     const excludeLotNames = names(input.excludeLotNames);
+    const locationIds = ids(input.locationIds);
+    const excludeLocationIds = ids(input.excludeLocationIds);
     const pricelistIds = ids(input.pricelistIds);
     if (pricelistIds.length === 0) throw new Error("Choose at least one pricelist.");
     const searchTexts = [...(Array.isArray(input.searchNames) ? input.searchNames : []), ...(Array.isArray(input.excludeSearchNames) ? input.excludeSearchNames : [])];
     const filterCount =
         brandIds.length + excludeBrandIds.length + originIds.length + excludeOriginIds.length + categoryIds.length + excludeCategoryIds.length +
-        oeValues.length + excludeOeValues.length + lotNames.length + excludeLotNames.length + searchTexts.filter((text) => String(text).trim()).length;
+        oeValues.length + excludeOeValues.length + lotNames.length + excludeLotNames.length + locationIds.length + excludeLocationIds.length + searchTexts.filter((text) => String(text).trim()).length;
     if (filterCount === 0) throw new Error("Add at least one filter before building a price list.");
 
     const allLists = await getPricelistOptions(credentials);
@@ -12770,6 +12787,8 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
                 ["quantity", ">", 0],
                 ...(lotNames.length > 0 ? [["lot_id.name", "in", lotNames]] : []),
                 ...(excludeLotNames.length > 0 ? [["lot_id.name", "not in", excludeLotNames]] : []),
+                ...(locationIds.length > 0 ? [["location_id", "child_of", locationIds]] : []),
+                ...(excludeLocationIds.length > 0 ? ["!", ["location_id", "child_of", excludeLocationIds]] : []),
             ],
             Array.from(new Set(quantFields))
         ).catch(() => [] as Array<Record<string, unknown>>);
@@ -12920,7 +12939,7 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
         if (!product) continue;
         const templateId = templateIdByProduct.get(productId);
         // Choosing specific lots means only stock lots count: a product without them is left out.
-        const entries: Array<StockLot | null> = stockLotsByProduct.get(productId) ?? (input.inStockOnly || lotNames.length > 0 ? [] : [null]);
+        const entries: Array<StockLot | null> = stockLotsByProduct.get(productId) ?? (input.inStockOnly || lotNames.length > 0 || locationIds.length > 0 ? [] : [null]);
         for (const entry of entries) {
             // "Hide out of stock" also hides what is on hand but fully reserved (nothing available to sell).
             if (input.inStockOnly && (entry?.available ?? 0) <= 0) continue;

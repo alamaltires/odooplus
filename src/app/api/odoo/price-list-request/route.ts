@@ -21,6 +21,8 @@ export async function POST(request: Request) {
                 excludeOeValues: body.excludeOeValues ?? [],
                 lotNames: body.lotNames ?? [],
                 excludeLotNames: body.excludeLotNames ?? [],
+                locationIds: body.locationIds ?? [],
+                excludeLocationIds: body.excludeLocationIds ?? [],
                 searchNames: body.searchNames ?? [],
                 excludeSearchNames: body.excludeSearchNames ?? [],
                 pricelistIds: body.pricelistIds ?? [],

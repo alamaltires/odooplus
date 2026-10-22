@@ -1058,6 +1058,7 @@ export function getPricelists() {
 
 export type PriceListFilterOptions = {
     categories: Array<{ id: number; name: string }>;
+    locations: Array<{ id: number; name: string }>;
     oe: { label: string; options: Array<{ id: number | string; name: string }> } | null;
     lots: string[];
 };
@@ -1077,6 +1078,8 @@ export function getPriceListRequest(input: {
     excludeOeValues: Array<number | string>;
     lotNames: string[];
     excludeLotNames: string[];
+    locationIds?: number[];
+    excludeLocationIds?: number[];
     searchNames: string[];
     excludeSearchNames: string[];
     pricelistIds: number[];

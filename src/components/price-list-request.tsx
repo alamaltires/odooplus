@@ -15,9 +15,10 @@ import {
     type PriceListRow,
     type PricelistOption,
 } from "@/lib/client-odoo";
+import { subscribeSelectedCompanyIds } from "@/lib/company-filter";
 
 type Option = { id: number | string; name: string };
-type FilterField = "brand" | "origin" | "category" | "oe" | "lot" | "searchName";
+type FilterField = "brand" | "origin" | "category" | "oe" | "lot" | "location" | "searchName";
 type FilterRow = { id: number; field: FilterField; mode: "is" | "isnot"; values: Array<number | string> };
 // Very long lists (lot numbers) only render the first matches; typing narrows them.
 const MAX_SHOWN = 200;
@@ -244,6 +245,8 @@ export function PriceListRequest() {
     const excludeOeValues = useMemo(() => collect("oe", "isnot"), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
     const lotNames = useMemo(() => collect("lot", "is"), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
     const excludeLotNames = useMemo(() => collect("lot", "isnot"), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
+    const locationIds = useMemo(() => collect("location", "is"), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
+    const excludeLocationIds = useMemo(() => collect("location", "isnot"), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
     // Typed texts: blanks are ignored.
     const searchNames = useMemo(() => collect("searchName", "is").map(String), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
     const excludeSearchNames = useMemo(() => collect("searchName", "isnot").map(String), [filterRows]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -286,6 +289,30 @@ export function PriceListRequest() {
         });
     }, []);
 
+    // Locations belong to companies: reload them when the sidebar company selection changes.
+    useEffect(() => {
+        let first = true;
+        let stale = false;
+        const unsubscribe = subscribeSelectedCompanyIds(() => {
+            if (first) return;
+            getPriceListFilterOptions()
+                .then((options) => {
+                    if (stale) return;
+                    setFilterOptions(options);
+                    const valid = new Set(options.locations.map((location) => location.id));
+                    setFilterRows((current) =>
+                        current.map((row) => (row.field === "location" ? { ...row, values: row.values.filter((value) => valid.has(Number(value))) } : row))
+                    );
+                })
+                .catch(() => undefined);
+        });
+        first = false;
+        return () => {
+            stale = true;
+            unsubscribe();
+        };
+    }, []);
+
     // "Is not" rows only offer what exists inside the products the "is" rows select: ask Odoo which options are left.
     useEffect(() => {
         let stale = false;
@@ -308,7 +335,7 @@ export function PriceListRequest() {
     useEffect(() => {
         if (!facets) return;
         const timer = window.setTimeout(() => {
-            const available: Record<Exclude<FilterField, "searchName">, Array<{ id: number | string }>> = {
+            const available: Record<Exclude<FilterField, "searchName" | "location">, Array<{ id: number | string }>> = {
                 brand: facets.brands,
                 origin: facets.origins,
                 category: facets.categories,
@@ -318,7 +345,7 @@ export function PriceListRequest() {
             setFilterRows((current) => {
                 let changed = false;
                 const next = current.map((row) => {
-                    if (row.mode !== "isnot" || row.field === "searchName") return row;
+                    if (row.mode !== "isnot" || row.field === "searchName" || row.field === "location") return row;
                     const ids = new Set(available[row.field].map((item) => item.id));
                     const values = row.values.filter((value) => ids.has(value));
                     if (values.length === row.values.length) return row;
@@ -341,13 +368,14 @@ export function PriceListRequest() {
         { value: "category", label: "Category" },
         ...(oeAvailable ? [{ value: "oe" as const, label: filterOptions?.oe?.label ?? "OE Specifications" }] : []),
         { value: "lot", label: "Lot" },
+        { value: "location", label: "Location" },
         { value: "searchName", label: "Search name" },
     ];
     const fieldLabel = (field: FilterField) => fieldChoices.find((choice) => choice.value === field)?.label ?? field;
     const baseOptions = (field: FilterField): Option[] =>
-        field === "brand" ? brands : field === "origin" ? origins : field === "category" ? filterOptions?.categories ?? [] : field === "oe" ? filterOptions?.oe?.options ?? [] : field === "lot" ? lotOptions : [];
+        field === "brand" ? brands : field === "origin" ? origins : field === "category" ? filterOptions?.categories ?? [] : field === "oe" ? filterOptions?.oe?.options ?? [] : field === "lot" ? lotOptions : field === "location" ? filterOptions?.locations ?? [] : [];
     const rowOptions = (row: FilterRow): Option[] => {
-        if (row.mode === "is" || row.field === "searchName") return baseOptions(row.field);
+        if (row.mode === "is" || row.field === "searchName" || row.field === "location") return baseOptions(row.field);
         const items =
             row.field === "brand" ? facets?.brands : row.field === "origin" ? facets?.origins : row.field === "category" ? facets?.categories : row.field === "oe" ? facets?.oe ?? undefined : facets?.lots;
         return withCounts(items, baseOptions(row.field));
@@ -398,6 +426,8 @@ export function PriceListRequest() {
                 excludeOeValues,
                 lotNames: lotNames.map(String),
                 excludeLotNames: excludeLotNames.map(String),
+                locationIds: numbers(locationIds),
+                excludeLocationIds: numbers(excludeLocationIds),
                 searchNames,
                 excludeSearchNames,
                 pricelistIds,
