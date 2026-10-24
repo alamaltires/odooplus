@@ -24,7 +24,16 @@ export async function POST(request: Request) {
                 carriers[data.blNumber] = data.carrierCode;
             }
         }
-        return NextResponse.json({ tracked, carriers });
+
+        const telexSnapshot = await getAdminDb().collection("po-tracking-telex").limit(2000).get();
+        const telex: Record<string, string> = {};
+        for (const doc of telexSnapshot.docs) {
+            const data = doc.data() as { blNumber?: string; date?: string };
+            if (data.blNumber && data.date) {
+                telex[data.blNumber] = data.date;
+            }
+        }
+        return NextResponse.json({ tracked, carriers, telex });
     } catch (error) {
         return NextResponse.json(
             { error: error instanceof Error ? error.message : "Failed to load saved tracking" },

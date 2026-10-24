@@ -16,6 +16,7 @@ import {
     Map as MapIcon,
     MapPin,
     Package,
+    Mail,
     RefreshCw,
     Search,
     Ship,
@@ -32,6 +33,7 @@ import {
     getPoTrackingOrders,
     getSeaRoutes,
     getSavedShipmentTracking,
+    saveTelexRelease,
     checkPoTrackingPassword,
     getTrackingCarriers,
     trackShipmentByBl,
@@ -60,7 +62,7 @@ type BlGroup = {
 };
 
 type Stage = "waiting" | "departed" | "arrived" | "delivered";
-type FilterKey = "all" | "transit" | "arrived" | "untracked";
+type FilterKey = "all" | "transit" | "arrived" | "released" | "untracked";
 type ShipmentSort = "smart" | "arrival-asc" | "arrival-desc" | "units-desc" | "units-asc" | "order-desc" | "order-asc" | "vendor";
 
 const SHIPMENT_SORTS: Array<{ key: ShipmentSort; label: string }> = [
@@ -228,6 +230,9 @@ export default function PoTrackingPage() {
     // Shipping line remembered per B/L, and the list to choose it from.
     const [carrierByBl, setCarrierByBl] = useState<Record<string, string>>({});
     const [carriers, setCarriers] = useState<TrackingCarrier[]>([]);
+    // Telex Release date (YYYY-MM-DD) per B/L, and the B/L whose date is being edited.
+    const [telexByBl, setTelexByBl] = useState<Record<string, string>>({});
+    const [telexModal, setTelexModal] = useState<{ blNumber: string; value: string; saving: boolean; error: string | null } | null>(null);
     const [trackingErrors, setTrackingErrors] = useState<Record<string, string>>({});
     const [updating, setUpdating] = useState<Set<string>>(new Set());
     const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
@@ -283,6 +288,7 @@ export default function PoTrackingPage() {
             .then((data) => {
                 setTracked(data.tracked);
                 setCarrierByBl(data.carriers ?? {});
+                setTelexByBl(data.telex ?? {});
             })
             .catch(() => undefined);
     }, []);
@@ -351,14 +357,15 @@ export default function PoTrackingPage() {
     );
 
     const counts = useMemo(() => {
-        const result = { transit: 0, arrived: 0, untracked: 0 };
-        for (const { tracking, stage, received } of enriched) {
+        const result = { transit: 0, arrived: 0, released: 0, untracked: 0 };
+        for (const { group, tracking, stage, received } of enriched) {
+            if (telexByBl[group.blNumber]) result.released += 1;
             if (!tracking && !received) result.untracked += 1;
             else if (stage === "arrived" || stage === "delivered") result.arrived += 1;
             else result.transit += 1;
         }
         return result;
-    }, [enriched]);
+    }, [enriched, telexByBl]);
 
     // Bring the result panel into view as soon as a new result is set.
     useEffect(() => {
@@ -386,6 +393,7 @@ export default function PoTrackingPage() {
                 if (filter === "untracked" && (tracking || received)) return false;
                 if (filter === "transit" && (!(tracking || received) || stage === "arrived" || stage === "delivered")) return false;
                 if (filter === "arrived" && (!(tracking || received) || (stage !== "arrived" && stage !== "delivered"))) return false;
+                if (filter === "released" && !telexByBl[group.blNumber]) return false;
                 if (!query) return true;
                 return (
                     group.blNumber.toLowerCase().includes(query) ||
@@ -438,7 +446,7 @@ export default function PoTrackingPage() {
                 const tb = b.eta.date?.getTime() ?? Infinity;
                 return rank(a) === 1 ? tb - ta : ta - tb;
             });
-    }, [enriched, filter, search, shipmentSort, brandsByOrder]);
+    }, [enriched, filter, search, shipmentSort, brandsByOrder, telexByBl]);
 
     const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
     const currentPage = Math.min(page, pageCount);
@@ -664,10 +672,34 @@ export default function PoTrackingPage() {
         window.addEventListener("keydown", onKey);
         return () => window.removeEventListener("keydown", onKey);
     }, [poModal]);
+    async function submitTelex(clear = false) {
+        if (!telexModal) return;
+        const { blNumber, value } = telexModal;
+        const date = clear ? null : value;
+        if (!clear && !date) {
+            setTelexModal({ ...telexModal, error: "Pick the Telex Release date." });
+            return;
+        }
+        setTelexModal({ ...telexModal, saving: true, error: null });
+        try {
+            await saveTelexRelease(blNumber, date);
+            setTelexByBl((current) => {
+                const next = { ...current };
+                if (date) next[blNumber] = date;
+                else delete next[blNumber];
+                return next;
+            });
+            setTelexModal(null);
+        } catch (error) {
+            setTelexModal({ blNumber, value, saving: false, error: error instanceof Error ? error.message : "Could not save the date." });
+        }
+    }
+
     const filters: Array<{ key: FilterKey; label: string; count: number; tone?: string }> = [
         { key: "all", label: "All", count: enriched.length },
         { key: "transit", label: "On the way", count: counts.transit },
         { key: "arrived", label: "Arrived", count: counts.arrived },
+        { key: "released", label: "Released", count: counts.released },
         { key: "untracked", label: "Not tracked", count: counts.untracked },
     ];
 
@@ -775,6 +807,10 @@ export default function PoTrackingPage() {
                                             {tracking?.carrierName ? (
                                                 <Fact icon={<Building2 className="h-4 w-4" />} label="Shipping line" value={shortCarrier(tracking.carrierName)} />
                                             ) : null}
+                                            {(() => {
+                                                const deliverTo = Array.from(new Set(group.orders.map((order) => order.deliverTo).filter(Boolean))).join(", ");
+                                                return deliverTo ? <Fact icon={<MapPin className="h-4 w-4" />} label="Deliver to" value={deliverTo} /> : null;
+                                            })()}
                                         </dl>
                                     </div>
 
@@ -785,6 +821,11 @@ export default function PoTrackingPage() {
                                         <p className="mt-1 text-xs text-(--ink-soft)">
                                             {stage === "delivered" ? "arrived" : eta.fromOdoo ? "expected (from PO)" : "estimated arrival"}
                                         </p>
+                                        {telexByBl[group.blNumber] ? (
+                                            <p className="mt-2 text-xs text-(--ink-soft)">
+                                                Telex released <span className="font-semibold text-(--ink)">{formatDate(telexByBl[group.blNumber])}</span>
+                                            </p>
+                                        ) : null}
                                     </div>
                                 </div>
 
@@ -863,6 +904,14 @@ export default function PoTrackingPage() {
                                         <span className={`text-xs ${stale ? "text-amber-600" : "text-(--ink-soft)"}`}>
                                             {tracking ? `Checked ${timeAgo(tracking.fetchedAt)}` : ""}
                                         </span>
+                                        <button
+                                            type="button"
+                                            onClick={() => setTelexModal({ blNumber: group.blNumber, value: telexByBl[group.blNumber] ?? "", saving: false, error: null })}
+                                            className="inline-flex items-center gap-2 rounded-xl border border-(--line) bg-white px-3 py-1.5 text-sm font-medium"
+                                        >
+                                            <Mail className="h-4 w-4" />
+                                            {telexByBl[group.blNumber] ? "Telex date" : "Telex release"}
+                                        </button>
                                         {stage === "arrived" || stage === "delivered" ? null : (
                                             <button
                                                 type="button"
@@ -1496,6 +1545,47 @@ export default function PoTrackingPage() {
                             >
                                 {passwordPrompt.checking ? "Checking..." : "Continue"}
                             </button>
+                        </div>
+                    </form>
+                </div>
+            ) : null}
+
+            {telexModal ? (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={() => setTelexModal(null)}>
+                    <form
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onSubmit={(event) => {
+                            event.preventDefault();
+                            void submitTelex();
+                        }}
+                        className="w-full max-w-sm rounded-2xl border border-(--line) bg-white p-5 shadow-xl"
+                    >
+                        <h2 className="font-display text-lg">Telex Release date</h2>
+                        <p className="mt-1 text-sm text-(--ink-soft)">B/L {telexModal.blNumber}</p>
+                        <input
+                            type="date"
+                            autoFocus
+                            value={telexModal.value}
+                            onChange={(event) => setTelexModal({ ...telexModal, value: event.target.value, error: null })}
+                            className="mt-4 w-full rounded-xl border border-(--line) bg-white px-4 py-2.5 text-sm"
+                        />
+                        {telexModal.error ? <p className="mt-2 text-sm text-red-600">{telexModal.error}</p> : null}
+                        <div className="mt-4 flex items-center justify-between gap-2">
+                            {telexByBl[telexModal.blNumber] ? (
+                                <button type="button" onClick={() => void submitTelex(true)} disabled={telexModal.saving} className="rounded-xl px-3 py-2 text-sm text-red-600 disabled:opacity-60">
+                                    Remove
+                                </button>
+                            ) : (
+                                <span />
+                            )}
+                            <div className="flex gap-2">
+                                <button type="button" onClick={() => setTelexModal(null)} className="rounded-xl px-3 py-2 text-sm">
+                                    Cancel
+                                </button>
+                                <button type="submit" disabled={telexModal.saving} className="rounded-xl bg-(--brand) px-4 py-2 text-sm font-medium text-white disabled:opacity-60">
+                                    {telexModal.saving ? "Saving..." : "Save"}
+                                </button>
+                            </div>
                         </div>
                     </form>
                 </div>

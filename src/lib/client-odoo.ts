@@ -785,6 +785,8 @@ export type PoTrackingOrder = {
     vendorRef: string;
     orderDate: string;
     expectedArrival: string;
+    /** The PO's "Deliver To" (receiving operation type) in Odoo. */
+    deliverTo: string;
     currencyCode: string;
     types: string[];
     fullyReceived: boolean;
@@ -945,7 +947,12 @@ export function getTrackingCarriers() {
 }
 
 export function getSavedShipmentTracking() {
-    return post<{ tracked: Record<string, ShipmentTracking>; carriers: Record<string, string> }>("/api/po-tracking/saved", {});
+    return post<{ tracked: Record<string, ShipmentTracking>; carriers: Record<string, string>; telex?: Record<string, string> }>("/api/po-tracking/saved", {});
+}
+
+/** Sets (or clears, with null) the Telex Release date of a B/L. */
+export function saveTelexRelease(blNumber: string, date: string | null) {
+    return post<{ ok: boolean }>("/api/po-tracking/telex", { blNumber, date });
 }
 
 export type PoTrackingDiagnosis = {

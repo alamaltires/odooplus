@@ -10819,6 +10819,7 @@ export type PoTrackingOrder = {
     vendorRef: string;
     orderDate: string;
     expectedArrival: string;
+    deliverTo: string;
     currencyCode: string;
     types: string[];
     fullyReceived: boolean;
@@ -11119,7 +11120,7 @@ async function loadImportedPurchaseOrdersForTracking(
 
     const readFields = [
         "name", "partner_id", "partner_ref", ...noteFields, "date_order", "date_planned", "currency_id",
-        "amount_total", "company_id", "receipt_status", typeField.fieldName, ...(totalQtyField ? [totalQtyField] : []),
+        "amount_total", "company_id", "receipt_status", "picking_type_id", typeField.fieldName, ...(totalQtyField ? [totalQtyField] : []),
     ].filter((name, index, all) => all.indexOf(name) === index && hasField(name));
 
     // Not capped: a fixed limit here silently kept only the newest N orders
@@ -11199,6 +11200,7 @@ async function loadImportedPurchaseOrdersForTracking(
             vendorRef: toDisplayString(order.partner_ref),
             orderDate: normalizeOdooDate(order.date_order),
             expectedArrival: normalizeOdooDate(order.date_planned),
+            deliverTo: getRelationalName(order.picking_type_id),
             currencyCode: getRelationalName(order.currency_id),
             types,
             fullyReceived,
