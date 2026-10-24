@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, Download, FileSpreadsheet, Plus, Search, X } from "lucide-react";
+import { AlertCircle, ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, Download, FileSpreadsheet, Plus, Search, ShoppingCart, X } from "lucide-react";
 import {
+    createSalesQuotation,
+    getCustomers,
     getPriceListFacets,
     getPriceListFilterOptions,
     getPriceListRequest,
@@ -16,6 +18,7 @@ import {
     type PricelistOption,
 } from "@/lib/client-odoo";
 import { subscribeSelectedCompanyIds } from "@/lib/company-filter";
+import { Select2, type Select2Option } from "@/components/select2";
 
 type Option = { id: number | string; name: string };
 type FilterField = "brand" | "origin" | "category" | "oe" | "lot" | "location" | "searchName";
@@ -266,6 +269,15 @@ export function PriceListRequest() {
     // null = the order Odoo data came in (brand, then product). The same order is used for the Excel file.
     const [sort, setSort] = useState<{ key: string; dir: "asc" | "desc" } | null>(null);
     const [exporting, setExporting] = useState(false);
+    // "Create sales order" popup: pick the customer (and which price column to use), then create.
+    const [orderOpen, setOrderOpen] = useState(false);
+    const [orderCustomers, setOrderCustomers] = useState<Select2Option[]>([]);
+    const [orderCustomersLoading, setOrderCustomersLoading] = useState(false);
+    const [orderCustomerId, setOrderCustomerId] = useState("");
+    const [orderPricelistId, setOrderPricelistId] = useState("");
+    const [orderSubmitting, setOrderSubmitting] = useState(false);
+    const [orderError, setOrderError] = useState<string | null>(null);
+    const [orderCreated, setOrderCreated] = useState<Array<{ id: number; name: string; companyName: string }> | null>(null);
     // Rows ticked for the export (by row key). Everything starts ticked after a build.
     const [selected, setSelected] = useState<Set<string>>(new Set());
     const headerCheckbox = useRef<HTMLInputElement>(null);
@@ -568,6 +580,54 @@ export function PriceListRequest() {
         </th>
     );
 
+    function openOrderPopup() {
+        setOrderError(null);
+        setOrderCreated(null);
+        setOrderPricelistId((current) => (result?.pricelists.some((list) => String(list.id) === current) ? current : String(result?.pricelists[0]?.id ?? "")));
+        setOrderOpen(true);
+        if (orderCustomers.length > 0) return;
+        setOrderCustomersLoading(true);
+        getCustomers()
+            .then((data) => setOrderCustomers(data.customers.map((customer) => ({ value: String(customer.id), label: customer.name }))))
+            .catch((loadError) => setOrderError(loadError instanceof Error ? loadError.message : "Failed to load customers."))
+            .finally(() => setOrderCustomersLoading(false));
+    }
+
+    // Ticked products with a price in the chosen column and stock to sell.
+    const orderLines = useMemo(
+        () =>
+            selectedShown
+                .map((row) => ({ row, price: row.prices[orderPricelistId] ?? null }))
+                .filter((item): item is { row: PriceListRow; price: number } => item.price !== null && item.price > 0 && item.row.available > 0),
+        [selectedShown, orderPricelistId]
+    );
+
+    async function createOrder() {
+        if (!orderCustomerId) {
+            setOrderError("Choose the customer first.");
+            return;
+        }
+        setOrderSubmitting(true);
+        setOrderError(null);
+        try {
+            const data = await createSalesQuotation({
+                customerId: Number(orderCustomerId),
+                lines: orderLines.map(({ row, price }) => ({
+                    productId: row.productId,
+                    quantity: row.available,
+                    priceUnit: price,
+                    companyId: null,
+                    description: row.lotName ? `${row.name}\nLot: ${lotLabel(row)}` : undefined,
+                })),
+            });
+            setOrderCreated(data.quotations);
+        } catch (createError) {
+            setOrderError(createError instanceof Error ? createError.message : "Failed to create the sales order.");
+        } finally {
+            setOrderSubmitting(false);
+        }
+    }
+
     const priceHeader = (list: PricelistOption) => (list.currency ? `${list.name} (${list.currency})` : list.name);
 
     async function download() {
@@ -826,6 +886,16 @@ export function PriceListRequest() {
                                 <Download className="h-4 w-4" aria-hidden="true" />
                                 {exporting ? "Preparing..." : `Download Excel (${selectedShown.length.toLocaleString("en-US")})`}
                             </button>
+                            <button
+                                type="button"
+                                onClick={openOrderPopup}
+                                disabled={selectedShown.length === 0 || result.pricelists.length === 0}
+                                title={selectedShown.length === 0 ? "Tick the products to order" : undefined}
+                                className="inline-flex items-center gap-2 rounded-xl bg-(--brand) px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                                <ShoppingCart className="h-4 w-4" aria-hidden="true" />
+                                Create sales order
+                            </button>
                         </div>
                     </div>
                     {result.rows.length > 0 && result.diagnostics.rowsWithPrice < result.rows.length ? (
@@ -1000,6 +1070,79 @@ export function PriceListRequest() {
                         </div>
                     )}
 
+                </div>
+            ) : null}
+
+            {orderOpen && result ? (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={() => !orderSubmitting && setOrderOpen(false)}>
+                    <div onMouseDown={(event) => event.stopPropagation()} className="w-full max-w-md rounded-2xl border border-(--line) bg-white p-5 shadow-xl">
+                        <h2 className="font-display text-lg">Create sales order</h2>
+                        {orderCreated ? (
+                            <>
+                                <p className="mt-3 text-sm">
+                                    Created {orderCreated.map((order) => order.name + (order.companyName ? ` (${order.companyName})` : "")).join(", ")} as a draft quotation in Odoo.
+                                </p>
+                                <div className="mt-4 flex justify-end">
+                                    <button type="button" onClick={() => setOrderOpen(false)} className="rounded-xl bg-(--brand) px-4 py-2 text-sm font-medium text-white">
+                                        Done
+                                    </button>
+                                </div>
+                            </>
+                        ) : (
+                            <>
+                                <p className="mt-1 text-sm text-(--ink-soft)">
+                                    {orderLines.length} product{orderLines.length === 1 ? "" : "s"} from your ticked list, each at its available quantity.
+                                </p>
+                                <label className="mt-4 block text-sm font-medium">
+                                    Customer <span className="text-(--brand)">*</span>
+                                    <div className="mt-1 font-normal">
+                                        <Select2
+                                            value={orderCustomerId}
+                                            onChange={setOrderCustomerId}
+                                            options={orderCustomers}
+                                            loading={orderCustomersLoading}
+                                            placeholder="Select a customer"
+                                        />
+                                    </div>
+                                </label>
+                                {result.pricelists.length > 1 ? (
+                                    <label className="mt-3 block text-sm font-medium">
+                                        Price to use
+                                        <select
+                                            value={orderPricelistId}
+                                            onChange={(event) => setOrderPricelistId(event.target.value)}
+                                            className="mt-1 w-full rounded-xl border border-(--line) bg-white px-3 py-2.5 text-sm font-normal"
+                                        >
+                                            {result.pricelists.map((list) => (
+                                                <option key={list.id} value={list.id}>
+                                                    {priceHeader(list)}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </label>
+                                ) : null}
+                                {orderLines.length < selectedShown.length ? (
+                                    <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                                        {selectedShown.length - orderLines.length} ticked product{selectedShown.length - orderLines.length === 1 ? " has" : "s have"} no price in this column or no stock, so {selectedShown.length - orderLines.length === 1 ? "it is" : "they are"} left out.
+                                    </p>
+                                ) : null}
+                                {orderError ? <p className="mt-3 text-sm text-red-600">{orderError}</p> : null}
+                                <div className="mt-5 flex justify-end gap-2">
+                                    <button type="button" onClick={() => setOrderOpen(false)} disabled={orderSubmitting} className="rounded-xl px-3 py-2 text-sm">
+                                        Cancel
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => void createOrder()}
+                                        disabled={orderSubmitting || orderLines.length === 0}
+                                        className="rounded-xl bg-(--brand) px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
+                                    >
+                                        {orderSubmitting ? "Creating..." : "Create"}
+                                    </button>
+                                </div>
+                            </>
+                        )}
+                    </div>
                 </div>
             ) : null}
         </div>

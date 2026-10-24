@@ -6,7 +6,9 @@ import {
     ClipboardList,
     Eye,
     FileSpreadsheet,
+    FileText,
     PackageSearch,
+    ShoppingCart,
     Plus,
     Search,
     Trash2,
@@ -25,6 +27,7 @@ import {
 } from "@/lib/client-odoo";
 import { SalesStockBrowser } from "@/components/sales-stock-browser";
 import { PriceListRequest } from "@/components/price-list-request";
+import { MyDocuments } from "@/components/my-documents";
 
 type ReferenceProduct = { id: number; name: string; brandName: string };
 
@@ -99,7 +102,7 @@ export default function ProductRequestsPage() {
     const { user, role } = useAuth();
     const isAdmin = role === "admin";
 
-    const [activeTab, setActiveTab] = useState<"search" | "requests" | "pricelist">("search");
+    const [activeTab, setActiveTab] = useState<"search" | "requests" | "pricelist" | "quotations" | "orders" | "invoices">("search");
 
     // --- Search state ---
     const [query, setQuery] = useState("");
@@ -329,6 +332,42 @@ export default function ProductRequestsPage() {
                     <FileSpreadsheet className="h-4 w-4" aria-hidden="true" />
                     Price List Request
                 </button>
+                <button
+                    type="button"
+                    onClick={() => setActiveTab("quotations")}
+                    className={`flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition ${
+                        activeTab === "quotations"
+                            ? "border-(--brand) text-(--brand)"
+                            : "border-transparent text-(--ink-soft) hover:text-(--ink)"
+                    }`}
+                >
+                    <ClipboardList className="h-4 w-4" aria-hidden="true" />
+                    My Quotations
+                </button>
+                <button
+                    type="button"
+                    onClick={() => setActiveTab("orders")}
+                    className={`flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition ${
+                        activeTab === "orders"
+                            ? "border-(--brand) text-(--brand)"
+                            : "border-transparent text-(--ink-soft) hover:text-(--ink)"
+                    }`}
+                >
+                    <ShoppingCart className="h-4 w-4" aria-hidden="true" />
+                    My Sales Orders
+                </button>
+                <button
+                    type="button"
+                    onClick={() => setActiveTab("invoices")}
+                    className={`flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition ${
+                        activeTab === "invoices"
+                            ? "border-(--brand) text-(--brand)"
+                            : "border-transparent text-(--ink-soft) hover:text-(--ink)"
+                    }`}
+                >
+                    <FileText className="h-4 w-4" aria-hidden="true" />
+                    My Invoices
+                </button>
             </div>
 
             {activeTab === "search" ? (
@@ -340,6 +379,8 @@ export default function ProductRequestsPage() {
                         onRequestFromRow={openRequestPanelFromRow}
                     />
                 </div>
+            ) : activeTab === "quotations" || activeTab === "orders" || activeTab === "invoices" ? (
+                <MyDocuments key={activeTab} kind={activeTab} />
             ) : activeTab === "pricelist" ? (
                 <div className="mt-6">
                     <PriceListRequest />

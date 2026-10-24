@@ -31,7 +31,7 @@ async function getAuthToken(): Promise<string> {
     return user.getIdToken();
 }
 
-async function post<T>(path: string, body: Record<string, unknown>, method: "POST" | "PUT" | "GET" = "POST") {
+async function post<T>(path: string, body: Record<string, unknown>, method: "POST" | "PUT" | "GET" = "POST", signal?: AbortSignal) {
     const token = await getAuthToken();
 
     const selectedCompanyIds = getSelectedCompanyIds();
@@ -46,6 +46,7 @@ async function post<T>(path: string, body: Record<string, unknown>, method: "POS
             Authorization: `Bearer ${token}`,
         },
         body: method === "GET" ? undefined : JSON.stringify(requestBody),
+        signal,
     });
 
     const data = (await response.json()) as T & { error?: string };
@@ -336,13 +337,13 @@ export function getLotNames() {
     return post<{ lots: string[] }>("/api/odoo/lot-names", {});
 }
 
-export function searchSalesStock(input: { query: string; queries?: string[]; limit?: number; offset?: number; filters?: SalesStockFilters }) {
+export function searchSalesStock(input: { query: string; queries?: string[]; limit?: number; offset?: number; filters?: SalesStockFilters }, signal?: AbortSignal) {
     return post<{
         rows: SalesStockRow[];
         totalCount: number;
         unresolvedFields: string[];
         hasMore: boolean;
-    }>("/api/odoo/sales-stock", input);
+    }>("/api/odoo/sales-stock", input, "POST", signal);
 }
 
 export function getPatternImages(ids: number[]) {
@@ -351,7 +352,7 @@ export function getPatternImages(ids: number[]) {
 
 export function createSalesQuotation(input: {
     customerId: number;
-    lines: Array<{ productId: number; quantity: number; description?: string; companyId: number | null }>;
+    lines: Array<{ productId: number; quantity: number; description?: string; companyId: number | null; priceUnit?: number }>;
 }) {
     return post<{ quotations: Array<{ id: number; name: string; companyName: string }> }>(
         "/api/odoo/sales-quotation",
@@ -1115,4 +1116,23 @@ export function getPriceListFacets(input: {
     searchNames: string[];
 }) {
     return post<PriceListFacets>("/api/odoo/price-list-facets", input);
+}
+
+export type MyDocumentRow = {
+    id: number;
+    name: string;
+    customer: string;
+    date: string;
+    dueDate: string;
+    state: string;
+    paymentState: string;
+    amountTotal: number;
+    amountResidual: number | null;
+    currencyCode: string;
+    companyName: string;
+    isCredit: boolean;
+};
+
+export function getMyDocuments(input: { kind: "orders" | "quotations" | "invoices"; search?: string; limit?: number; offset?: number }) {
+    return post<{ rows: MyDocumentRow[]; totalCount: number }>("/api/odoo/my-documents", input);
 }

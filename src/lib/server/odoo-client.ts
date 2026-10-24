@@ -2730,6 +2730,8 @@ export type SalesQuotationLine = {
     quantity: number;
     description?: string;
     companyId: number | null;
+    /** Fixed unit price; when absent Odoo prices the line from the customer's pricelist. */
+    priceUnit?: number;
 };
 
 /**
@@ -2774,6 +2776,7 @@ export async function createSalesQuotations(
                     order_id: orderId,
                     product_id: line.productId,
                     product_uom_qty: line.quantity,
+                    ...(typeof line.priceUnit === "number" && Number.isFinite(line.priceUnit) ? { price_unit: line.priceUnit } : {}),
                     ...(line.description ? { name: line.description } : {}),
                 }],
                 { context }
@@ -13059,4 +13062,78 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
     rows.sort((a, b) => a.brand.localeCompare(b.brand) || a.name.localeCompare(b.name) || a.lotName.localeCompare(b.lotName));
 
     return { pricelists, rows, totalMatched: matchedIds.length, truncated, diagnostics };
+}
+
+export type MyDocumentRow = {
+    id: number;
+    name: string;
+    customer: string;
+    date: string;
+    dueDate: string;
+    state: string;
+    paymentState: string;
+    amountTotal: number;
+    amountResidual: number | null;
+    currencyCode: string;
+    companyName: string;
+    isCredit: boolean;
+};
+
+const SELECTION_LABELS: Record<string, string> = {
+    draft: "Quotation", sent: "Quotation sent", sale: "Sales order", done: "Locked", cancel: "Cancelled", posted: "Posted",
+    not_paid: "Not paid", in_payment: "In payment", paid: "Paid", partial: "Partially paid", reversed: "Reversed", invoicing_legacy: "Legacy",
+};
+
+/** The signed-in user's own sales orders (`kind: "orders"`), quotations (`"quotations"`) or customer invoices (`kind: "invoices"`), newest first. */
+export async function getMyDocuments(
+    credentials: OdooCredentials,
+    input: { kind: "orders" | "quotations" | "invoices"; search?: string; limit?: number; offset?: number }
+): Promise<{ rows: MyDocumentRow[]; totalCount: number }> {
+    const uid = await authenticate(credentials);
+    const limit = Number.isFinite(input.limit) ? Math.max(1, Math.min(200, Number(input.limit))) : 30;
+    const offset = Number.isFinite(input.offset) ? Math.max(0, Number(input.offset)) : 0;
+    const search = (input.search ?? "").trim();
+    const isOrders = input.kind !== "invoices";
+
+    const domain: unknown[] = isOrders
+        ? [["user_id", "=", uid], ["state", "in", input.kind === "quotations" ? ["draft", "sent", "cancel"] : ["sale", "done"]]]
+        : [["invoice_user_id", "=", uid], ["move_type", "in", ["out_invoice", "out_refund"]], ["state", "=", "posted"]];
+    if (search) {
+        domain.push("|", ["name", "ilike", search], ["partner_id", "ilike", search]);
+    }
+
+    const model = isOrders ? "sale.order" : "account.move";
+    const fields = isOrders
+        ? ["name", "partner_id", "date_order", "amount_total", "state", "company_id", "currency_id"]
+        : ["name", "partner_id", "invoice_date", "invoice_date_due", "amount_total", "amount_residual", "state", "payment_state", "move_type", "company_id", "currency_id"];
+
+    const [totalCount, records] = await Promise.all([
+        executeKw<number>(credentials, uid, model, "search_count", [domain]),
+        executeKw<Array<Record<string, unknown>>>(credentials, uid, model, "search_read", [domain], {
+            fields,
+            order: isOrders ? "date_order desc, id desc" : "invoice_date desc, id desc",
+            limit,
+            offset,
+        }),
+    ]);
+
+    const rows = records.map((record): MyDocumentRow => {
+        const state = toDisplayString(record.state);
+        const paymentState = toDisplayString(record.payment_state);
+        return {
+            id: Number(record.id),
+            name: toDisplayString(record.name),
+            customer: getRelationalName(record.partner_id),
+            date: normalizeOdooDate(isOrders ? record.date_order : record.invoice_date),
+            dueDate: isOrders ? "" : normalizeOdooDate(record.invoice_date_due),
+            state: SELECTION_LABELS[state] ?? state,
+            paymentState: SELECTION_LABELS[paymentState] ?? paymentState,
+            amountTotal: Number(record.amount_total ?? 0),
+            amountResidual: isOrders ? null : Number(record.amount_residual ?? 0),
+            currencyCode: getRelationalName(record.currency_id),
+            companyName: getRelationalName(record.company_id),
+            isCredit: record.move_type === "out_refund",
+        };
+    });
+    return { rows, totalCount };
 }

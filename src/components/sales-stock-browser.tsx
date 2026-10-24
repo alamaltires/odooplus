@@ -244,13 +244,13 @@ export function SalesStockBrowser({
         writeStorage(VIEW_STORAGE_KEY, next);
     }
 
-    // The search box holds tags (comma-separated in `query`) plus the term being typed;
-    // a product matching any of them is listed.
+    // The search box holds tags (comma-separated in `query`); a search only runs when a term is
+    // entered with Enter (or a comma), never while typing. A product matching any tag is listed.
     const [draft, setDraft] = useState("");
     const tags = useMemo(() => query.split(",").map((tag) => tag.trim()).filter(Boolean), [query]);
     const terms = useMemo(
-        () => [...tags, draft.trim()].filter((term) => term.length >= MIN_SEARCH_QUERY_LENGTH),
-        [tags, draft]
+        () => tags.filter((term) => term.length >= MIN_SEARCH_QUERY_LENGTH),
+        [tags]
     );
     const termsKey = terms.join("\u0001");
     const trimmed = termsKey;
@@ -260,6 +260,7 @@ export function SalesStockBrowser({
     function commitDraft() {
         const value = draft.replace(/,/g, " ").trim();
         if (!value) return;
+        if (value.length < MIN_SEARCH_QUERY_LENGTH) return;
         if (!tags.some((tag) => tag.toLowerCase() === value.toLowerCase())) onQueryChange([...tags, value].join(","));
         setDraft("");
     }
@@ -328,6 +329,7 @@ export function SalesStockBrowser({
         const cacheKey = JSON.stringify([searchKey, page]);
         const cachedAnswer = searchCache.get(cacheKey);
         let stale = false;
+        const controller = new AbortController();
         const debounceId = window.setTimeout(() => {
             if (cachedAnswer) {
                 setRows(cachedAnswer.rows);
@@ -339,7 +341,7 @@ export function SalesStockBrowser({
             }
             setLoading(true);
             setError(null);
-            searchSalesStock({ query: "", queries: terms, limit: limitPerPage, offset: (page - 1) * limitPerPage, filters: smartFilters })
+            searchSalesStock({ query: "", queries: terms, limit: limitPerPage, offset: (page - 1) * limitPerPage, filters: smartFilters }, controller.signal)
                 .then((data) => {
                     if (stale) return;
                     searchCache.set(cacheKey, data);
@@ -356,11 +358,14 @@ export function SalesStockBrowser({
                 .finally(() => {
                     if (!stale) setLoading(false);
                 });
-        }, cachedAnswer || page > 1 ? 0 : 120);
+        }, cachedAnswer || page > 1 ? 0 : 0);
         return () => {
             stale = true;
+            // A request still running for an older keystroke is dropped, not waited for.
+            controller.abort();
             window.clearTimeout(debounceId);
         };
+    // `draft` only sets how long to wait, so it is read through a ref-free closure on purpose.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [trimmed, canSearch, smartFilters, searchKey, page, pageSize]);
 
@@ -803,6 +808,11 @@ export function SalesStockBrowser({
                         />
                     </div>
                     {query || draft ? null : <TypingPlaceholder />}
+                    {draft.trim() ? (
+                        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-md bg-(--chip) px-2 py-0.5 text-[11px] text-(--ink-soft)">
+                            Press Enter to search
+                        </span>
+                    ) : null}
                 </div>
                 <details className="relative shrink-0">
                     <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl border border-(--line) bg-white px-3 py-2.5 text-sm">
@@ -938,7 +948,7 @@ export function SalesStockBrowser({
 
             {!canSearch ? (
                 <p className="rounded-2xl border border-dashed border-(--line) bg-(--card) p-8 text-center text-sm text-(--ink-soft)">
-                    Type at least {MIN_SEARCH_QUERY_LENGTH} characters, or use Smart Search, to find stock.
+                    Type at least {MIN_SEARCH_QUERY_LENGTH} characters and press Enter, or use Smart Search, to find stock.
                 </p>
             ) : loading && rows.length === 0 ? (
                 <div className="space-y-2 rounded-2xl border border-(--line) bg-(--card) p-4" role="status" aria-label="Searching">

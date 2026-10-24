@@ -29,6 +29,7 @@ export async function POST(request: Request) {
                           quantity: Number(line.quantity),
                           description: typeof line.description === "string" ? line.description : undefined,
                           companyId: line.companyId ? Number(line.companyId) : null,
+                          priceUnit: line.priceUnit === undefined || line.priceUnit === null ? undefined : Number(line.priceUnit),
                       }))
                     : [],
             })
