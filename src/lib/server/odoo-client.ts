@@ -5646,7 +5646,7 @@ async function buildPaymentFollowupReport(
             ledgerAccountDomain,
             ["reconciled", "=", false],
         ],
-        ["partner_id", "date", "date_maturity", "balance", "company_currency_id"]
+        ["partner_id", "date", "date_maturity", "balance", "amount_residual", "company_currency_id"]
     );
     const ledgerPartnerIds = Array.from(new Set(ledgerLines.map((line) => getRelationalId(line.partner_id)).filter((id): id is number => typeof id === "number")));
     const ledgerCommercialByPartnerId = new Map<number, number>();
@@ -6035,7 +6035,10 @@ async function buildPaymentFollowupReport(
         const referenceMs = referenceDate ? new Date(`${referenceDate}T00:00:00Z`).getTime() : todayMs;
         const daysOverdue = Math.round((todayMs - referenceMs) / 86400000);
         const bucket = resolveAgingBucket(daysOverdue, referenceDate, todayStr, agingSystem);
-        const amount = toHomeAmount(Number(line.balance ?? 0), getRelationalId(line.company_currency_id));
+        // The still-open amount, not the full balance: a partly matched line (an invoice
+        // partly offset by a return invoice) keeps its full balance in Odoo, while the
+        // line that offset it is already fully matched and no longer listed here.
+        const amount = toHomeAmount(Number(line.amount_residual ?? line.balance ?? 0), getRelationalId(line.company_currency_id));
 
         ensureRow(customerId);
         const entry = ledgerByCustomerId.get(customerId) ?? { buckets: emptyAgingTotals(), oldestRef: "", oldestDays: 0, oldestBucket: "notDue" as PaymentFollowupAgingBucket };
