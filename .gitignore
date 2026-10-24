@@ -48,6 +48,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-
+.firebase
 # PM2 logs
 /logs
