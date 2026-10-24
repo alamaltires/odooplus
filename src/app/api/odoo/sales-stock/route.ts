@@ -17,18 +17,26 @@ export async function POST(request: Request) {
         const offset = Number.isFinite(body.offset) ? Number(body.offset) : 0;
         const query = typeof body.query === "string" ? body.query : "";
 
+        const startedAt = Date.now();
+        const timings: Record<string, number> = {};
         const result = await runWithCompanyIds(companyIds, () =>
-            searchSalesStock(credentials, { query, queries: Array.isArray(body.queries) ? body.queries.filter((term): term is string => typeof term === "string") : undefined, limit, offset, filters: body.filters })
+            searchSalesStock(credentials, { timings, query, queries: Array.isArray(body.queries) ? body.queries.filter((term): term is string => typeof term === "string") : undefined, limit, offset, filters: body.filters })
         );
 
-        return NextResponse.json({
-            rows: result.rows,
-            totalCount: result.totalCount,
-            unresolvedFields: result.unresolvedFields,
-            limit,
-            offset,
-            hasMore: offset + result.rows.length < result.totalCount,
-        });
+        // Shown in the browser's Network tab (Timing) and the server log: where the time went.
+        timings.total = Date.now() - startedAt;
+        console.log("[sales-stock]", JSON.stringify(timings));
+        return NextResponse.json(
+            {
+                rows: result.rows,
+                totalCount: result.totalCount,
+                unresolvedFields: result.unresolvedFields,
+                limit,
+                offset,
+                hasMore: offset + result.rows.length < result.totalCount,
+            },
+            { headers: { "Server-Timing": Object.entries(timings).map(([name, ms]) => `${name};dur=${ms}`).join(", ") } }
+        );
     } catch (error) {
         return NextResponse.json(
             { error: error instanceof Error ? error.message : "Failed to search stock" },

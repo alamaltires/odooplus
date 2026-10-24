@@ -2350,6 +2350,30 @@ function normalizeFieldValue(value: unknown, meta: OdooFieldMeta | undefined, ty
     return toDisplayString(value);
 }
 
+const INTERNAL_LOCATIONS_CACHE_TTL_MS = 10 * 60_000;
+const internalLocationsCache = new Map<string, { at: number; ids: number[] | null }>();
+
+/** Ids of the internal stock locations (null when there are too many to list). Locations rarely change. */
+async function getInternalLocationIds(credentials: OdooCredentials, uid: number): Promise<number[] | null> {
+    const cacheKey = `${credentials.url}|${credentials.db}|${(companyContextStorage.getStore() ?? []).join(",")}`;
+    const hit = internalLocationsCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < INTERNAL_LOCATIONS_CACHE_TTL_MS) return hit.ids;
+    let ids: number[] | null = null;
+    try {
+        const found = await executeKw<number[]>(credentials, uid, "stock.location", "search", [[["usage", "=", "internal"]]], {
+            limit: 3001,
+            context: { active_test: false },
+        });
+        ids = found.length > 0 && found.length <= 3000 ? found : null;
+    } catch {
+        ids = null;
+    }
+    internalLocationsCache.set(cacheKey, { at: Date.now(), ids });
+    return ids;
+}
+
+const PRODUCT_IDS_CACHE_TTL_MS = 60_000;
+const productIdsByTermCache = new Map<string, { at: number; ids: number[] }>();
 const PATTERN_ID_CACHE_TTL_MS = 30 * 60_000;
 const patternIdCache = new Map<string, { at: number; ids: Map<string, number> }>();
 
@@ -2365,9 +2389,19 @@ export type SalesStockFilters = {
 
 export async function searchSalesStock(
     credentials: OdooCredentials,
-    input?: { query?: string; queries?: string[]; limit?: number; offset?: number; filters?: SalesStockFilters }
+    input?: { query?: string; queries?: string[]; limit?: number; offset?: number; filters?: SalesStockFilters; timings?: Record<string, number> }
 ): Promise<{ rows: SalesStockRow[]; totalCount: number; unresolvedFields: string[] }> {
+    // Optional per-phase timings (ms), reported to the caller to show where a slow search spends its time.
+    const mark = (() => {
+        let last = Date.now();
+        return (phase: string) => {
+            const now = Date.now();
+            if (input?.timings) input.timings[phase] = now - last;
+            last = now;
+        };
+    })();
     const uid = await authenticate(credentials);
+    mark("login");
     // Several search terms (tags) are OR-ed: a product matching any one of them is listed.
     const queries = Array.from(new Set([...(input?.queries ?? []), input?.query ?? ""].map((term) => term.trim()).filter(Boolean))).slice(0, 20);
     const query = queries.join(" ");
@@ -2397,28 +2431,38 @@ export async function searchSalesStock(
         getModelFieldsMeta(credentials, uid, "stock.lot").catch(() => ({} as Record<string, OdooFieldMeta>)),
         getModelFieldsMeta(credentials, uid, "product.product"),
     ]);
+    // Which products a term matches hardly changes, and it is the costliest lookup (a text match
+    // over every product), so the answer is remembered for a minute.
     const matchingProductIds = query
         ? Array.from(
               new Set(
                   (
                       await Promise.all(
-                          queries.map((term) =>
-                              executeKw<number[]>(credentials, uid, "product.product", "search", [productDomainFor(term)], {
+                          queries.map(async (term) => {
+                              const cacheKey = `${credentials.url}|${credentials.db}|${term.toLowerCase()}`;
+                              const hit = productIdsByTermCache.get(cacheKey);
+                              if (hit && Date.now() - hit.at < PRODUCT_IDS_CACHE_TTL_MS) return hit.ids;
+                              const ids = await executeKw<number[]>(credentials, uid, "product.product", "search", [productDomainFor(term)], {
                                   limit: PRODUCT_CATALOG_SEARCH_MAX_MATCHES,
                                   context: { active_test: false },
-                              })
-                          )
+                              });
+                              productIdsByTermCache.set(cacheKey, { at: Date.now(), ids });
+                              if (productIdsByTermCache.size > 300) productIdsByTermCache.delete(productIdsByTermCache.keys().next().value as string);
+                              return ids;
+                          })
                       )
                   ).flat()
               )
           )
         : null;
+    mark("productSearch");
     if (matchingProductIds && matchingProductIds.length === 0) {
         metaPromise.catch(() => undefined);
         return { rows: [], totalCount: 0, unresolvedFields: [] };
     }
 
     const [quantMeta, lotMeta, productMeta] = await metaPromise;
+    mark("fieldMeta");
     const metaBySource: Record<SalesStockSource, Record<string, OdooFieldMeta>> = {
         quant: quantMeta,
         lot: lotMeta,
@@ -2447,10 +2491,12 @@ export async function searchSalesStock(
     }
 
     const patternHitForFilter = resolved.get("pattern");
+    const internalLocationIds = await getInternalLocationIds(credentials, uid);
     const activeCompanyIds = companyContextStorage.getStore();
     const quantDomain: unknown[] = [
         ...(matchingProductIds ? [["product_id", "in", matchingProductIds]] : []),
-        ["location_id.usage", "=", "internal"],
+        // A plain id list is far cheaper for Odoo than joining every stock line to its location.
+        internalLocationIds ? ["location_id", "in", internalLocationIds] : ["location_id.usage", "=", "internal"],
         ["quantity", ">", 0],
     ];
 
@@ -2489,17 +2535,19 @@ export async function searchSalesStock(
         if (source === "quant") quantFields.add(field);
     }
 
-    // The total and the page of rows are independent: ask Odoo for both at once.
-    const [totalCount, quants] = await Promise.all([
-        executeKw<number>(credentials, uid, "stock.quant", "search_count", [quantDomain]),
-        executeKw<Array<Record<string, unknown>>>(credentials, uid, "stock.quant", "search_read", [quantDomain], {
-            fields: Array.from(quantFields),
-            order: "quantity desc, id asc",
-            limit,
-            offset,
-        }),
-    ]);
-
+    // The total and the page of rows are independent: ask Odoo for both at once. When the first
+    // page comes back short, that already is the total, so the count is not waited for.
+    const countPromise = executeKw<number>(credentials, uid, "stock.quant", "search_count", [quantDomain]);
+    const quants = await executeKw<Array<Record<string, unknown>>>(credentials, uid, "stock.quant", "search_read", [quantDomain], {
+        fields: Array.from(quantFields),
+        order: "quantity desc, id asc",
+        limit,
+        offset,
+    });
+    const knownTotal = quants.length < limit ? offset + quants.length : null;
+    if (knownTotal !== null) countPromise.catch(() => undefined);
+    const totalCount = knownTotal ?? (await countPromise);
+    mark("stockLines");
     const lotIds = Array.from(new Set(quants.map((quant) => getRelationalId(quant.lot_id)).filter((id): id is number => Boolean(id))));
     const productIds = Array.from(new Set(quants.map((quant) => getRelationalId(quant.product_id)).filter((id): id is number => Boolean(id))));
 
@@ -2517,6 +2565,7 @@ export async function searchSalesStock(
             context: { active_test: false },
         }),
     ]);
+    mark("lotsAndProducts");
     const lotById = new Map(lots.map((lot) => [Number(lot.id), lot]));
     const productById = new Map(products.map((product) => [Number(product.id), product]));
 

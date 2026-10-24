@@ -139,10 +139,19 @@ export async function getStoredOdooCredentials(): Promise<OdooCredentials | null
     return null;
 }
 
+// The saved Odoo login is read from Firestore on every request; it hardly ever changes, so it is
+// kept for a short while (a changed password in Settings takes effect within this time).
+const CREDENTIALS_CACHE_TTL_MS = 30_000;
+const credentialsCache = new Map<string, { at: number; credentials: OdooCredentials }>();
+
 export async function getOdooCredentialsFromRequest(
     request: Request
 ): Promise<{ userId: string; credentials: OdooCredentials }> {
     const userId = await getUserIdFromAuthHeader(request);
+    const cached = credentialsCache.get(userId);
+    if (cached && Date.now() - cached.at < CREDENTIALS_CACHE_TTL_MS) {
+        return { userId, credentials: cached.credentials };
+    }
 
     const [snapshot, systemSettings] = await Promise.all([
         getAdminDb().collection("users").doc(userId).collection("integrations").doc("odoo").get(),
@@ -160,15 +169,14 @@ export async function getOdooCredentialsFromRequest(
         throw new Error("Odoo settings not configured. Please set up your Odoo username and password in settings.");
     }
 
-    return {
-        userId,
-        credentials: {
-            url: systemSettings.url,
-            db: systemSettings.db,
-            username: userCredentials.username,
-            password: userCredentials.password,
-        },
+    const credentials = {
+        url: systemSettings.url,
+        db: systemSettings.db,
+        username: userCredentials.username,
+        password: userCredentials.password,
     };
+    credentialsCache.set(userId, { at: Date.now(), credentials });
+    return { userId, credentials };
 }
 
 /**
