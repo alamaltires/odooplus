@@ -413,7 +413,27 @@ export async function getOdooUserId(credentials: OdooCredentials) {
     return authenticate(credentials);
 }
 
-async function authenticate(credentials: OdooCredentials) {
+// Logging in costs a full Odoo round trip (plus its password check) on every request,
+// so a successful login is remembered for a few minutes. The password is part of the
+// key, so a changed password never reuses an old login; failures are never cached.
+const AUTH_CACHE_TTL_MS = 5 * 60_000;
+const authCache = new Map<string, { at: number; uid: Promise<number> }>();
+
+async function authenticate(credentials: OdooCredentials): Promise<number> {
+    const cacheKey = [credentials.url, credentials.db, credentials.username, credentials.password].join("\u0001");
+    const cached = authCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < AUTH_CACHE_TTL_MS) {
+        return cached.uid;
+    }
+
+    const uid = authenticateUncached(credentials);
+    authCache.set(cacheKey, { at: Date.now(), uid });
+    if (authCache.size > 200) authCache.delete(authCache.keys().next().value as string);
+    uid.catch(() => authCache.delete(cacheKey));
+    return uid;
+}
+
+async function authenticateUncached(credentials: OdooCredentials) {
     let uid;
     try {
         uid = await jsonRpc<number>(credentials.url, {
@@ -2330,6 +2350,9 @@ function normalizeFieldValue(value: unknown, meta: OdooFieldMeta | undefined, ty
     return toDisplayString(value);
 }
 
+const PATTERN_ID_CACHE_TTL_MS = 30 * 60_000;
+const patternIdCache = new Map<string, { at: number; ids: Map<string, number> }>();
+
 export type SalesStockFilters = {
     categoryId?: number | null;
     brandId?: number | null;
@@ -2342,47 +2365,60 @@ export type SalesStockFilters = {
 
 export async function searchSalesStock(
     credentials: OdooCredentials,
-    input?: { query?: string; limit?: number; offset?: number; filters?: SalesStockFilters }
+    input?: { query?: string; queries?: string[]; limit?: number; offset?: number; filters?: SalesStockFilters }
 ): Promise<{ rows: SalesStockRow[]; totalCount: number; unresolvedFields: string[] }> {
     const uid = await authenticate(credentials);
-    const query = (input?.query ?? "").trim();
-    const limit = Number.isFinite(input?.limit) ? Math.max(1, Math.min(100, Number(input?.limit))) : 30;
+    // Several search terms (tags) are OR-ed: a product matching any one of them is listed.
+    const queries = Array.from(new Set([...(input?.queries ?? []), input?.query ?? ""].map((term) => term.trim()).filter(Boolean))).slice(0, 20);
+    const query = queries.join(" ");
+    const limit = Number.isFinite(input?.limit) ? Math.max(1, Math.min(2000, Number(input?.limit))) : 30;
     const offset = Number.isFinite(input?.offset) ? Math.max(0, Number(input?.offset)) : 0;
 
     // The search keyword is matched against the template's `second_name`
     // ("Search Name") only. That field is stored without spaces/slashes
     // (e.g. "215/55R17 Austone" -> "2155517Austone"), so each typed word is
     // normalized the same way, and every word must match.
-    const productDomain: unknown[] = [];
-    for (const token of query.split(/\s+/).filter(Boolean)) {
-        const sizeMatch = token.match(/^(\d{3})\/?(\d{2})\s*[A-Za-z]?\s*(\d{2})$/);
-        const keyword = sizeMatch ? `${sizeMatch[1]}${sizeMatch[2]}${sizeMatch[3]}` : token.replace(/[\/\-_.]/g, "");
-        if (keyword) {
-            productDomain.push(["product_tmpl_id.second_name", "ilike", keyword]);
+    const productDomainFor = (term: string) => {
+        const domain: unknown[] = [];
+        for (const token of term.split(/\s+/).filter(Boolean)) {
+            const sizeMatch = token.match(/^(\d{3})\/?(\d{2})\s*[A-Za-z]?\s*(\d{2})$/);
+            const keyword = sizeMatch ? `${sizeMatch[1]}${sizeMatch[2]}${sizeMatch[3]}` : token.replace(/[\/\-_.]/g, "");
+            if (keyword) {
+                domain.push(["product_tmpl_id.second_name", "ilike", keyword]);
+            }
         }
-    }
+        return domain;
+    };
 
     // With no typed keyword the stock lines aren't narrowed by product at all
     // (only the Smart Search filters apply), so the product pre-search is skipped.
-    const matchingProductIds = query
-        ? await executeKw<number[]>(
-              credentials,
-              uid,
-              "product.product",
-              "search",
-              [productDomain],
-              { limit: PRODUCT_CATALOG_SEARCH_MAX_MATCHES, context: { active_test: false } }
-          )
-        : null;
-    if (matchingProductIds && matchingProductIds.length === 0) {
-        return { rows: [], totalCount: 0, unresolvedFields: [] };
-    }
-
-    const [quantMeta, lotMeta, productMeta] = await Promise.all([
+    const metaPromise = Promise.all([
         getModelFieldsMeta(credentials, uid, "stock.quant"),
         getModelFieldsMeta(credentials, uid, "stock.lot").catch(() => ({} as Record<string, OdooFieldMeta>)),
         getModelFieldsMeta(credentials, uid, "product.product"),
     ]);
+    const matchingProductIds = query
+        ? Array.from(
+              new Set(
+                  (
+                      await Promise.all(
+                          queries.map((term) =>
+                              executeKw<number[]>(credentials, uid, "product.product", "search", [productDomainFor(term)], {
+                                  limit: PRODUCT_CATALOG_SEARCH_MAX_MATCHES,
+                                  context: { active_test: false },
+                              })
+                          )
+                      )
+                  ).flat()
+              )
+          )
+        : null;
+    if (matchingProductIds && matchingProductIds.length === 0) {
+        metaPromise.catch(() => undefined);
+        return { rows: [], totalCount: 0, unresolvedFields: [] };
+    }
+
+    const [quantMeta, lotMeta, productMeta] = await metaPromise;
     const metaBySource: Record<SalesStockSource, Record<string, OdooFieldMeta>> = {
         quant: quantMeta,
         lot: lotMeta,
@@ -2502,20 +2538,31 @@ export async function searchSalesStock(
                     .filter(Boolean)
             )
         );
-        if (names.length > 0) {
+        // Pattern names rarely change: ones already looked up are remembered for a while.
+        const patternCacheKey = `${credentials.url}|${credentials.db}`;
+        const patternCache = patternIdCache.get(patternCacheKey);
+        const freshCache = patternCache && Date.now() - patternCache.at < PATTERN_ID_CACHE_TTL_MS ? patternCache : { at: Date.now(), ids: new Map<string, number>() };
+        patternIdCache.set(patternCacheKey, freshCache);
+        for (const name of names) {
+            const id = freshCache.ids.get(name);
+            if (id !== undefined) patternIdByName.set(name, id);
+        }
+        const unknownNames = names.filter((name) => !freshCache.ids.has(name));
+        if (unknownNames.length > 0) {
             try {
                 const patterns = await executeKw<Array<Record<string, unknown>>>(
                     credentials,
                     uid,
                     "tire.pattern",
                     "search_read",
-                    [[["name", "in", names]]],
+                    [[["name", "in", unknownNames]]],
                     { fields: ["id", "name"], limit: 500 }
                 );
                 for (const pattern of patterns) {
                     const name = toDisplayString(pattern.name).trim();
                     if (name && !patternIdByName.has(name)) {
                         patternIdByName.set(name, Number(pattern.id));
+                        freshCache.ids.set(name, Number(pattern.id));
                     }
                 }
             } catch {
@@ -6025,6 +6072,7 @@ async function buildPaymentFollowupReport(
         { buckets: Record<PaymentFollowupAgingBucket, number>; oldestRef: string; oldestDays: number; oldestBucket: PaymentFollowupAgingBucket }
     >();
     const customerIdSetForLedger = new Set(customerIds);
+    const ledgerItemsByCustomerId = new Map<number, Array<{ amount: number; referenceDate: string; daysOverdue: number; bucket: PaymentFollowupAgingBucket }>>();
     for (const line of ledgerLines) {
         const partnerId = getRelationalId(line.partner_id);
         const customerId = partnerId ? ledgerCommercialByPartnerId.get(partnerId) : undefined;
@@ -6041,13 +6089,39 @@ async function buildPaymentFollowupReport(
         const amount = toHomeAmount(Number(line.amount_residual ?? line.balance ?? 0), getRelationalId(line.company_currency_id));
 
         ensureRow(customerId);
-        const entry = ledgerByCustomerId.get(customerId) ?? { buckets: emptyAgingTotals(), oldestRef: "", oldestDays: 0, oldestBucket: "notDue" as PaymentFollowupAgingBucket };
-        entry.buckets[bucket] += amount;
-        // The oldest still-owed charge is what the customer's badge reports.
-        if (amount > 0 && (!entry.oldestRef || referenceDate < entry.oldestRef)) {
-            entry.oldestRef = referenceDate;
-            entry.oldestDays = daysOverdue;
-            entry.oldestBucket = bucket;
+        const items = ledgerItemsByCustomerId.get(customerId) ?? [];
+        items.push({ amount, referenceDate, daysOverdue, bucket });
+        ledgerItemsByCustomerId.set(customerId, items);
+    }
+
+    // Credits (payments, credit notes, bills) are spent on the oldest charges first, then the
+    // next oldest, and so on; each charge is aged by its own date, so what is left in a bucket
+    // is what is genuinely still owed there. Credit beyond all the charges stays negative in
+    // the bucket of the newest credit.
+    for (const [customerId, items] of ledgerItemsByCustomerId) {
+        const entry = { buckets: emptyAgingTotals(), oldestRef: "", oldestDays: 0, oldestBucket: "notDue" as PaymentFollowupAgingBucket };
+        const charges = items
+            .filter((item) => item.amount > 0)
+            .sort((a, b) => (a.referenceDate < b.referenceDate ? -1 : a.referenceDate > b.referenceDate ? 1 : 0));
+        const credits = items.filter((item) => item.amount < 0);
+        let remainingCredit = credits.reduce((total, item) => total - item.amount, 0);
+
+        for (const charge of charges) {
+            const applied = Math.min(remainingCredit, charge.amount);
+            remainingCredit = Number((remainingCredit - applied).toFixed(2));
+            const left = Number((charge.amount - applied).toFixed(2));
+            if (left <= 0) continue;
+            entry.buckets[charge.bucket] += left;
+            // The oldest still-owed charge is what the customer's badge reports.
+            if (!entry.oldestRef || charge.referenceDate < entry.oldestRef) {
+                entry.oldestRef = charge.referenceDate;
+                entry.oldestDays = charge.daysOverdue;
+                entry.oldestBucket = charge.bucket;
+            }
+        }
+        if (remainingCredit > 0.004 && credits.length > 0) {
+            const newestCredit = credits.reduce((latest, item) => (item.referenceDate > latest.referenceDate ? item : latest));
+            entry.buckets[newestCredit.bucket] -= remainingCredit;
         }
         ledgerByCustomerId.set(customerId, entry);
     }

@@ -8,6 +8,7 @@ export async function POST(request: Request) {
         const companyIds = await getCompanyIdsFromRequest(request);
         const body = (await request.json().catch(() => ({}))) as {
             query?: string;
+            queries?: string[];
             limit?: number;
             offset?: number;
             filters?: SalesStockFilters;
@@ -17,7 +18,7 @@ export async function POST(request: Request) {
         const query = typeof body.query === "string" ? body.query : "";
 
         const result = await runWithCompanyIds(companyIds, () =>
-            searchSalesStock(credentials, { query, limit, offset, filters: body.filters })
+            searchSalesStock(credentials, { query, queries: Array.isArray(body.queries) ? body.queries.filter((term): term is string => typeof term === "string") : undefined, limit, offset, filters: body.filters })
         );
 
         return NextResponse.json({

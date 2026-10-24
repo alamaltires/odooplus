@@ -38,7 +38,9 @@ import {
 import { Select2, type Select2Option } from "@/components/select2";
 
 const MIN_SEARCH_QUERY_LENGTH = 2;
-const PAGE_SIZES = [20, 30, 50, 100];
+/** 0 = show every matching line on one page (capped at ALL_LIMIT). */
+const PAGE_SIZES = [20, 30, 50, 100, 0];
+const ALL_LIMIT = 2000;
 const DEFAULT_PAGE_SIZE = 30;
 const PAGE_SIZE_STORAGE_KEY = "fast-orders:page-size";
 const CART_STORAGE_KEY = "odoopp:salesCart";
@@ -58,6 +60,25 @@ type CartLine = {
 };
 
 type ViewMode = "cards" | "list";
+type GroupBy = "category" | "product" | "lot" | "company" | "brand";
+
+const GROUP_BY_OPTIONS: Array<{ value: GroupBy; label: string }> = [
+    { value: "category", label: "Category" },
+    { value: "product", label: "Product" },
+    { value: "lot", label: "Lot" },
+    { value: "company", label: "Company" },
+    { value: "brand", label: "Brand" },
+];
+
+function groupLabelOf(row: SalesStockRow, groupBy: GroupBy) {
+    const value =
+        groupBy === "category" ? row.categoryName
+        : groupBy === "product" ? row.productName
+        : groupBy === "lot" ? row.lotName
+        : groupBy === "company" ? row.companyName
+        : row.brand;
+    return value.trim() || "Not set";
+}
 
 type SmartFilterValues = {
     category: string;
@@ -223,9 +244,29 @@ export function SalesStockBrowser({
         writeStorage(VIEW_STORAGE_KEY, next);
     }
 
-    const trimmed = query.trim();
+    // The search box holds tags (comma-separated in `query`) plus the term being typed;
+    // a product matching any of them is listed.
+    const [draft, setDraft] = useState("");
+    const tags = useMemo(() => query.split(",").map((tag) => tag.trim()).filter(Boolean), [query]);
+    const terms = useMemo(
+        () => [...tags, draft.trim()].filter((term) => term.length >= MIN_SEARCH_QUERY_LENGTH),
+        [tags, draft]
+    );
+    const termsKey = terms.join("\u0001");
+    const trimmed = termsKey;
     const activeSmartCount = Object.values(smartApplied).filter(Boolean).length;
-    const canSearch = trimmed.length >= MIN_SEARCH_QUERY_LENGTH || activeSmartCount > 0;
+    const canSearch = terms.length > 0 || activeSmartCount > 0;
+
+    function commitDraft() {
+        const value = draft.replace(/,/g, " ").trim();
+        if (!value) return;
+        if (!tags.some((tag) => tag.toLowerCase() === value.toLowerCase())) onQueryChange([...tags, value].join(","));
+        setDraft("");
+    }
+
+    function removeTag(index: number) {
+        onQueryChange(tags.filter((_, position) => position !== index).join(","));
+    }
 
     const smartFilters = useMemo<SalesStockFilters>(() => {
         return {
@@ -273,7 +314,8 @@ export function SalesStockBrowser({
 
     const searchKey = JSON.stringify([trimmed, smartFilters, pageSize]);
     const page = pageState.key === searchKey ? pageState.page : 1;
-    const pageCount = Math.max(1, Math.ceil(totalCount / pageSize));
+    const limitPerPage = pageSize === 0 ? ALL_LIMIT : pageSize;
+    const pageCount = Math.max(1, Math.ceil(totalCount / limitPerPage));
 
     useEffect(() => {
         if (!canSearch) {
@@ -297,7 +339,7 @@ export function SalesStockBrowser({
             }
             setLoading(true);
             setError(null);
-            searchSalesStock({ query: trimmed, limit: pageSize, offset: (page - 1) * pageSize, filters: smartFilters })
+            searchSalesStock({ query: "", queries: terms, limit: limitPerPage, offset: (page - 1) * limitPerPage, filters: smartFilters })
                 .then((data) => {
                     if (stale) return;
                     searchCache.set(cacheKey, data);
@@ -314,11 +356,12 @@ export function SalesStockBrowser({
                 .finally(() => {
                     if (!stale) setLoading(false);
                 });
-        }, cachedAnswer || page > 1 ? 0 : 180);
+        }, cachedAnswer || page > 1 ? 0 : 120);
         return () => {
             stale = true;
             window.clearTimeout(debounceId);
         };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [trimmed, canSearch, smartFilters, searchKey, page, pageSize]);
 
     useEffect(() => {
@@ -533,7 +576,62 @@ export function SalesStockBrowser({
             } as SalesStockRow,
         }));
     }, [rows]);
+    // An optional outer grouping (on the rows of the current page); the product/lot -> locations fold stays inside it.
+    // Several levels can be picked; they nest in the order they were chosen.
+    const [groupBy, setGroupBy] = useState<GroupBy[]>([]);
+    const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+    type DisplayEntry =
+        | { kind: "header"; key: string; label: string; depth: number; count: number; available: number }
+        | { kind: "group"; group: (typeof groups)[number] };
+    const displayItems = useMemo<DisplayEntry[]>(() => {
+        const entries: DisplayEntry[] = [];
+        const build = (items: typeof groups, level: number, parentKey: string) => {
+            if (level >= groupBy.length) {
+                entries.push(...items.map((group) => ({ kind: "group" as const, group })));
+                return;
+            }
+            const bySection = new Map<string, typeof groups>();
+            for (const group of items) {
+                const label = groupLabelOf(group.rows[0], groupBy[level]);
+                const list = bySection.get(label);
+                if (list) list.push(group);
+                else bySection.set(label, [group]);
+            }
+            for (const [label, subItems] of Array.from(bySection).sort((x, y) => x[0].localeCompare(y[0]))) {
+                const key = `${parentKey}/${groupBy[level]}:${label}`;
+                entries.push({
+                    kind: "header",
+                    key,
+                    label,
+                    depth: level,
+                    count: subItems.length,
+                    available: subItems.reduce((total, item) => total + item.summary.availableQty, 0),
+                });
+                if (!collapsedSections.has(key)) build(subItems, level + 1, key);
+            }
+        };
+        build(groups, 0, "");
+        return entries;
+    }, [groups, groupBy, collapsedSections]);
+    const toggleSection = (key: string) =>
+        setCollapsedSections((current) => {
+            const next = new Set(current);
+            if (next.has(key)) next.delete(key);
+            else next.add(key);
+            return next;
+        });
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
+    const foldedKeys = useMemo(() => groups.filter((group) => group.rows.length > 1).map((group) => group.key), [groups]);
+    const sectionKeys = useMemo(
+        () => displayItems.filter((entry): entry is Extract<DisplayEntry, { kind: "header" }> => entry.kind === "header").map((entry) => entry.key),
+        [displayItems]
+    );
+    const canFold = foldedKeys.length > 0 || sectionKeys.length > 0;
+    // Expand/collapse every section and every multi-location line at once.
+    const setAllOpen = (open: boolean) => {
+        setCollapsedSections(open ? new Set() : new Set(sectionKeys));
+        setExpanded(open ? new Set(foldedKeys) : new Set());
+    };
     const toggleGroup = (key: string) =>
         setExpanded((current) => {
             const next = new Set(current);
@@ -663,14 +761,103 @@ export function SalesStockBrowser({
             <div className="flex flex-col gap-3 rounded-2xl border border-(--line) bg-(--card) p-5 sm:flex-row sm:items-center">
                 <div className="relative flex-1">
                     <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-(--ink-soft)" aria-hidden="true" />
-                    <input
-                        value={query}
-                        onChange={(event) => onQueryChange(event.target.value)}
-                        aria-label="Search by size, brand, pattern, or SKU"
-                        className="w-full rounded-xl border border-(--line) bg-white py-2.5 pl-10 pr-3"
-                    />
-                    {query ? null : <TypingPlaceholder />}
+                    <div className="flex min-h-11 w-full flex-wrap items-center gap-1.5 rounded-xl border border-(--line) bg-white py-1.5 pl-10 pr-3">
+                        {tags.map((tag, index) => (
+                            <span key={tag} className="inline-flex items-center gap-1 rounded-full bg-(--chip) py-1 pl-3 pr-1.5 text-sm font-medium">
+                                {tag}
+                                <button
+                                    type="button"
+                                    onClick={() => removeTag(index)}
+                                    aria-label={`Remove ${tag}`}
+                                    className="flex h-5 w-5 items-center justify-center rounded-full text-(--ink-soft) hover:bg-white hover:text-(--brand)"
+                                >
+                                    ×
+                                </button>
+                            </span>
+                        ))}
+                        <input
+                            value={draft}
+                            onChange={(event) => {
+                                const value = event.target.value;
+                                if (value.includes(",")) {
+                                    const parts = value.split(",");
+                                    const added = parts.slice(0, -1).map((part) => part.trim()).filter(Boolean);
+                                    const next = [...tags];
+                                    for (const part of added) if (!next.some((tag) => tag.toLowerCase() === part.toLowerCase())) next.push(part);
+                                    onQueryChange(next.join(","));
+                                    setDraft(parts[parts.length - 1]);
+                                } else {
+                                    setDraft(value);
+                                }
+                            }}
+                            onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    commitDraft();
+                                } else if (event.key === "Backspace" && !draft && tags.length > 0) {
+                                    removeTag(tags.length - 1);
+                                }
+                            }}
+                            aria-label="Search by size, brand, pattern, or SKU. Press Enter to add another search."
+                            className="min-w-40 flex-1 bg-transparent py-1 outline-none"
+                        />
+                    </div>
+                    {query || draft ? null : <TypingPlaceholder />}
                 </div>
+                <details className="relative shrink-0">
+                    <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl border border-(--line) bg-white px-3 py-2.5 text-sm">
+                        <span className="text-(--ink-soft)">Group by</span>
+                        <span className="font-medium">
+                            {groupBy.length === 0 ? "None" : groupBy.map((value) => GROUP_BY_OPTIONS.find((option) => option.value === value)?.label).join(" › ")}
+                        </span>
+                        <ChevronDown className="h-4 w-4 text-(--ink-soft)" aria-hidden="true" />
+                    </summary>
+                    <div className="absolute right-0 z-20 mt-1 w-56 rounded-xl border border-(--line) bg-white p-2 shadow-lg">
+                        {GROUP_BY_OPTIONS.map((option) => {
+                            const position = groupBy.indexOf(option.value);
+                            return (
+                                <label key={option.value} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-(--chip)">
+                                    <input
+                                        type="checkbox"
+                                        checked={position >= 0}
+                                        onChange={() => {
+                                            setGroupBy((current) =>
+                                                current.includes(option.value) ? current.filter((value) => value !== option.value) : [...current, option.value]
+                                            );
+                                            setCollapsedSections(new Set());
+                                        }}
+                                    />
+                                    <span className="flex-1">{option.label}</span>
+                                    {position >= 0 ? <span className="text-xs text-(--ink-soft)">{position + 1}</span> : null}
+                                </label>
+                            );
+                        })}
+                        {groupBy.length > 0 ? (
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setGroupBy([]);
+                                    setCollapsedSections(new Set());
+                                }}
+                                className="mt-1 w-full rounded-lg px-2 py-1.5 text-left text-sm text-(--brand) hover:bg-(--chip)"
+                            >
+                                Clear grouping
+                            </button>
+                        ) : null}
+                    </div>
+                </details>
+                {canFold ? (
+                    <div className="inline-flex shrink-0 overflow-hidden rounded-xl border border-(--line) bg-white" role="group" aria-label="Fold">
+                        <button type="button" onClick={() => setAllOpen(true)} className="inline-flex items-center gap-1.5 px-3 py-2 text-sm text-(--ink-soft) hover:bg-(--chip)">
+                            <ChevronsUpDown className="h-4 w-4" aria-hidden="true" />
+                            Expand all
+                        </button>
+                        <button type="button" onClick={() => setAllOpen(false)} className="inline-flex items-center gap-1.5 border-l border-(--line) px-3 py-2 text-sm text-(--ink-soft) hover:bg-(--chip)">
+                            <ChevronsDownUp className="h-4 w-4" aria-hidden="true" />
+                            Collapse all
+                        </button>
+                    </div>
+                ) : null}
                 <div className="inline-flex shrink-0 overflow-hidden rounded-xl border border-(--line) bg-white" role="group" aria-label="View">
                     <button
                         type="button"
@@ -773,7 +960,7 @@ export function SalesStockBrowser({
             ) : rows.length === 0 && !error ? (
                 <div className="rounded-2xl border border-dashed border-(--line) bg-(--card) p-8 text-center">
                     <Package className="mx-auto h-8 w-8 text-(--ink-soft)" aria-hidden="true" />
-                    <p className="mt-3 text-sm font-medium">No stock matched &ldquo;{trimmed}&rdquo;.</p>
+                    <p className="mt-3 text-sm font-medium">No stock matched &ldquo;{terms.join(", ")}&rdquo;.</p>
                     <p className="mt-1 text-sm text-(--ink-soft)">Can&rsquo;t find it? Send a request for what&rsquo;s missing:</p>
                     <div className="mt-4 flex flex-wrap justify-center gap-2">
                         {(
@@ -800,7 +987,7 @@ export function SalesStockBrowser({
                 <div className={`space-y-4 transition-opacity duration-200 ${loading ? "pointer-events-none opacity-60" : ""}`}>
                     <div className="flex flex-wrap items-center justify-between gap-3">
                         <p className="text-xs text-(--ink-soft)">
-                            Showing {(page - 1) * pageSize + 1}&ndash;{(page - 1) * pageSize + rows.length} of {totalCount} stock line{totalCount === 1 ? "" : "s"}.
+                            Showing {(page - 1) * limitPerPage + 1}&ndash;{(page - 1) * limitPerPage + rows.length} of {totalCount} stock line{totalCount === 1 ? "" : "s"}.
                         </p>
                         <div className="flex flex-wrap items-center justify-end gap-3 text-xs">
                             <label className="inline-flex items-center gap-2 text-(--ink-soft)">
@@ -812,7 +999,7 @@ export function SalesStockBrowser({
                                 >
                                     {PAGE_SIZES.map((size) => (
                                         <option key={size} value={size}>
-                                            {size}
+                                            {size === 0 ? "All" : size}
                                         </option>
                                     ))}
                                 </select>
@@ -873,7 +1060,28 @@ export function SalesStockBrowser({
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {groups.map((group) => {
+                                    {displayItems.map((entry) => {
+                                        if (entry.kind === "header") {
+                                            return (
+                                                <tr
+                                                    key={entry.key}
+                                                    onClick={() => toggleSection(entry.key)}
+                                                    className="cursor-pointer bg-(--chip) hover:bg-(--chip)/70"
+                                                    aria-expanded={!collapsedSections.has(entry.key)}
+                                                >
+                                                    <td colSpan={columns.length + 2} className="border border-(--line) px-3 py-2 text-sm" style={{ paddingLeft: 12 + entry.depth * 24 }}>
+                                                        <span className="inline-flex items-center gap-2">
+                                                            <ChevronDown className={`h-4 w-4 text-(--ink-soft) transition ${collapsedSections.has(entry.key) ? "-rotate-90" : ""}`} aria-hidden="true" />
+                                                            <span className="font-semibold">{entry.label}</span>
+                                                            <span className="text-(--ink-soft)">
+                                                                · {entry.count} {entry.count === 1 ? "line" : "lines"} · {formatQty(entry.available)} available
+                                                            </span>
+                                                        </span>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        }
+                                        const group = entry.group;
                                         const renderRow = (row: SalesStockRow, mode: "single" | "parent" | "child") => (
                                             <tr
                                                 key={mode === "parent" ? `group-${group.key}` : row.id}
@@ -942,7 +1150,26 @@ export function SalesStockBrowser({
                         </div>
                     ) : (
                         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                            {groups.map((group) => {
+                            {displayItems.map((entry) => {
+                                if (entry.kind === "header") {
+                                    return (
+                                        <button
+                                            key={entry.key}
+                                            type="button"
+                                            onClick={() => toggleSection(entry.key)}
+                                            aria-expanded={!collapsedSections.has(entry.key)}
+                                            className="col-span-full flex items-center gap-2 rounded-xl border border-(--line) bg-(--chip) px-4 py-2 text-left text-sm"
+                                            style={{ marginLeft: entry.depth * 20 }}
+                                        >
+                                            <ChevronDown className={`h-4 w-4 text-(--ink-soft) transition ${collapsedSections.has(entry.key) ? "-rotate-90" : ""}`} aria-hidden="true" />
+                                            <span className="font-semibold">{entry.label}</span>
+                                            <span className="text-(--ink-soft)">
+                                                · {entry.count} {entry.count === 1 ? "line" : "lines"} · {formatQty(entry.available)} available
+                                            </span>
+                                        </button>
+                                    );
+                                }
+                                const group = entry.group;
                                 const row = group.rows.length > 1 ? group.summary : group.rows[0];
                                 const folded = group.rows.length > 1;
                                 return (

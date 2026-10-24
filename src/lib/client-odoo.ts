@@ -336,7 +336,7 @@ export function getLotNames() {
     return post<{ lots: string[] }>("/api/odoo/lot-names", {});
 }
 
-export function searchSalesStock(input: { query: string; limit?: number; offset?: number; filters?: SalesStockFilters }) {
+export function searchSalesStock(input: { query: string; queries?: string[]; limit?: number; offset?: number; filters?: SalesStockFilters }) {
     return post<{
         rows: SalesStockRow[];
         totalCount: number;
