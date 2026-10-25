@@ -5,7 +5,7 @@ import { getAuth } from "firebase/auth";
 import { ChevronDown, Pencil, Shield, Trash2, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { getOdooSettings, saveOdooSettings } from "@/lib/firestore-settings";
-import { getCustomerTags, getPoTrackingPasswordStatus, getSalesTeams, getSystemOdooSettings, savePoTrackingPassword, saveSystemOdooSettings } from "@/lib/client-odoo";
+import { getCustomerTags, getPricelists, getPoTrackingPasswordStatus, getSalesTeams, getSystemOdooSettings, savePoTrackingPassword, saveSystemOdooSettings } from "@/lib/client-odoo";
 import { OdooUserCredentials } from "@/types/odoo";
 import { APP_DEFINITIONS, defaultAppHrefsForRole } from "@/lib/app-permissions";
 import { Select2, type Select2Option } from "@/components/select2";
@@ -34,7 +34,7 @@ const ROLE_OPTIONS: Select2Option[] = [
     { value: "admin", label: "Admin" },
 ];
 
-type UserRow = { id: string; email: string; role: Role; createdAt: string | null; enabledApps: string[] | null; salesTeamId: number | null; customerTags: { all: boolean; ids: number[] } | null };
+type UserRow = { id: string; email: string; role: Role; createdAt: string | null; enabledApps: string[] | null; salesTeamId: number | null; customerTags: { all: boolean; ids: number[] } | null; allowedPricelistIds: number[] | null };
 type CustomerTag = { id: number; name: string };
 
 const initialState: OdooUserCredentials = {
@@ -79,6 +79,10 @@ export default function SettingsPage() {
     const [tagsError, setTagsError] = useState<string | null>(null);
     const [tagsAll, setTagsAll] = useState(false);
     const [tagIds, setTagIds] = useState<number[]>([]);
+    const [pricelistOptions, setPricelistOptions] = useState<CustomerTag[]>([]);
+    const [pricelistsLoading, setPricelistsLoading] = useState(false);
+    const [pricelistsError, setPricelistsError] = useState<string | null>(null);
+    const [allowedPricelistIds, setAllowedPricelistIds] = useState<number[]>([]);
     const [salesTeams, setSalesTeams] = useState<Array<{ id: number; name: string }>>([]);
     const [salesTeamsLoading, setSalesTeamsLoading] = useState(false);
     const [salesTeamsError, setSalesTeamsError] = useState<string | null>(null);
@@ -280,6 +284,13 @@ export default function SettingsPage() {
         setPermissionsSalesTeamId(target.salesTeamId ? String(target.salesTeamId) : "");
         setTagsAll(target.customerTags?.all === true);
         setTagIds(target.customerTags?.ids ?? []);
+        setAllowedPricelistIds(target.allowedPricelistIds ?? []);
+        setPricelistsLoading(true);
+        setPricelistsError(null);
+        getPricelists({ all: true })
+            .then((data) => setPricelistOptions(data.pricelists.map((list) => ({ id: list.id, name: list.currency ? `${list.name} (${list.currency})` : list.name }))))
+            .catch((loadError) => setPricelistsError(loadError instanceof Error ? loadError.message : "Failed to load pricelists."))
+            .finally(() => setPricelistsLoading(false));
         setTagsLoading(true);
         setTagsError(null);
         getCustomerTags()
@@ -328,6 +339,7 @@ export default function SettingsPage() {
                 body: JSON.stringify({
                     enabledApps,
                     customerTags: tagsAll ? { all: true } : tagIds.length > 0 ? { ids: tagIds } : null,
+                    allowedPricelistIds: allowedPricelistIds.length > 0 ? allowedPricelistIds : null,
                     ...(permissionsUser.role === "sales_manager"
                         ? { salesTeamId: permissionsSalesTeamId ? Number(permissionsSalesTeamId) : null }
                         : {}),
@@ -692,6 +704,11 @@ export default function SettingsPage() {
                     onTagsAll={setTagsAll}
                     tagIds={tagIds}
                     onTagIds={setTagIds}
+                    pricelists={pricelistOptions}
+                    pricelistsLoading={pricelistsLoading}
+                    pricelistsError={pricelistsError}
+                    allowedPricelistIds={allowedPricelistIds}
+                    onAllowedPricelistIds={setAllowedPricelistIds}
                     salesTeamId={permissionsSalesTeamId}
                     onSalesTeamChange={setPermissionsSalesTeamId}
                     salesTeams={salesTeams}
@@ -791,6 +808,11 @@ function PermissionsModal({
     onTagsAll,
     tagIds,
     onTagIds,
+    pricelists,
+    pricelistsLoading,
+    pricelistsError,
+    allowedPricelistIds,
+    onAllowedPricelistIds,
     salesTeamId,
     onSalesTeamChange,
     salesTeams,
@@ -812,6 +834,11 @@ function PermissionsModal({
     onTagsAll: (value: boolean) => void;
     tagIds: number[];
     onTagIds: (value: number[]) => void;
+    pricelists: CustomerTag[];
+    pricelistsLoading: boolean;
+    pricelistsError: string | null;
+    allowedPricelistIds: number[];
+    onAllowedPricelistIds: (value: number[]) => void;
     salesTeamId: string;
     onSalesTeamChange: (value: string) => void;
     salesTeams: Array<{ id: number; name: string }>;
@@ -867,6 +894,21 @@ function PermissionsModal({
                 onSelected={onTagIds}
             />
 
+            <TagMultiSelect
+                label="Allowed pricelists"
+                allLabel="All pricelists"
+                defaultLabel="All pricelists (no limit)"
+                noun="pricelists"
+                hideAll
+                tags={pricelists}
+                loading={pricelistsLoading}
+                error={pricelistsError}
+                all={false}
+                onAll={() => undefined}
+                selected={allowedPricelistIds}
+                onSelected={onAllowedPricelistIds}
+            />
+
             {target.role === "sales_manager" ? (
                 <div className="mt-4">
                     <span className="mb-1 block text-sm font-medium">Sales Team</span>
@@ -920,7 +962,18 @@ function TagMultiSelect({
     onAll,
     selected,
     onSelected,
+    label = "Customer tags",
+    allLabel = "All customers",
+    defaultLabel = "Default (Customer ACT)",
+    noun = "tags",
+    hideAll = false,
 }: {
+    label?: string;
+    allLabel?: string;
+    defaultLabel?: string;
+    noun?: string;
+    /** No "all" checkbox: an empty selection already means everything. */
+    hideAll?: boolean;
     tags: CustomerTag[];
     loading: boolean;
     error: string | null;
@@ -956,7 +1009,7 @@ function TagMultiSelect({
 
     return (
         <div className="mt-4" ref={rootRef}>
-            <span className="mb-1 block text-sm font-medium">Customer tags</span>
+            <span className="mb-1 block text-sm font-medium">{label}</span>
             <div className="relative">
                 <button
                     type="button"
@@ -966,7 +1019,7 @@ function TagMultiSelect({
                 >
                     <span className="flex min-w-0 flex-wrap gap-1">
                         {all ? (
-                            <span className="rounded-full bg-(--chip) px-2 py-0.5 text-xs font-medium">All customers</span>
+                            <span className="rounded-full bg-(--chip) px-2 py-0.5 text-xs font-medium">{allLabel}</span>
                         ) : selectedTags.length > 0 ? (
                             selectedTags.map((tag) => (
                                 <span key={tag.id} className="rounded-full bg-(--chip) px-2 py-0.5 text-xs font-medium">
@@ -974,29 +1027,31 @@ function TagMultiSelect({
                                 </span>
                             ))
                         ) : (
-                            <span className="text-(--ink-soft)">{loading ? "Loading tags..." : "Default (Customer ACT)"}</span>
+                            <span className="text-(--ink-soft)">{loading ? `Loading ${noun}...` : defaultLabel}</span>
                         )}
                     </span>
                     <ChevronDown className={`h-4 w-4 shrink-0 text-(--ink-soft) transition ${open ? "rotate-180" : ""}`} />
                 </button>
                 {open ? (
                     <div className="absolute z-20 mt-1 w-full rounded-xl border border-(--line) bg-white shadow-lg">
-                        <label className="flex cursor-pointer items-center gap-2.5 border-b border-(--line) px-3 py-2 hover:bg-(--chip)">
-                            <input type="checkbox" checked={all} onChange={(event) => onAll(event.target.checked)} className="h-4 w-4 rounded border-(--line)" />
-                            <span className="text-sm font-medium">All customers (every tag)</span>
-                        </label>
+                        {hideAll ? null : (
+                            <label className="flex cursor-pointer items-center gap-2.5 border-b border-(--line) px-3 py-2 hover:bg-(--chip)">
+                                <input type="checkbox" checked={all} onChange={(event) => onAll(event.target.checked)} className="h-4 w-4 rounded border-(--line)" />
+                                <span className="text-sm font-medium">All customers (every tag)</span>
+                            </label>
+                        )}
                         {all ? null : (
                             <>
                                 <input
                                     value={search}
                                     onChange={(event) => setSearch(event.target.value)}
-                                    placeholder="Search tags..."
+                                    placeholder={`Search ${noun}...`}
                                     className="w-full border-b border-(--line) bg-transparent px-3 py-2 text-sm outline-none"
                                     autoFocus
                                 />
                                 <div className="max-h-52 overflow-y-auto p-1.5">
-                                    {loading ? <p className="px-2 py-1.5 text-sm text-(--ink-soft)">Loading tags...</p> : null}
-                                    {!loading && shown.length === 0 ? <p className="px-2 py-1.5 text-sm text-(--ink-soft)">No tags found.</p> : null}
+                                    {loading ? <p className="px-2 py-1.5 text-sm text-(--ink-soft)">Loading {noun}...</p> : null}
+                                    {!loading && shown.length === 0 ? <p className="px-2 py-1.5 text-sm text-(--ink-soft)">No {noun} found.</p> : null}
                                     {shown.map((tag) => (
                                         <label key={tag.id} className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-1.5 hover:bg-(--chip)">
                                             <input type="checkbox" checked={selected.includes(tag.id)} onChange={() => toggle(tag.id)} className="h-4 w-4 rounded border-(--line)" />
@@ -1015,7 +1070,11 @@ function TagMultiSelect({
                 ) : null}
             </div>
             <p className="mt-1 text-xs text-(--ink-soft)">
-                {all
+                {hideAll
+                    ? selected.length > 0
+                        ? `This user can only use the ${selected.length} selected pricelist${selected.length === 1 ? "" : "s"} in the Price List Request.`
+                        : "Nothing selected: this user can use every pricelist."
+                    : all
                     ? "This user sees all customers."
                     : selected.length > 0
                       ? `This user sees customers with any of the ${selected.length} selected tag${selected.length === 1 ? "" : "s"}.`

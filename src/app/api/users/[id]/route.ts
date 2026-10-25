@@ -40,6 +40,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
             enabledApps?: string[] | null;
             salesTeamId?: number | null;
             customerTags?: { all?: boolean; ids?: number[] } | null;
+            allowedPricelistIds?: number[] | null;
         };
 
         const adminAuth = getAdminAuth();
@@ -99,11 +100,18 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
             firestoreUpdate.customerTagIds = body.customerTags.all === true ? [] : ids;
         }
 
+        if (body.allowedPricelistIds === null) {
+            firestoreUpdate.allowedPricelistIds = FieldValue.delete();
+        } else if (Array.isArray(body.allowedPricelistIds)) {
+            const ids = body.allowedPricelistIds.map(Number).filter((value) => Number.isFinite(value) && value > 0);
+            firestoreUpdate.allowedPricelistIds = ids.length > 0 ? ids : FieldValue.delete();
+        }
+
         await getAdminDb().collection("users").doc(id).set(firestoreUpdate, { merge: true });
 
         const updatedDoc = await getAdminDb().collection("users").doc(id).get();
         const data = updatedDoc.data() as
-            | { email?: string; role?: string; createdAt?: Timestamp; enabledApps?: string[]; salesTeamId?: number; customerTagsAll?: boolean; customerTagIds?: number[] }
+            | { email?: string; role?: string; createdAt?: Timestamp; enabledApps?: string[]; salesTeamId?: number; customerTagsAll?: boolean; customerTagIds?: number[]; allowedPricelistIds?: number[] }
             | undefined;
 
         return NextResponse.json({
@@ -119,6 +127,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
                     : Array.isArray(data?.customerTagIds) && data.customerTagIds.length > 0
                       ? { all: false, ids: data.customerTagIds }
                       : null,
+                allowedPricelistIds: Array.isArray(data?.allowedPricelistIds) && data.allowedPricelistIds.length > 0 ? data.allowedPricelistIds : null,
             },
         });
     } catch (error) {

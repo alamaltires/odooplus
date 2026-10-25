@@ -7,11 +7,11 @@ export async function POST(request: Request) {
     try {
         const { credentials } = await getOdooCredentialsFromRequest(request);
         const companyIds = await getCompanyIdsFromRequest(request);
-        const body = (await request.json().catch(() => ({}))) as { kind?: string; search?: string; limit?: number; offset?: number };
+        const body = (await request.json().catch(() => ({}))) as { kind?: string; status?: string; search?: string; limit?: number; offset?: number };
         const kind = body.kind === "invoices" ? "invoices" : body.kind === "quotations" ? "quotations" : "orders";
 
         const result = await runWithCompanyIds(companyIds, () =>
-            getMyDocuments(credentials, { kind, search: body.search, limit: body.limit, offset: body.offset })
+            getMyDocuments(credentials, { kind, status: body.status === "quotation" || body.status === "confirmed" || body.status === "cancelled" ? body.status : "all", search: body.search, limit: body.limit, offset: body.offset })
         );
         return NextResponse.json(result);
     } catch (error) {

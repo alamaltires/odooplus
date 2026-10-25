@@ -100,3 +100,14 @@ export async function assertCustomerInScope(
         throw new Error("This customer is not assigned to your account.");
     }
 }
+
+/**
+ * The Odoo pricelist ids this user may use in the price list (Settings -> App Permissions), or
+ * null for every pricelist (nothing set). Applies to admins too, once one is set for them.
+ */
+export async function getAllowedPricelistIds(request: Request): Promise<number[] | null> {
+    const userId = await getUserIdFromRequest(request);
+    const data = (await getAdminDb().collection("users").doc(userId).get()).data();
+    const ids = Array.isArray(data?.allowedPricelistIds) ? (data.allowedPricelistIds as unknown[]).map(Number).filter((id) => id > 0) : [];
+    return ids.length > 0 ? ids : null;
+}

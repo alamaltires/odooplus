@@ -1,12 +1,19 @@
 import { NextResponse } from "next/server";
 import { getPricelistOptions, runWithCompanyIds } from "@/lib/server/odoo-client";
-import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
+import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest, getUserRoleFromRequest } from "@/lib/server/auth-helpers";
+import { getAllowedPricelistIds } from "@/lib/server/salesperson-scope";
 
 export async function POST(request: Request) {
     try {
         const { credentials } = await getOdooCredentialsFromRequest(request);
         const companyIds = await getCompanyIdsFromRequest(request);
-        const pricelists = await runWithCompanyIds(companyIds, () => getPricelistOptions(credentials));
+        // The Settings page asks for the full list (admins only) so the limit itself can be edited.
+        const wantsEverything = (await request.clone().json().catch(() => ({})) as { all?: boolean }).all === true && (await getUserRoleFromRequest(request)) === "admin";
+        const [all, allowed] = await Promise.all([
+            runWithCompanyIds(companyIds, () => getPricelistOptions(credentials)),
+            wantsEverything ? Promise.resolve(null) : getAllowedPricelistIds(request),
+        ]);
+        const pricelists = allowed ? all.filter((list) => allowed.includes(list.id)) : all;
         return NextResponse.json({ pricelists });
     } catch (error) {
         return NextResponse.json(

@@ -13126,6 +13126,8 @@ export type MyDocumentRow = {
     currencyCode: string;
     companyName: string;
     isCredit: boolean;
+    /** Odoo's own state code (draft, sent, sale, done, cancel, posted), for colour coding. */
+    stateCode: string;
 };
 
 const SELECTION_LABELS: Record<string, string> = {
@@ -13136,7 +13138,7 @@ const SELECTION_LABELS: Record<string, string> = {
 /** The signed-in user's own sales orders (`kind: "orders"`), quotations (`"quotations"`) or customer invoices (`kind: "invoices"`), newest first. */
 export async function getMyDocuments(
     credentials: OdooCredentials,
-    input: { kind: "orders" | "quotations" | "invoices"; search?: string; limit?: number; offset?: number }
+    input: { kind: "orders" | "quotations" | "invoices"; status?: "all" | "quotation" | "confirmed" | "cancelled"; search?: string; limit?: number; offset?: number }
 ): Promise<{ rows: MyDocumentRow[]; totalCount: number }> {
     const uid = await authenticate(credentials);
     const limit = Number.isFinite(input.limit) ? Math.max(1, Math.min(200, Number(input.limit))) : 30;
@@ -13145,7 +13147,11 @@ export async function getMyDocuments(
     const isOrders = input.kind !== "invoices";
 
     const domain: unknown[] = isOrders
-        ? [["user_id", "=", uid], ["state", "in", input.kind === "quotations" ? ["draft", "sent", "cancel"] : ["sale", "done"]]]
+        ? [
+              ["user_id", "=", uid],
+              // Quotations and orders share one list; `status` narrows it.
+              ["state", "in", input.status === "quotation" ? ["draft", "sent"] : input.status === "confirmed" ? ["sale", "done"] : input.status === "cancelled" ? ["cancel"] : ["draft", "sent", "sale", "done", "cancel"]],
+          ]
         : [["invoice_user_id", "=", uid], ["move_type", "in", ["out_invoice", "out_refund"]], ["state", "=", "posted"]];
     if (search) {
         domain.push("|", ["name", "ilike", search], ["partner_id", "ilike", search]);
@@ -13182,7 +13188,108 @@ export async function getMyDocuments(
             currencyCode: getRelationalName(record.currency_id),
             companyName: getRelationalName(record.company_id),
             isCredit: record.move_type === "out_refund",
+            stateCode: state,
         };
     });
     return { rows, totalCount };
+}
+
+export type MyOrderDetails = {
+    id: number;
+    name: string;
+    state: string;
+    stateCode: string;
+    customer: string;
+    date: string;
+    validUntil: string;
+    salesperson: string;
+    team: string;
+    customerRef: string;
+    paymentTerms: string;
+    pricelist: string;
+    companyName: string;
+    currencyCode: string;
+    amountUntaxed: number;
+    amountTax: number;
+    amountTotal: number;
+    note: string;
+    lines: Array<{
+        id: number;
+        kind: "product" | "section" | "note";
+        productName: string;
+        description: string;
+        quantity: number;
+        delivered: number | null;
+        invoiced: number | null;
+        priceUnit: number;
+        discount: number;
+        subtotal: number;
+        total: number;
+    }>;
+};
+
+/** One of the signed-in user's own quotations / sales orders, with its lines. Orders of other salespeople are refused. */
+export async function getMyOrderDetails(credentials: OdooCredentials, orderId: number): Promise<MyOrderDetails> {
+    const uid = await authenticate(credentials);
+    if (!Number.isFinite(orderId) || orderId <= 0) throw new Error("Invalid order.");
+
+    const [orderMeta, lineMeta] = await Promise.all([
+        getModelFieldsMeta(credentials, uid, "sale.order"),
+        getModelFieldsMeta(credentials, uid, "sale.order.line"),
+    ]);
+    const only = (meta: Record<string, OdooFieldMeta>, names: string[]) => names.filter((name) => meta[name]);
+
+    const [order] = await executeKw<Array<Record<string, unknown>>>(credentials, uid, "sale.order", "search_read", [[["id", "=", orderId], ["user_id", "=", uid]]], {
+        fields: only(orderMeta, [
+            "name", "state", "partner_id", "date_order", "validity_date", "user_id", "team_id", "client_order_ref", "payment_term_id",
+            "pricelist_id", "company_id", "currency_id", "amount_untaxed", "amount_tax", "amount_total", "note",
+        ]),
+        limit: 1,
+    });
+    if (!order) throw new Error("This order was not found, or it belongs to another salesperson.");
+
+    const lines = await executeKw<Array<Record<string, unknown>>>(credentials, uid, "sale.order.line", "search_read", [[["order_id", "=", orderId]]], {
+        fields: only(lineMeta, [
+            "display_type", "product_id", "name", "product_uom_qty", "qty_delivered", "qty_invoiced", "price_unit", "discount", "price_subtotal", "price_total", "sequence",
+        ]),
+        order: "sequence asc, id asc",
+    });
+
+    const state = toDisplayString(order.state);
+    return {
+        id: orderId,
+        name: toDisplayString(order.name),
+        state: SELECTION_LABELS[state] ?? state,
+        stateCode: state,
+        customer: getRelationalName(order.partner_id),
+        date: normalizeOdooDate(order.date_order),
+        validUntil: normalizeOdooDate(order.validity_date),
+        salesperson: getRelationalName(order.user_id),
+        team: getRelationalName(order.team_id),
+        customerRef: toDisplayString(order.client_order_ref),
+        paymentTerms: getRelationalName(order.payment_term_id),
+        pricelist: getRelationalName(order.pricelist_id),
+        companyName: getRelationalName(order.company_id),
+        currencyCode: getRelationalName(order.currency_id),
+        amountUntaxed: Number(order.amount_untaxed ?? 0),
+        amountTax: Number(order.amount_tax ?? 0),
+        amountTotal: Number(order.amount_total ?? 0),
+        note: toDisplayString(order.note).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
+        lines: lines.map((line) => {
+            const displayType = toDisplayString(line.display_type);
+            return {
+                id: Number(line.id),
+                kind: displayType === "line_section" ? "section" : displayType === "line_note" ? "note" : "product",
+                productName: getRelationalName(line.product_id),
+                description: toDisplayString(line.name),
+                quantity: Number(line.product_uom_qty ?? 0),
+                delivered: line.qty_delivered === undefined ? null : Number(line.qty_delivered),
+                invoiced: line.qty_invoiced === undefined ? null : Number(line.qty_invoiced),
+                priceUnit: Number(line.price_unit ?? 0),
+                discount: Number(line.discount ?? 0),
+                subtotal: Number(line.price_subtotal ?? 0),
+                total: Number(line.price_total ?? 0),
+            };
+        }),
+    };
 }

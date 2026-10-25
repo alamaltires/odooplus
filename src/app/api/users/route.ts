@@ -47,6 +47,7 @@ export async function GET(request: Request) {
                 salesTeamId?: number;
                 customerTagsAll?: boolean;
                 customerTagIds?: number[];
+                allowedPricelistIds?: number[];
             } | undefined])
         );
 
@@ -104,6 +105,7 @@ export async function GET(request: Request) {
                             : Array.isArray(profile?.customerTagIds) && profile.customerTagIds.length > 0
                               ? { all: false, ids: profile.customerTagIds as number[] }
                               : null,
+                    allowedPricelistIds: Array.isArray(profile?.allowedPricelistIds) && profile.allowedPricelistIds.length > 0 ? profile.allowedPricelistIds : null,
                 };
             })
             .sort((left, right) => left.email.localeCompare(right.email));

@@ -1060,8 +1060,8 @@ export type PriceListResponse = {
     };
 };
 
-export function getPricelists() {
-    return post<{ pricelists: PricelistOption[] }>("/api/odoo/pricelists", {});
+export function getPricelists(options?: { all?: boolean }) {
+    return post<{ pricelists: PricelistOption[] }>("/api/odoo/pricelists", { all: options?.all === true });
 }
 
 export type PriceListFilterOptions = {
@@ -1131,8 +1131,47 @@ export type MyDocumentRow = {
     currencyCode: string;
     companyName: string;
     isCredit: boolean;
+    stateCode: string;
 };
 
-export function getMyDocuments(input: { kind: "orders" | "quotations" | "invoices"; search?: string; limit?: number; offset?: number }) {
+export function getMyDocuments(input: { kind: "orders" | "quotations" | "invoices"; status?: "all" | "quotation" | "confirmed" | "cancelled"; search?: string; limit?: number; offset?: number }) {
     return post<{ rows: MyDocumentRow[]; totalCount: number }>("/api/odoo/my-documents", input);
+}
+
+export type MyOrderDetails = {
+    id: number;
+    name: string;
+    state: string;
+    stateCode: string;
+    customer: string;
+    date: string;
+    validUntil: string;
+    salesperson: string;
+    team: string;
+    customerRef: string;
+    paymentTerms: string;
+    pricelist: string;
+    companyName: string;
+    currencyCode: string;
+    amountUntaxed: number;
+    amountTax: number;
+    amountTotal: number;
+    note: string;
+    lines: Array<{
+        id: number;
+        kind: "product" | "section" | "note";
+        productName: string;
+        description: string;
+        quantity: number;
+        delivered: number | null;
+        invoiced: number | null;
+        priceUnit: number;
+        discount: number;
+        subtotal: number;
+        total: number;
+    }>;
+};
+
+export function getMyOrderDetails(orderId: number) {
+    return post<{ order: MyOrderDetails }>("/api/odoo/my-order", { orderId });
 }

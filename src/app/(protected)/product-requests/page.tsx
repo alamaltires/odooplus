@@ -102,7 +102,7 @@ export default function ProductRequestsPage() {
     const { user, role } = useAuth();
     const isAdmin = role === "admin";
 
-    const [activeTab, setActiveTab] = useState<"search" | "requests" | "pricelist" | "quotations" | "orders" | "invoices">("search");
+    const [activeTab, setActiveTab] = useState<"search" | "requests" | "pricelist" | "orders" | "invoices">("search");
 
     // --- Search state ---
     const [query, setQuery] = useState("");
@@ -295,7 +295,7 @@ export default function ProductRequestsPage() {
                 <PackageSearch className="h-8 w-8 text-(--brand)" aria-hidden="true" />
             </div>
 
-            <div className="mt-6 flex gap-2 border-b border-(--line)">
+            <div className="mt-6 flex gap-2 overflow-x-auto border-b border-(--line)">
                 <button
                     type="button"
                     onClick={() => setActiveTab("search")}
@@ -307,42 +307,6 @@ export default function ProductRequestsPage() {
                 >
                     <Search className="h-4 w-4" aria-hidden="true" />
                     Search &amp; Order
-                </button>
-                <button
-                    type="button"
-                    onClick={() => setActiveTab("requests")}
-                    className={`flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition ${
-                        activeTab === "requests"
-                            ? "border-(--brand) text-(--brand)"
-                            : "border-transparent text-(--ink-soft) hover:text-(--ink)"
-                    }`}
-                >
-                    <ClipboardList className="h-4 w-4" aria-hidden="true" />
-                    {isAdmin ? "All Requests" : "My Requests"}
-                </button>
-                <button
-                    type="button"
-                    onClick={() => setActiveTab("pricelist")}
-                    className={`flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition ${
-                        activeTab === "pricelist"
-                            ? "border-(--brand) text-(--brand)"
-                            : "border-transparent text-(--ink-soft) hover:text-(--ink)"
-                    }`}
-                >
-                    <FileSpreadsheet className="h-4 w-4" aria-hidden="true" />
-                    Price List Request
-                </button>
-                <button
-                    type="button"
-                    onClick={() => setActiveTab("quotations")}
-                    className={`flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition ${
-                        activeTab === "quotations"
-                            ? "border-(--brand) text-(--brand)"
-                            : "border-transparent text-(--ink-soft) hover:text-(--ink)"
-                    }`}
-                >
-                    <ClipboardList className="h-4 w-4" aria-hidden="true" />
-                    My Quotations
                 </button>
                 <button
                     type="button"
@@ -368,6 +332,30 @@ export default function ProductRequestsPage() {
                     <FileText className="h-4 w-4" aria-hidden="true" />
                     My Invoices
                 </button>
+                <button
+                    type="button"
+                    onClick={() => setActiveTab("requests")}
+                    className={`flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition ${
+                        activeTab === "requests"
+                            ? "border-(--brand) text-(--brand)"
+                            : "border-transparent text-(--ink-soft) hover:text-(--ink)"
+                    }`}
+                >
+                    <ClipboardList className="h-4 w-4" aria-hidden="true" />
+                    Product Request
+                </button>
+                <button
+                    type="button"
+                    onClick={() => setActiveTab("pricelist")}
+                    className={`flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition ${
+                        activeTab === "pricelist"
+                            ? "border-(--brand) text-(--brand)"
+                            : "border-transparent text-(--ink-soft) hover:text-(--ink)"
+                    }`}
+                >
+                    <FileSpreadsheet className="h-4 w-4" aria-hidden="true" />
+                    Price List Generator
+                </button>
             </div>
 
             {activeTab === "search" ? (
@@ -379,7 +367,7 @@ export default function ProductRequestsPage() {
                         onRequestFromRow={openRequestPanelFromRow}
                     />
                 </div>
-            ) : activeTab === "quotations" || activeTab === "orders" || activeTab === "invoices" ? (
+            ) : activeTab === "orders" || activeTab === "invoices" ? (
                 <MyDocuments key={activeTab} kind={activeTab} />
             ) : activeTab === "pricelist" ? (
                 <div className="mt-6">
