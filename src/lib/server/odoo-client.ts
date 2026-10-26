@@ -12632,6 +12632,8 @@ async function resolveLotYearAndPattern(credentials: OdooCredentials, uid: numbe
     };
     return {
         lotYear: find(["lot year"]),
+        realCostLot: find(["real cost lot"]),
+        kind: find(["product kind", "kind"]),
         pattern: find(["pattern", "tire pattern", "tread pattern"], "tire.pattern"),
         factoryCode:
             find(["factory code", "factory", "factory no", "factory no.", "factory number", "factory_code"]) ??
@@ -12898,7 +12900,8 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
 
     const resolved = await resolveLotYearAndPattern(credentials, uid);
     const productFields = ["name", "tire_brand", "origin", "product_tmpl_id", "categ_id", "rim_diameter", "x_studio_product_custom_sku", ...(input.includeCost ? ["standard_price"] : [])];
-    for (const hit of [resolved.lotYear, resolved.pattern, resolved.factoryCode]) if (hit?.source === "product") productFields.push(hit.field);
+    const readHits = [resolved.lotYear, resolved.pattern, resolved.factoryCode, ...(input.includeCost ? [resolved.realCostLot, resolved.kind] : [])];
+    for (const hit of readHits) if (hit?.source === "product") productFields.push(hit.field);
     const products = productIds.length > 0
         ? await readInBatches(credentials, uid, "product.product", productIds, Array.from(new Set(productFields.filter((field) => field === "name" || resolved.metas.product[field]))))
         : [];
@@ -12918,7 +12921,7 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
 
     // Prices in this catalogue are mostly per lot, so a row is one product + lot that is on the shelf.
     const quantFields = ["product_id", "lot_id", "quantity", "reserved_quantity"];
-    for (const hit of [resolved.lotYear, resolved.pattern, resolved.factoryCode]) if (hit?.source === "quant") quantFields.push(hit.field);
+    for (const hit of readHits) if (hit?.source === "quant") quantFields.push(hit.field);
     type StockLot = { productId: number; lotId: number | null; lotName: string; quant: Record<string, unknown>; available: number };
     const stockLots = new Map<string, StockLot>();
     for (let start = 0; start < productIds.length; start += 800) {
@@ -12950,7 +12953,7 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
 
     const lotIds = Array.from(new Set(Array.from(stockLots.values()).map((lot) => lot.lotId).filter((id): id is number => Boolean(id))));
     const lotFields = ["name"];
-    for (const hit of [resolved.lotYear, resolved.pattern, resolved.factoryCode]) if (hit?.source === "lot") lotFields.push(hit.field);
+    for (const hit of readHits) if (hit?.source === "lot") lotFields.push(hit.field);
     const lots = lotIds.length > 0
         ? await readInBatches(credentials, uid, "stock.lot", lotIds, Array.from(new Set(lotFields))).catch(() => [] as Array<Record<string, unknown>>)
         : [];
@@ -13075,6 +13078,19 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
         return toDisplayString(normalizeFieldValue(record?.[hit.field], resolved.metas[hit.source][hit.field], "text"));
     };
 
+    // Cost: tyres use the lot's own cost ("Real Cost Lot"); everything else (or a lot without one) the product cost.
+    // "Tyre" is read from the product kind field when the database has one, otherwise from having a tyre brand.
+    const costOf = (product: Record<string, unknown>, entry: { quant: Record<string, unknown> } | null, lot: Record<string, unknown> | undefined) => {
+        const productCost = Number(product.standard_price ?? 0);
+        const kindText = resolved.kind ? valueOf(resolved.kind, entry?.quant, lot, product).toLowerCase() : "";
+        const isTire = resolved.kind ? /t[iy]re/.test(kindText) : Boolean(getRelationalId(product.tire_brand));
+        if (!isTire || !resolved.realCostLot) return productCost;
+        const hit = resolved.realCostLot;
+        const record = hit.source === "quant" ? entry?.quant : hit.source === "lot" ? lot : product;
+        const lotCost = Number(record?.[hit.field] ?? 0);
+        return Number.isFinite(lotCost) && lotCost > 0 ? lotCost : productCost;
+    };
+
     const stockLotsByProduct = new Map<number, StockLot[]>();
     for (const lot of stockLots.values()) stockLotsByProduct.set(lot.productId, [...(stockLotsByProduct.get(lot.productId) ?? []), lot]);
 
@@ -13118,7 +13134,7 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
                 lotName: entry?.lotName ?? "",
                 lotYear: year,
                 available: Math.max(0, entry?.available ?? 0),
-                ...(input.includeCost ? { cost: Number(product.standard_price ?? 0) } : {}),
+                ...(input.includeCost ? { cost: costOf(product, entry, lot) } : {}),
                 prices,
             });
         }

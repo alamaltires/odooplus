@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, Download, FileSpreadsheet, Plus, Search, ShoppingCart, X } from "lucide-react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { AlertCircle, ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, ChevronRight, Download, FileSpreadsheet, Plus, Search, ShoppingCart, X } from "lucide-react";
 import {
     createSalesQuotation,
     getCustomers,
@@ -482,7 +482,7 @@ export function PriceListRequest() {
         }
     }
 
-    const shownRows = useMemo(() => {
+    const baseRows = useMemo(() => {
         if (!result) return [];
         const query = search.trim().toLowerCase();
         const filtered = query ? result.rows.filter((row) => `${row.searchName} ${row.sku} ${row.factoryCode} ${row.name} ${row.category} ${row.brand} ${row.origin} ${row.pattern} ${row.rim} ${row.lotName} ${row.lotYear}`.toLowerCase().includes(query)) : result.rows;
@@ -516,6 +516,41 @@ export function PriceListRequest() {
             return String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" }) * factor;
         });
     }, [result, search, sort]);
+
+    // Optional grouping (user's choice): rows of one product / brand / lot sit together under a header row.
+    const [groupBy, setGroupBy] = useState<"none" | "product" | "brand" | "lot">("none");
+    const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+    const groupKeyOf = (row: PriceListRow) =>
+        groupBy === "product" ? String(row.productId) : groupBy === "brand" ? row.brand || "No brand" : row.lotName || "No lot";
+    const shownRows = useMemo(() => {
+        if (groupBy === "none") return baseRows;
+        const groups = new Map<string, PriceListRow[]>();
+        for (const row of baseRows) {
+            const key = groupBy === "product" ? String(row.productId) : groupBy === "brand" ? row.brand || "No brand" : row.lotName || "No lot";
+            groups.set(key, [...(groups.get(key) ?? []), row]);
+        }
+        return Array.from(groups.values()).flat();
+    }, [baseRows, groupBy]);
+    const rowsByGroup = useMemo(() => {
+        const groups = new Map<string, PriceListRow[]>();
+        for (const row of shownRows) {
+            const key = groupBy === "product" ? String(row.productId) : groupBy === "brand" ? row.brand || "No brand" : row.lotName || "No lot";
+            groups.set(key, [...(groups.get(key) ?? []), row]);
+        }
+        return groups;
+    }, [shownRows, groupBy]);
+    const toggleGroupSelection = (key: string) => {
+        const rows = rowsByGroup.get(key) ?? [];
+        const allOn = rows.every((row) => selected.has(row.key));
+        setSelected((current) => {
+            const next = new Set(current);
+            for (const row of rows) {
+                if (allOn) next.delete(row.key);
+                else next.add(row.key);
+            }
+            return next;
+        });
+    };
     const pageCount = pageSize === 0 ? 1 : Math.max(1, Math.ceil(shownRows.length / pageSize));
     const currentPage = Math.min(page, pageCount);
     const pageRows = pageSize === 0 ? shownRows : shownRows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
@@ -890,6 +925,33 @@ export function PriceListRequest() {
                             {search.trim() ? " match your search" : ""}.
                         </p>
                         <div className="flex flex-wrap items-center gap-2">
+                            <label className="flex items-center gap-2 text-sm font-medium">
+                                Group by
+                                <select
+                                    value={groupBy}
+                                    onChange={(event) => {
+                                        setGroupBy(event.target.value as typeof groupBy);
+                                        setCollapsedGroups(new Set());
+                                        setPage(1);
+                                    }}
+                                    className="rounded-lg border border-(--line) bg-white px-2.5 py-1.5 text-sm font-normal"
+                                >
+                                    <option value="none">None</option>
+                                    <option value="product">Product</option>
+                                    <option value="brand">Brand</option>
+                                    <option value="lot">Lot</option>
+                                </select>
+                            </label>
+                            {groupBy !== "none" ? (
+                                <>
+                                    <button type="button" onClick={() => setCollapsedGroups(new Set())} className="rounded-lg border border-(--line) bg-white px-3 py-1.5 text-xs font-medium hover:bg-(--chip)">
+                                        Expand all
+                                    </button>
+                                    <button type="button" onClick={() => setCollapsedGroups(new Set(shownRows.map(groupKeyOf)))} className="rounded-lg border border-(--line) bg-white px-3 py-1.5 text-xs font-medium hover:bg-(--chip)">
+                                        Collapse all
+                                    </button>
+                                </>
+                            ) : null}
                             <div className="relative">
                                 <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-(--ink-soft)" aria-hidden="true" />
                                 <input
@@ -1053,8 +1115,57 @@ export function PriceListRequest() {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {pageRows.map((row) => (
-                                        <tr key={row.key} className={`hover:bg-(--chip)/40 ${selected.has(row.key) ? "" : "opacity-60"}`}>
+                                    {pageRows.map((row, index) => {
+                                        const groupKey = groupKeyOf(row);
+                                        const groupRows = rowsByGroup.get(groupKey) ?? [];
+                                        const startsGroup = groupBy !== "none" && (index === 0 || groupKeyOf(pageRows[index - 1]) !== groupKey);
+                                        const collapsed = groupBy !== "none" && collapsedGroups.has(groupKey);
+                                        const productCount = new Set(groupRows.map((item) => item.productId)).size;
+                                        const groupTitle = groupBy === "product" ? row.name : groupBy === "brand" ? row.brand || "No brand" : row.lotName ? lotLabel(row) : "No lot";
+                                        const groupNote =
+                                            groupBy === "product"
+                                                ? `${row.brand ? `${row.brand} · ` : ""}${groupRows.length} lot${groupRows.length === 1 ? "" : "s"}`
+                                                : `${productCount} product${productCount === 1 ? "" : "s"} · ${groupRows.length} line${groupRows.length === 1 ? "" : "s"}`;
+                                        const groupSelected = groupRows.filter((item) => selected.has(item.key)).length;
+                                        return (
+                                        <Fragment key={row.key}>
+                                        {startsGroup ? (
+                                            <tr
+                                                onClick={() =>
+                                                    setCollapsedGroups((current) => {
+                                                        const next = new Set(current);
+                                                        if (next.has(groupKey)) next.delete(groupKey);
+                                                        else next.add(groupKey);
+                                                        return next;
+                                                    })
+                                                }
+                                                className="cursor-pointer bg-(--chip) font-semibold hover:bg-(--chip)/70"
+                                            >
+                                                <td className="border border-(--line) px-3 py-2" onClick={(event) => event.stopPropagation()}>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={groupSelected === groupRows.length}
+                                                        ref={(element) => {
+                                                            if (element) element.indeterminate = groupSelected > 0 && groupSelected < groupRows.length;
+                                                        }}
+                                                        onChange={() => toggleGroupSelection(groupKey)}
+                                                        className="h-4 w-4 rounded border-(--line)"
+                                                        aria-label="Select all rows of this group"
+                                                    />
+                                                </td>
+                                                <td colSpan={10} className="border border-(--line) px-3 py-2">
+                                                    {collapsed ? <ChevronRight className="mr-1 inline h-4 w-4" aria-hidden="true" /> : <ChevronDown className="mr-1 inline h-4 w-4" aria-hidden="true" />}
+                                                    {groupTitle}
+                                                    <span className="ml-2 text-xs font-normal text-(--ink-soft)">{groupNote}</span>
+                                                </td>
+                                                <td className="whitespace-nowrap border border-(--line) px-3 py-2 text-right tabular-nums text-(--accent)">
+                                                    {groupRows.reduce((total, item) => total + item.available, 0).toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                                                </td>
+                                                <td colSpan={(showCost ? 1 : 0) + result.pricelists.length} className="border border-(--line) px-3 py-2" />
+                                            </tr>
+                                        ) : null}
+                                        {collapsed ? null : (
+                                        <tr className={`hover:bg-(--chip)/40 ${selected.has(row.key) ? "" : "opacity-60"}`}>
                                             <td className="border border-(--line)/70 px-3 py-2">
                                                 <input
                                                     type="checkbox"
@@ -1094,7 +1205,10 @@ export function PriceListRequest() {
                                                 </td>
                                             ))}
                                         </tr>
-                                    ))}
+                                        )}
+                                        </Fragment>
+                                        );
+                                    })}
                                 </tbody>
                             </table>
                         </div>
