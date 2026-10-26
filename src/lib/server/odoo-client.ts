@@ -2409,7 +2409,7 @@ export async function searchSalesStock(
     const offset = Number.isFinite(input?.offset) ? Math.max(0, Number(input?.offset)) : 0;
 
     // The search keyword is matched against the template's `second_name`
-    // ("Search Name") only. That field is stored without spaces/slashes
+    // ("Search Name") or its name. The Search Name field is stored without spaces/slashes
     // (e.g. "215/55R17 Austone" -> "2155517Austone"), so each typed word is
     // normalized the same way, and every word must match.
     const productDomainFor = (term: string) => {
@@ -2418,7 +2418,8 @@ export async function searchSalesStock(
             const sizeMatch = token.match(/^(\d{3})\/?(\d{2})\s*[A-Za-z]?\s*(\d{2})$/);
             const keyword = sizeMatch ? `${sizeMatch[1]}${sizeMatch[2]}${sizeMatch[3]}` : token.replace(/[\/\-_.]/g, "");
             if (keyword) {
-                domain.push(["product_tmpl_id.second_name", "ilike", keyword]);
+                // Each word matches the normalized Search Name OR the product's own name.
+                domain.push("|", ["product_tmpl_id.second_name", "ilike", keyword], ["product_tmpl_id.name", "ilike", token]);
             }
         }
         return domain;
@@ -12512,18 +12513,27 @@ export async function getAgedStock(credentials: OdooCredentials, minAgeDays: num
 
 export type PricelistOption = { id: number; name: string; currency: string };
 
-export async function getPricelistOptions(credentials: OdooCredentials): Promise<PricelistOption[]> {
+export async function getPricelistOptions(credentials: OdooCredentials, allowedIds?: number[] | null): Promise<PricelistOption[]> {
     const uid = await authenticate(credentials);
     const activeCompanyIds = companyContextStorage.getStore();
-    // Same scoping as the stock search: the selected companies' lists plus the shared ones.
-    const domain: unknown[] = activeCompanyIds && activeCompanyIds.length > 0
-        ? ["|", ["company_id", "=", false], ["company_id", "in", activeCompanyIds]]
-        : [];
-    const lists = await executeKw<Array<Record<string, unknown>>>(credentials, uid, "product.pricelist", "search_read", [domain], {
-        fields: ["id", "name", "currency_id"],
-        order: "name asc",
-        limit: 200,
-    });
+    const read = (domain: unknown[]) =>
+        executeKw<Array<Record<string, unknown>>>(credentials, uid, "product.pricelist", "search_read", [domain], {
+            fields: ["id", "name", "currency_id"],
+            order: "name asc",
+            limit: 200,
+        });
+    // Lists the user was explicitly allowed are shown whatever company they belong to.
+    // Otherwise: the selected companies' lists plus the shared ones, falling back to every list
+    // when that scoping leaves nothing.
+    let lists: Array<Record<string, unknown>>;
+    if (allowedIds && allowedIds.length > 0) {
+        lists = await read([["id", "in", allowedIds]]);
+    } else {
+        lists = activeCompanyIds && activeCompanyIds.length > 0
+            ? await read(["|", ["company_id", "=", false], ["company_id", "in", activeCompanyIds]])
+            : await read([]);
+        if (lists.length === 0) lists = await read([]);
+    }
     return lists.map((list) => ({
         id: Number(list.id),
         name: toDisplayString(list.name) || `Pricelist #${list.id}`,
@@ -12550,6 +12560,8 @@ export type PriceListInput = {
     searchNames: string[];
     excludeSearchNames: string[];
     pricelistIds: number[];
+    /** Adds the product cost to every row (purchaser / sales manager / admin only). */
+    includeCost?: boolean;
     inStockOnly: boolean;
     onlyPriced: boolean;
     onlyUnpriced?: boolean;
@@ -12571,6 +12583,8 @@ export type PriceListRow = {
     lotYear: string;
     /** On hand minus reserved, summed over the internal locations. */
     available: number;
+    /** Product cost; only filled for users allowed to see it. */
+    cost?: number | null;
     prices: Record<string, number | null>;
 };
 
@@ -12883,7 +12897,7 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
     const productIds = matchedIds.slice(0, PRICE_LIST_MAX_PRODUCTS);
 
     const resolved = await resolveLotYearAndPattern(credentials, uid);
-    const productFields = ["name", "tire_brand", "origin", "product_tmpl_id", "categ_id", "rim_diameter", "x_studio_product_custom_sku"];
+    const productFields = ["name", "tire_brand", "origin", "product_tmpl_id", "categ_id", "rim_diameter", "x_studio_product_custom_sku", ...(input.includeCost ? ["standard_price"] : [])];
     for (const hit of [resolved.lotYear, resolved.pattern, resolved.factoryCode]) if (hit?.source === "product") productFields.push(hit.field);
     const products = productIds.length > 0
         ? await readInBatches(credentials, uid, "product.product", productIds, Array.from(new Set(productFields.filter((field) => field === "name" || resolved.metas.product[field]))))
@@ -13104,6 +13118,7 @@ export async function getPriceListRequest(credentials: OdooCredentials, input: P
                 lotName: entry?.lotName ?? "",
                 lotYear: year,
                 available: Math.max(0, entry?.available ?? 0),
+                ...(input.includeCost ? { cost: Number(product.standard_price ?? 0) } : {}),
                 prices,
             });
         }

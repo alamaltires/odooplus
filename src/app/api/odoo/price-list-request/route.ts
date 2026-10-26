@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getPriceListRequest, runWithCompanyIds, type PriceListInput } from "@/lib/server/odoo-client";
-import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
+import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest, getUserRoleFromRequest } from "@/lib/server/auth-helpers";
 import { getAllowedPricelistIds } from "@/lib/server/salesperson-scope";
 
 export const maxDuration = 120;
@@ -13,6 +13,8 @@ export async function POST(request: Request) {
         // Only the pricelists this user is allowed (Settings -> App Permissions) can be priced.
         const allowedPricelists = await getAllowedPricelistIds(request);
         const pricelistIds = allowedPricelists ? (body.pricelistIds ?? []).filter((id) => allowedPricelists.includes(Number(id))) : body.pricelistIds ?? [];
+        const role = await getUserRoleFromRequest(request);
+        const includeCost = role === "purchase" || role === "sales_manager" || role === "admin";
         const result = await runWithCompanyIds(companyIds, () =>
             getPriceListRequest(credentials, {
                 brandIds: body.brandIds ?? [],
@@ -30,6 +32,7 @@ export async function POST(request: Request) {
                 searchNames: body.searchNames ?? [],
                 excludeSearchNames: body.excludeSearchNames ?? [],
                 pricelistIds,
+                includeCost,
                 inStockOnly: Boolean(body.inStockOnly),
                 onlyPriced: body.onlyPriced === true,
                 onlyUnpriced: body.onlyUnpriced === true,

@@ -105,6 +105,37 @@ function formatCurrency(value: number, currencyCode: string) {
     return `${currencyCode} ${formatNumber(value)}`;
 }
 
+/** Counts up to `value` when it appears or changes. */
+function CountUp({ value, format }: { value: number; format: (value: number) => string }) {
+    const [shown, setShown] = useState(0);
+    useEffect(() => {
+        const start = performance.now();
+        const duration = 700;
+        let frame = 0;
+        const tick = (now: number) => {
+            const progress = Math.min(1, (now - start) / duration);
+            setShown(value * (1 - Math.pow(1 - progress, 3)));
+            if (progress < 1) frame = requestAnimationFrame(tick);
+        };
+        frame = requestAnimationFrame(tick);
+        return () => cancelAnimationFrame(frame);
+    }, [value]);
+    return <>{format(shown)}</>;
+}
+
+/** Progress bar that grows from 0 to `percent`. */
+function BarFill({ percent }: { percent: number }) {
+    const [width, setWidth] = useState(0);
+    useEffect(() => {
+        const frame = requestAnimationFrame(() => setWidth(percent));
+        return () => cancelAnimationFrame(frame);
+    }, [percent]);
+    return <div className="h-full rounded-full bg-(--brand) transition-[width] duration-700 ease-out" style={{ width: `${width}%` }} />;
+}
+
+const CARD_MOTION = "transition duration-200 hover:-translate-y-0.5 hover:shadow-[0_14px_28px_rgba(8,23,41,0.1)]";
+const cardStyle = (index: number) => ({ animation: "dash-rise 0.5s ease-out both", animationDelay: `${index * 60}ms` });
+
 function formatDateTime(value: string) {
     return value ? value.replace("T", " ") : "-";
 }
@@ -179,11 +210,32 @@ export default function ProductsPerformancePage() {
     const [reportLoading, setReportLoading] = useState(false);
     const [reportError, setReportError] = useState<string | null>(null);
 
+    const [cardsByBrand, setCardsByBrand] = useState(false);
+    const [tableByBrand, setTableByBrand] = useState(false);
+    const [collapsedBrands, setCollapsedBrands] = useState<Set<string>>(new Set());
     const [tableSearch, setTableSearch] = useState("");
     const [sortColumn, setSortColumn] = useState<SortColumn>("soldQty");
     const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
     const [expandedProductIds, setExpandedProductIds] = useState<Set<number>>(new Set());
     const [exportLoading, setExportLoading] = useState<"csv" | "xlsx" | null>(null);
+
+    // Totals per brand (sorted by sales value) to compare how the brands perform.
+    const brandStats = useMemo(() => {
+        const byBrand = new Map<string, { brand: string; products: number; soldQty: number; salesValue: number; purchasedQty: number; purchaseValue: number; totalStock: number; stockValue: number }>();
+        for (const row of report?.rows ?? []) {
+            const brand = row.brandName?.trim() || "No brand";
+            const entry = byBrand.get(brand) ?? { brand, products: 0, soldQty: 0, salesValue: 0, purchasedQty: 0, purchaseValue: 0, totalStock: 0, stockValue: 0 };
+            entry.products += 1;
+            entry.soldQty += row.soldQty;
+            entry.salesValue += row.salesValue;
+            entry.purchasedQty += row.purchasedQty;
+            entry.purchaseValue += row.purchaseValue;
+            entry.totalStock += row.totalStock;
+            entry.stockValue += row.stockValue;
+            byBrand.set(brand, entry);
+        }
+        return Array.from(byBrand.values()).sort((a, b) => b.salesValue - a.salesValue || a.brand.localeCompare(b.brand));
+    }, [report]);
 
     useEffect(() => {
         async function loadCategories() {
@@ -424,6 +476,38 @@ export default function ProductsPerformancePage() {
 
         return sortDirection === "asc" ? sorted : sorted.reverse();
     }, [report, sortColumn, sortDirection, tableSearch]);
+
+    // Rows with a header per brand (sorted by sales value) carrying that brand's totals.
+    const tableItems = useMemo(() => {
+        type Row = (typeof filteredSortedRows)[number];
+        type Item =
+            | { type: "row"; row: Row }
+            | { type: "group"; brand: string; rows: Row[]; soldQty: number; salesValue: number; purchasedQty: number; purchaseValue: number; totalStock: number; stockValue: number };
+        if (!tableByBrand) return filteredSortedRows.map((row): Item => ({ type: "row", row }));
+        const groups = new Map<string, Row[]>();
+        for (const row of filteredSortedRows) {
+            const brand = row.brandName?.trim() || "No brand";
+            groups.set(brand, [...(groups.get(brand) ?? []), row]);
+        }
+        const sum = (rows: Row[], key: "soldQty" | "salesValue" | "purchasedQty" | "purchaseValue" | "totalStock" | "stockValue") => rows.reduce((total, row) => total + row[key], 0);
+        const items: Item[] = [];
+        const ordered = Array.from(groups.entries()).sort((a, b) => sum(b[1], "salesValue") - sum(a[1], "salesValue") || a[0].localeCompare(b[0]));
+        for (const [brand, rows] of ordered) {
+            items.push({
+                type: "group",
+                brand,
+                rows,
+                soldQty: sum(rows, "soldQty"),
+                salesValue: sum(rows, "salesValue"),
+                purchasedQty: sum(rows, "purchasedQty"),
+                purchaseValue: sum(rows, "purchaseValue"),
+                totalStock: sum(rows, "totalStock"),
+                stockValue: sum(rows, "stockValue"),
+            });
+            if (!collapsedBrands.has(brand)) for (const row of rows) items.push({ type: "row", row });
+        }
+        return items;
+    }, [filteredSortedRows, tableByBrand, collapsedBrands]);
 
     const exportFileName = useMemo(() => {
         const parts = [
@@ -1066,32 +1150,80 @@ export default function ProductsPerformancePage() {
 
             {report ? (
                 <div className="mt-6 space-y-6">
+                    <button
+                        type="button"
+                        role="switch"
+                        aria-checked={cardsByBrand}
+                        onClick={() => setCardsByBrand((current) => !current)}
+                        className="group flex w-fit items-center gap-3 text-sm font-medium"
+                    >
+                        <span className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-300 ${cardsByBrand ? "bg-(--brand)" : "bg-(--line)"}`}>
+                            <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform duration-300 ${cardsByBrand ? "translate-x-5.5" : "translate-x-0.5"}`} />
+                        </span>
+                        Group statistics by brand
+                    </button>
+                    {cardsByBrand ? (
+                        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                            {brandStats.map((stat, index) => {
+                                const share = report.totals.salesValue > 0 ? (stat.salesValue / report.totals.salesValue) * 100 : 0;
+                                const metrics: Array<[string, number, (value: number) => string]> = [
+                                    ["Sold Qty", stat.soldQty, formatNumber],
+                                    ["Sales Value", stat.salesValue, (value) => formatCurrency(value, report.currencyCode)],
+                                    ["Purchased Qty", stat.purchasedQty, formatNumber],
+                                    ["Purchase Value", stat.purchaseValue, (value) => formatCurrency(value, report.currencyCode)],
+                                    ["Current Stock", stat.totalStock, formatNumber],
+                                    ["Stock Value", stat.stockValue, (value) => formatCurrency(value, report.currencyCode)],
+                                ];
+                                return (
+                                    <article key={stat.brand} style={cardStyle(index)} className={`rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)] ${CARD_MOTION}`}>
+                                        <div className="flex items-start justify-between gap-2">
+                                            <p className="font-display text-xl">{stat.brand}</p>
+                                            <span className="shrink-0 rounded-full bg-(--chip) px-2.5 py-0.5 text-xs font-medium">{stat.products} product{stat.products === 1 ? "" : "s"}</span>
+                                        </div>
+                                        <p className="mt-1 text-xs text-(--ink-soft)">{share.toFixed(1)}% of total sales value</p>
+                                        <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-(--chip)">
+                                            <BarFill percent={Math.min(100, share)} />
+                                        </div>
+                                        <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">
+                                            {metrics.map(([label, value, format]) => (
+                                                <div key={label}>
+                                                    <dt className="text-xs text-(--ink-soft)">{label}</dt>
+                                                    <dd className="text-sm font-semibold tabular-nums"><CountUp value={value} format={format} /></dd>
+                                                </div>
+                                            ))}
+                                        </dl>
+                                    </article>
+                                );
+                            })}
+                        </div>
+                    ) : (
                     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                        <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
+                        <article style={cardStyle(0)} className={`rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)] ${CARD_MOTION}`}>
                             <p className="text-sm text-(--ink-soft)">Sold Qty ({report.startDate} → {report.endDate})</p>
-                            <p className="mt-2 font-display text-3xl">{formatNumber(report.totals.soldQty)}</p>
+                            <p className="mt-2 font-display text-3xl"><CountUp value={report.totals.soldQty} format={formatNumber} /></p>
                         </article>
-                        <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
+                        <article style={cardStyle(1)} className={`rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)] ${CARD_MOTION}`}>
                             <p className="text-sm text-(--ink-soft)">Sales Value ({report.currencyCode})</p>
-                            <p className="mt-2 font-display text-3xl">{formatCurrency(report.totals.salesValue, report.currencyCode)}</p>
+                            <p className="mt-2 font-display text-3xl"><CountUp value={report.totals.salesValue} format={(value) => formatCurrency(value, report.currencyCode)} /></p>
                         </article>
-                        <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
+                        <article style={cardStyle(2)} className={`rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)] ${CARD_MOTION}`}>
                             <p className="text-sm text-(--ink-soft)">Purchased Qty ({report.startDate} → {report.endDate})</p>
-                            <p className="mt-2 font-display text-3xl">{formatNumber(report.totals.purchasedQty)}</p>
+                            <p className="mt-2 font-display text-3xl"><CountUp value={report.totals.purchasedQty} format={formatNumber} /></p>
                         </article>
-                        <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
+                        <article style={cardStyle(3)} className={`rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)] ${CARD_MOTION}`}>
                             <p className="text-sm text-(--ink-soft)">Purchase Value ({report.currencyCode})</p>
-                            <p className="mt-2 font-display text-3xl">{formatCurrency(report.totals.purchaseValue, report.currencyCode)}</p>
+                            <p className="mt-2 font-display text-3xl"><CountUp value={report.totals.purchaseValue} format={(value) => formatCurrency(value, report.currencyCode)} /></p>
                         </article>
-                        <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
+                        <article style={cardStyle(4)} className={`rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)] ${CARD_MOTION}`}>
                             <p className="text-sm text-(--ink-soft)">Current Stock (all warehouses)</p>
-                            <p className="mt-2 font-display text-3xl">{formatNumber(report.totals.totalStock)}</p>
+                            <p className="mt-2 font-display text-3xl"><CountUp value={report.totals.totalStock} format={formatNumber} /></p>
                         </article>
-                        <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
+                        <article style={cardStyle(5)} className={`rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)] ${CARD_MOTION}`}>
                             <p className="text-sm text-(--ink-soft)">Stock Value ({report.currencyCode})</p>
-                            <p className="mt-2 font-display text-3xl">{formatCurrency(report.totals.stockValue, report.currencyCode)}</p>
+                            <p className="mt-2 font-display text-3xl"><CountUp value={report.totals.stockValue} format={(value) => formatCurrency(value, report.currencyCode)} /></p>
                         </article>
                     </div>
+                    )}
 
                     {report.unconvertedCurrencyCodes.length > 0 ? (
                         <p className="text-sm text-red-600">
@@ -1177,6 +1309,41 @@ export default function ProductsPerformancePage() {
                         ) : null}
 
                         {report.rows.length > 0 ? (
+                            <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2">
+                            <button
+                                type="button"
+                                role="switch"
+                                aria-checked={tableByBrand}
+                                onClick={() => setTableByBrand((current) => !current)}
+                                className="flex w-fit items-center gap-3 text-sm font-medium"
+                            >
+                                <span className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-300 ${tableByBrand ? "bg-(--brand)" : "bg-(--line)"}`}>
+                                    <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform duration-300 ${tableByBrand ? "translate-x-5.5" : "translate-x-0.5"}`} />
+                                </span>
+                                Group table by brand
+                            </button>
+                            {tableByBrand ? (
+                                <div className="flex gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => setCollapsedBrands(new Set())}
+                                        className="rounded-lg border border-(--line) bg-white px-3 py-1.5 text-xs font-medium hover:bg-(--chip)"
+                                    >
+                                        Expand all
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setCollapsedBrands(new Set(filteredSortedRows.map((row) => row.brandName?.trim() || "No brand")))}
+                                        className="rounded-lg border border-(--line) bg-white px-3 py-1.5 text-xs font-medium hover:bg-(--chip)"
+                                    >
+                                        Collapse all
+                                    </button>
+                                </div>
+                            ) : null}
+                            </div>
+                        ) : null}
+
+                        {report.rows.length > 0 ? (
                             <div className="mt-4 relative">
                                 <Search
                                     className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-(--ink-soft)"
@@ -1256,7 +1423,41 @@ export default function ProductsPerformancePage() {
                                                 </td>
                                             </tr>
                                         ) : null}
-                                        {filteredSortedRows.map((row) => {
+                                        {tableItems.map((item) => {
+                                            if (item.type === "group") {
+                                                const collapsed = collapsedBrands.has(item.brand);
+                                                const money = (value: number) => formatCurrency(value, report.currencyCode);
+                                                return (
+                                                    <tr
+                                                        key={`brand:${item.brand}`}
+                                                        onClick={() =>
+                                                            setCollapsedBrands((current) => {
+                                                                const next = new Set(current);
+                                                                if (next.has(item.brand)) next.delete(item.brand);
+                                                                else next.add(item.brand);
+                                                                return next;
+                                                            })
+                                                        }
+                                                        className="cursor-pointer bg-(--chip) font-semibold hover:bg-(--chip)/70"
+                                                    >
+                                                        <td className="border border-(--line) px-2 py-3 text-center">
+                                                            {collapsed ? <ChevronRight className="inline h-4 w-4" aria-hidden="true" /> : <ChevronDown className="inline h-4 w-4" aria-hidden="true" />}
+                                                        </td>
+                                                        <td colSpan={4} className="border border-(--line) px-4 py-3">
+                                                            {item.brand} <span className="ml-1 text-xs font-normal text-(--ink-soft)">{item.rows.length} product{item.rows.length === 1 ? "" : "s"}</span>
+                                                        </td>
+                                                        <td className="border border-(--line) px-4 py-3">{formatNumber(item.soldQty)}</td>
+                                                        <td className="border border-(--line) px-4 py-3" />
+                                                        <td className="border border-(--line) px-4 py-3">{money(item.salesValue)}</td>
+                                                        <td className="border border-(--line) px-4 py-3">{formatNumber(item.purchasedQty)}</td>
+                                                        <td className="border border-(--line) px-4 py-3" />
+                                                        <td className="border border-(--line) px-4 py-3">{money(item.purchaseValue)}</td>
+                                                        <td className="border border-(--line) px-4 py-3">{formatNumber(item.totalStock)}</td>
+                                                        <td className="border border-(--line) px-4 py-3">{money(item.stockValue)}</td>
+                                                    </tr>
+                                                );
+                                            }
+                                            const row = item.row;
                                             const expanded = expandedProductIds.has(row.productId);
                                             return (
                                                 <Fragment key={row.productId}>

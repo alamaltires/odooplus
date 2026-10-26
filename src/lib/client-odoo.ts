@@ -1042,6 +1042,8 @@ export type PriceListRow = {
     lotName: string;
     lotYear: string;
     available: number;
+    /** Only sent to purchaser / sales manager / admin. */
+    cost?: number | null;
     prices: Record<string, number | null>;
 };
 
@@ -1061,7 +1063,7 @@ export type PriceListResponse = {
 };
 
 export function getPricelists(options?: { all?: boolean }) {
-    return post<{ pricelists: PricelistOption[] }>("/api/odoo/pricelists", { all: options?.all === true });
+    return post<{ pricelists: PricelistOption[]; restricted?: boolean }>("/api/odoo/pricelists", { all: options?.all === true });
 }
 
 export type PriceListFilterOptions = {

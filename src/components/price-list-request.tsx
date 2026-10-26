@@ -19,6 +19,7 @@ import {
 } from "@/lib/client-odoo";
 import { subscribeSelectedCompanyIds } from "@/lib/company-filter";
 import { Select2, type Select2Option } from "@/components/select2";
+import { useAuth } from "@/lib/auth-context";
 
 type Option = { id: number | string; name: string };
 type FilterField = "brand" | "origin" | "category" | "oe" | "lot" | "location" | "searchName";
@@ -111,6 +112,22 @@ function MultiPick({
                         />
                     </div>
                     <ul className="max-h-60 overflow-x-hidden overflow-y-auto p-1">
+                        {filtered.length > 0 ? (
+                            <li>
+                                <label className="flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm font-semibold hover:bg-(--chip)">
+                                    <input
+                                        type="checkbox"
+                                        checked={filtered.every((option) => value.includes(option.id))}
+                                        onChange={(event) => {
+                                            const ids = filtered.map((option) => option.id);
+                                            onChange(event.target.checked ? Array.from(new Set([...value, ...ids])) : value.filter((id) => !ids.includes(id)));
+                                        }}
+                                        className="h-4 w-4 rounded border-(--line)"
+                                    />
+                                    <span>All{search.trim() ? " (matching)" : ""}</span>
+                                </label>
+                            </li>
+                        ) : null}
                         {filtered.length === 0 ? <li className="px-3 py-2 text-sm text-(--ink-soft)">No matches.</li> : null}
                         {filtered.slice(0, MAX_SHOWN).map((option) => {
                             const checked = value.includes(option.id);
@@ -228,6 +245,7 @@ export function PriceListRequest() {
     const [origins, setOrigins] = useState<Option[]>([]);
     const [pricelists, setPricelists] = useState<PricelistOption[]>([]);
     const [optionsError, setOptionsError] = useState<string | null>(null);
+    const [listsRestricted, setListsRestricted] = useState(false);
     const [listsLoaded, setListsLoaded] = useState(false);
 
     const [filterOptions, setFilterOptions] = useState<PriceListFilterOptions | null>(null);
@@ -267,6 +285,9 @@ export function PriceListRequest() {
     const [page, setPage] = useState(1);
     const [pageSize, setPageSize] = useState(50);
     // null = the order Odoo data came in (brand, then product). The same order is used for the Excel file.
+    // Cost is only shown to purchasers, sales managers and admins (the server only sends it to them too).
+    const { role } = useAuth();
+    const showCost = role === "purchase" || role === "sales_manager" || role === "admin";
     const [sort, setSort] = useState<{ key: string; dir: "asc" | "desc" } | null>(null);
     const [exporting, setExporting] = useState(false);
     // "Create sales order" popup: pick the customer (and which price column to use), then create.
@@ -292,7 +313,10 @@ export function PriceListRequest() {
             else report("Brands", brandData.reason);
             if (originData.status === "fulfilled") setOrigins(originData.value.origins);
             else report("Origins", originData.reason);
-            if (listData.status === "fulfilled") setPricelists(listData.value.pricelists);
+            if (listData.status === "fulfilled") {
+                setPricelists(listData.value.pricelists);
+                setListsRestricted(listData.value.restricted === true);
+            }
             else report("Pricelists", listData.reason);
             if (extraData.status === "fulfilled") setFilterOptions(extraData.value);
             else report("Categories / OE / lots", extraData.reason);
@@ -477,6 +501,7 @@ export function PriceListRequest() {
                 case "rim": return row.rim;
                 case "lot": return row.lotName;
                 case "available": return row.available;
+                case "cost": return row.cost ?? null;
                 default: return sort.key.startsWith("price:") ? row.prices[sort.key.slice(6)] ?? null : "";
             }
         };
@@ -648,6 +673,7 @@ export function PriceListRequest() {
                 { key: "rim", header: "Rim", width: 8, value: (row) => row.rim },
                 { key: "lot", header: "Year", width: 8, value: (row) => row.lotYear },
                 { key: "available", header: "Available Qty", width: 12, value: (row) => row.available },
+                ...(showCost ? [{ key: "cost", header: "Cost", width: 12, value: (row: PriceListRow): string | number => row.cost ?? "" }] : []),
                 ...result.pricelists.map((list) => ({
                     key: `price:${list.id}`,
                     header: priceHeader(list),
@@ -794,7 +820,7 @@ export function PriceListRequest() {
                     </p>
                     {!listsLoaded ? <p className="text-sm text-(--ink-soft)">Loading pricelists...</p> : null}
                     {listsLoaded && pricelists.length === 0 ? (
-                        <p className="text-sm text-(--ink-soft)">No pricelists were found for the selected companies.</p>
+                        <p className="text-sm text-(--ink-soft)">{optionsError?.includes("Pricelists:") ? "The pricelists could not be loaded (see the error above)." : listsRestricted ? "None of the pricelists allowed for your account (Settings → App Permissions → Allowed pricelists) could be found. Clear that setting to remove the limit." : "No pricelists were found."}</p>
                     ) : null}
                     <div className="flex flex-wrap gap-2">
                         {pricelists.map((list) => {
@@ -1022,6 +1048,7 @@ export function PriceListRequest() {
                                         {sortHeader("rim", "Rim")}
                                         {sortHeader("lot", "Lot (Year)")}
                                         {sortHeader("available", "Available", "right")}
+                                        {showCost ? sortHeader("cost", "Cost", "right") : null}
                                         {result.pricelists.map((list) => sortHeader(`price:${list.id}`, priceHeader(list), "right"))}
                                     </tr>
                                 </thead>
@@ -1058,6 +1085,9 @@ export function PriceListRequest() {
                                             <td className="whitespace-nowrap border border-(--line)/70 px-3 py-2 text-right font-semibold tabular-nums text-(--accent)">
                                                 {row.available.toLocaleString("en-US", { maximumFractionDigits: 2 })}
                                             </td>
+                                            {showCost ? (
+                                                <td className="whitespace-nowrap border border-(--line)/70 px-3 py-2 text-right tabular-nums">{formatPrice(row.cost ?? null)}</td>
+                                            ) : null}
                                             {result.pricelists.map((list) => (
                                                 <td key={list.id} className="whitespace-nowrap border border-(--line)/70 px-3 py-2 text-right tabular-nums">
                                                     {formatPrice(row.prices[String(list.id)])}
