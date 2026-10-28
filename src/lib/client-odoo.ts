@@ -759,6 +759,20 @@ export function getPaymentFollowupByCustomer(input: {
     return post<PaymentFollowupReport>("/api/odoo/payment-followup-by-customer", input);
 }
 
+export function getPaymentFollowupByTag(input: {
+    tagId: number;
+    asOfDate?: string;
+    dateBasis?: "due" | "invoice";
+    agingSystem?: "day" | "month";
+}) {
+    return post<PaymentFollowupReport>("/api/odoo/payment-followup-by-tag", input);
+}
+
+/** Customer tags the signed-in user may pick in reports. */
+export function getCustomerTagOptions() {
+    return post<{ tags: Array<{ id: number; name: string }> }>("/api/odoo/customer-tag-options", {});
+}
+
 export function getSalesTargetDetails(input: {
     salespersonId: number;
     year: number;

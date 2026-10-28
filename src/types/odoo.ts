@@ -224,6 +224,11 @@ export type OdooSalespersonMonthlyInvoices = {
     year: number;
     month: number;
     totalInvoiced: number;
+    /** Pieces sold / returned on those invoices (lines linked to sales orders). */
+    totalQuantity?: number;
+    creditNoteQuantity?: number;
+    /** Part of `totalInvoiced` already paid by customers. */
+    paidInvoiced: number;
     creditNoteTotal: number;
     invoiceCount: number;
     primaryCurrencyCode: string;
@@ -232,12 +237,14 @@ export type OdooSalespersonMonthlyInvoices = {
     brandTotals: Array<{
         brandId: number;
         totalInvoiced: number;
+        quantity?: number;
         costOfGoodsSold: number;
         grossProfit: number;
     }>;
     creditNoteBrandTotals: Array<{
         brandId: number;
         totalInvoiced: number;
+        quantity?: number;
         costOfGoodsSold: number;
         grossProfit: number;
     }>;
@@ -304,6 +311,10 @@ export type SalesTargetRecord = {
     targets: SalesTargetBrand[];
     marketingEmailsSentAt?: Record<string, string>;
     targetAmount?: number;
+    /** Share of the whole month's target that should be collected in cash (0-100). */
+    cashPercent?: number | null;
+    /** Pieces to sell in the whole month (volume target); empty when none is set. */
+    volumeTarget?: number | null;
     updatedAt: string;
 };
 

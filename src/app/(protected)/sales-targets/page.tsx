@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { Fragment, FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, Gauge, ListTree, Mail, Plus, Target, Trash2 } from "lucide-react";
+import { Banknote, ChevronDown, Gauge, ListTree, Mail, Package, Plus, Target, Trash2 } from "lucide-react";
 import {
+    getAllSalesTargets,
     getSalesTarget,
     markSalesTargetBrandMarketingEmailSent,
     saveSalesTarget,
@@ -101,6 +102,8 @@ function normalizeReport(report: OdooSalespersonMonthlyInvoices): OdooSalesperso
         creditNoteBrandTotals: Array.isArray(report.creditNoteBrandTotals) ? report.creditNoteBrandTotals : [],
     };
 }
+
+const formatQty = (value: number) => value.toLocaleString("en-US", { maximumFractionDigits: 2 });
 
 function emptyTargetEntry(): TargetEntryInput {
     return {
@@ -205,6 +208,16 @@ export default function SalesTargetsPage() {
 
     const [setTargetOpen, setSetTargetOpen] = useState(false);
     const [targetEntries, setTargetEntries] = useState<TargetEntryInput[]>([emptyTargetEntry()]);
+    const [copyOpen, setCopyOpen] = useState(false);
+    const [copySearch, setCopySearch] = useState("");
+    const [copySelected, setCopySelected] = useState<Set<number>>(new Set());
+    const [copyExisting, setCopyExisting] = useState<Set<string>>(new Set());
+    const [copyYear, setCopyYear] = useState(String(currentYear()));
+    const [copyMonths, setCopyMonths] = useState<Set<number>>(new Set());
+    const [copying, setCopying] = useState(false);
+    const [copyError, setCopyError] = useState<string | null>(null);
+    const [cashPercentInput, setCashPercentInput] = useState("");
+    const [volumeTargetInput, setVolumeTargetInput] = useState("");
     const [savingTarget, setSavingTarget] = useState(false);
     const [emailModalOpen, setEmailModalOpen] = useState(false);
     const [recipientEmail, setRecipientEmail] = useState("");
@@ -375,6 +388,29 @@ export default function SalesTargetsPage() {
         [savedTargets]
     );
 
+    // Cash target = the chosen % of the whole target; collected = what customers have paid on this month's invoices.
+    const savedCashPercent = Number(target?.cashPercent ?? 0);
+    const cashTarget = Number(((totalTargetAmount * savedCashPercent) / 100).toFixed(2));
+    const cashCollected = report?.paidInvoiced ?? 0;
+
+    useEffect(() => {
+        if (!setTargetOpen) return;
+        const onKey = (event: KeyboardEvent) => {
+            if (event.key === "Escape" && !savingTarget) setSetTargetOpen(false);
+        };
+        document.addEventListener("keydown", onKey);
+        return () => document.removeEventListener("keydown", onKey);
+    }, [setTargetOpen, savingTarget]);
+
+    // Volume (pieces) target of the whole month and what has been sold against it.
+    const totalTargetQty = Number(target?.volumeTarget ?? 0);
+    const soldQty = report ? Math.max(0, Number(report.totalQuantity ?? 0) - (creditNotesApplied ? Number(report.creditNoteQuantity ?? 0) : 0)) : 0;
+
+    // Live totals shown in the target editor.
+    const editorTotal = targetEntries.reduce((sum, entry) => sum + (Number(entry.targetAmount) || 0), 0);
+    const editorQty = Number(volumeTargetInput) || 0;
+    const editorCash = Number(((editorTotal * (Number(cashPercentInput) || 0)) / 100).toFixed(2));
+
     const effectiveSales = useMemo(
         () => (report ? Number((report.totalInvoiced - (report.creditNoteTotal ?? 0)).toFixed(2)) : 0),
         [report]
@@ -434,6 +470,7 @@ export default function SalesTargetsPage() {
 
             achievedByTargetBrandId.set(item.brandId, Number(Math.max(0, achieved - creditNoteDeduction).toFixed(2)));
 
+
             // Estimated using Odoo's live product Cost (standard_price), so
             // — unlike revenue — this can legitimately go negative and isn't
             // clamped at 0.
@@ -465,6 +502,7 @@ export default function SalesTargetsPage() {
         }, 0);
 
         const baseTotal = creditNotesApplied ? effectiveSales : report.totalInvoiced;
+
 
         return savedTargets.map((item) => {
             const achieved = item.isGeneral
@@ -725,6 +763,17 @@ export default function SalesTargetsPage() {
             });
         }
 
+        const volumeTarget = volumeTargetInput.trim() === "" ? null : Number(volumeTargetInput);
+        if (volumeTarget !== null && (!Number.isFinite(volumeTarget) || volumeTarget < 0)) {
+            setError("The volume target must be a number of pieces, or empty.");
+            return;
+        }
+        const cashPercent = cashPercentInput.trim() === "" ? null : Number(cashPercentInput);
+        if (cashPercent !== null && (!Number.isFinite(cashPercent) || cashPercent < 0 || cashPercent > 100)) {
+            setError("The cash target must be a percentage between 0 and 100.");
+            return;
+        }
+
         setSavingTarget(true);
         setError(null);
         setMessage(null);
@@ -736,6 +785,8 @@ export default function SalesTargetsPage() {
                 year: report.year,
                 month: report.month,
                 targets: normalizedTargets,
+                cashPercent,
+                volumeTarget: volumeTarget || null,
             });
 
             const savedTarget = await loadSavedTarget(report.salesperson.id, report.year, report.month);
@@ -761,6 +812,8 @@ export default function SalesTargetsPage() {
         }));
 
         setTargetEntries(existingEntries.length > 0 ? existingEntries : [emptyTargetEntry()]);
+        setCashPercentInput(target?.cashPercent != null ? String(target.cashPercent) : "");
+        setVolumeTargetInput(target?.volumeTarget ? String(target.volumeTarget) : "");
         setSetTargetOpen(true);
         setError(null);
         setMessage(null);
@@ -798,6 +851,56 @@ export default function SalesTargetsPage() {
 
             return previous.filter((_, entryIndex) => entryIndex !== index);
         });
+    }
+
+    // Copy this month's targets (brand targets, cash % and volume target) to other salespeople.
+    async function openCopyModal() {
+        if (!report) return;
+        setCopySearch("");
+        setCopySelected(new Set());
+        setCopyYear(String(report.year));
+        setCopyMonths(new Set([report.month]));
+        setCopyError(null);
+        setCopyOpen(true);
+        try {
+            const all = await getAllSalesTargets();
+            setCopyExisting(new Set(all.filter((item) => item.targets.length > 0).map((item) => `${item.salespersonId}_${item.year}_${item.month}`)));
+        } catch {
+            setCopyExisting(new Set());
+        }
+    }
+
+    async function handleCopyTargets() {
+        if (!report || copySelected.size === 0 || copyMonths.size === 0) return;
+        setCopying(true);
+        setCopyError(null);
+        try {
+            const recipients = salespeople.filter((person) => copySelected.has(person.id));
+            const year = Number(copyYear);
+            let copied = 0;
+            for (const person of recipients) {
+                for (const month of copyMonths) {
+                    // Never overwrite the source with itself.
+                    if (person.id === report.salesperson.id && year === report.year && month === report.month) continue;
+                    await saveSalesTarget({
+                        salespersonId: person.id,
+                        salespersonName: person.name,
+                        year,
+                        month,
+                        targets: savedTargets,
+                        cashPercent: target?.cashPercent ?? null,
+                        volumeTarget: target?.volumeTarget ?? null,
+                    });
+                    copied += 1;
+                }
+            }
+            setCopyOpen(false);
+            setMessage(`Targets copied to ${recipients.length} salesperson${recipients.length === 1 ? "" : "s"} for ${copyMonths.size} month${copyMonths.size === 1 ? "" : "s"} (${copied} saved).`);
+        } catch (copyFailure) {
+            setCopyError(copyFailure instanceof Error ? copyFailure.message : "Failed to copy the targets.");
+        } finally {
+            setCopying(false);
+        }
     }
 
     function openEmailModal() {
@@ -1044,6 +1147,53 @@ export default function SalesTargetsPage() {
                                 <Gauge className="h-6 w-6 text-(--brand)" aria-hidden="true" />
                             </div>
                         </article>
+                        {totalTargetQty > 0 ? (
+                            <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
+                                <div className="flex items-start justify-between gap-4">
+                                    <div>
+                                        <p className="text-sm text-(--ink-soft)">Volume Target (pcs)</p>
+                                        <p className="mt-3 font-display text-3xl">{formatQty(soldQty)}</p>
+                                        <p className="text-sm text-(--ink-soft)">sold of {formatQty(totalTargetQty)}</p>
+                                    </div>
+                                    <Package className="h-6 w-6 text-(--brand)" aria-hidden="true" />
+                                </div>
+                                <div className="mt-3 h-2 overflow-hidden rounded-full bg-(--chip)">
+                                    <div
+                                        className={`h-full rounded-full transition-[width] duration-700 ease-out ${soldQty >= totalTargetQty ? "bg-emerald-500" : "bg-sky-500"}`}
+                                        style={{ width: `${Math.min(100, (soldQty / totalTargetQty) * 100)}%` }}
+                                    />
+                                </div>
+                                <p className="mt-2 text-sm text-(--ink-soft)">
+                                    {((soldQty / totalTargetQty) * 100).toFixed(1)}% achieved ·{" "}
+                                    {soldQty >= totalTargetQty ? "target reached" : `${formatQty(totalTargetQty - soldQty)} pcs remaining`}
+                                </p>
+                            </article>
+                        ) : null}
+
+                        {cashTarget > 0 ? (
+                            <article className="rounded-2xl border border-(--line) bg-(--card) p-5 shadow-[0_8px_20px_rgba(8,23,41,0.05)]">
+                                <div className="flex items-start justify-between gap-4">
+                                    <div>
+                                        <p className="text-sm text-(--ink-soft)">Cash Target ({savedCashPercent}% of the target)</p>
+                                        <p className="mt-3 font-display text-3xl">{formatCurrency(cashCollected, currencyCode)}</p>
+                                        <p className="text-sm text-(--ink-soft)">collected of {formatCurrency(cashTarget, currencyCode)}</p>
+                                    </div>
+                                    <Banknote className="h-6 w-6 text-(--brand)" aria-hidden="true" />
+                                </div>
+                                <div className="mt-3 h-2 overflow-hidden rounded-full bg-(--chip)">
+                                    <div
+                                        className={`h-full rounded-full transition-[width] duration-700 ease-out ${cashCollected >= cashTarget ? "bg-emerald-500" : "bg-(--brand)"}`}
+                                        style={{ width: `${Math.min(100, (cashCollected / cashTarget) * 100)}%` }}
+                                    />
+                                </div>
+                                <p className="mt-2 text-sm text-(--ink-soft)">
+                                    {((cashCollected / cashTarget) * 100).toFixed(1)}% achieved ·{" "}
+                                    {cashCollected >= cashTarget
+                                        ? "target reached"
+                                        : `${formatCurrency(cashTarget - cashCollected, currencyCode)} remaining`}
+                                </p>
+                            </article>
+                        ) : null}
                     </div>
 
                     {report.currencyTotals.length > 0 ? (
@@ -1102,13 +1252,20 @@ export default function SalesTargetsPage() {
                             </div>
 
                             <div className="flex flex-wrap items-center gap-3">
-                                {!setTargetOpen ? (
+                                <button
+                                    type="button"
+                                    onClick={() => void openTargetEditor()}
+                                    className="rounded-xl bg-(--brand) px-4 py-2.5 font-medium text-white"
+                                >
+                                    {savedTargets.length > 0 ? "Edit Targets" : "Set Targets"}
+                                </button>
+                                {savedTargets.length > 0 ? (
                                     <button
                                         type="button"
-                                        onClick={() => void openTargetEditor()}
-                                        className="rounded-xl bg-(--brand) px-4 py-2.5 font-medium text-white"
+                                        onClick={() => void openCopyModal()}
+                                        className="rounded-xl border border-(--line) bg-white px-4 py-2.5 font-medium text-(--ink)"
                                     >
-                                        {savedTargets.length > 0 ? "Edit Targets" : "Set Targets"}
+                                        Copy Targets
                                     </button>
                                 ) : null}
                                 {savedTargets.length > 0 ? (
@@ -1339,8 +1496,177 @@ export default function SalesTargetsPage() {
                             </div>
                         ) : null}
 
-                        {setTargetOpen ? (
-                            <div className="mt-4 space-y-4">
+                    </div>
+
+                    {copyOpen ? (
+                        <div
+                            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+                            onMouseDown={(event) => event.target === event.currentTarget && !copying && setCopyOpen(false)}
+                        >
+                            <div className="flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-(--line) bg-(--card) shadow-[0_20px_40px_rgba(8,23,41,0.25)]">
+                                <div className="border-b border-(--line) p-5">
+                                    <h2 className="font-display text-2xl">Copy Targets</h2>
+                                    <p className="mt-1 text-sm text-(--ink-soft)">
+                                        Copy {report.salesperson.name}&apos;s targets for {report.month}/{report.year} ({formatCurrency(totalTargetAmount, currencyCode)}
+                                        {totalTargetQty > 0 ? `, ${formatQty(totalTargetQty)} pcs` : ""}
+                                        {savedCashPercent > 0 ? `, ${savedCashPercent}% cash` : ""}) to the months and salespeople below.
+                                    </p>
+                                </div>
+                                <div className="space-y-3 overflow-y-auto p-5">
+                                    <div>
+                                        <div className="mb-2 flex items-center justify-between gap-3">
+                                            <span className="text-sm font-medium">Copy to month(s)</span>
+                                            <select
+                                                value={copyYear}
+                                                onChange={(event) => setCopyYear(event.target.value)}
+                                                className="rounded-lg border border-(--line) bg-white px-2.5 py-1.5 text-sm"
+                                            >
+                                                {yearOptions.map((year) => (
+                                                    <option key={year} value={year}>
+                                                        {year}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        <div className="grid grid-cols-4 gap-1.5">
+                                            {months.map((month) => {
+                                                const on = copyMonths.has(month.value);
+                                                return (
+                                                    <button
+                                                        key={month.value}
+                                                        type="button"
+                                                        onClick={() =>
+                                                            setCopyMonths((current) => {
+                                                                const next = new Set(current);
+                                                                if (next.has(month.value)) next.delete(month.value);
+                                                                else next.add(month.value);
+                                                                return next;
+                                                            })
+                                                        }
+                                                        className={`rounded-lg border px-2 py-1.5 text-xs font-medium transition ${on ? "border-(--brand) bg-(--brand) text-white" : "border-(--line) bg-white hover:bg-(--chip)"}`}
+                                                    >
+                                                        {month.label.slice(0, 3)}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                        <div className="mt-1.5 flex gap-3 text-xs">
+                                            <button type="button" onClick={() => setCopyMonths(new Set(months.map((month) => month.value)))} className="text-(--brand) hover:underline">
+                                                All months
+                                            </button>
+                                            <button type="button" onClick={() => setCopyMonths(new Set())} className="text-(--ink-soft) hover:underline">
+                                                Clear
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <input
+                                        value={copySearch}
+                                        onChange={(event) => setCopySearch(event.target.value)}
+                                        placeholder="Search salespeople"
+                                        className="w-full rounded-xl border border-(--line) bg-white px-4 py-2 text-sm"
+                                    />
+                                    {(() => {
+                                        const query = copySearch.trim().toLowerCase();
+                                        const visible = salespeople.filter(
+                                            (person) => !query || person.name.toLowerCase().includes(query)
+                                        );
+                                        const allOn = visible.length > 0 && visible.every((person) => copySelected.has(person.id));
+                                        return (
+                                            <>
+                                                <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={allOn}
+                                                        onChange={(event) =>
+                                                            setCopySelected((current) => {
+                                                                const next = new Set(current);
+                                                                for (const person of visible) {
+                                                                    if (event.target.checked) next.add(person.id);
+                                                                    else next.delete(person.id);
+                                                                }
+                                                                return next;
+                                                            })
+                                                        }
+                                                        className="h-4 w-4 rounded border-(--line)"
+                                                    />
+                                                    All{query ? " (matching)" : ""} · {copySelected.size} selected
+                                                </label>
+                                                <ul className="max-h-72 overflow-y-auto rounded-xl border border-(--line)">
+                                                    {visible.length === 0 ? <li className="px-3 py-3 text-sm text-(--ink-soft)">No salespeople found.</li> : null}
+                                                    {visible.map((person) => (
+                                                        <li key={person.id} className="border-b border-(--line)/60 last:border-b-0">
+                                                            <label className="flex cursor-pointer items-center gap-3 px-3 py-2 text-sm hover:bg-(--chip)">
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={copySelected.has(person.id)}
+                                                                    onChange={() =>
+                                                                        setCopySelected((current) => {
+                                                                            const next = new Set(current);
+                                                                            if (next.has(person.id)) next.delete(person.id);
+                                                                            else next.add(person.id);
+                                                                            return next;
+                                                                        })
+                                                                    }
+                                                                    className="h-4 w-4 rounded border-(--line)"
+                                                                />
+                                                                <span className="min-w-0 flex-1 truncate">{person.name}</span>
+                                                                {(() => {
+                                                                    const clashes = Array.from(copyMonths).filter(
+                                                                        (month) =>
+                                                                            copyExisting.has(`${person.id}_${copyYear}_${month}`) &&
+                                                                            !(person.id === report.salesperson.id && Number(copyYear) === report.year && month === report.month)
+                                                                    ).length;
+                                                                    return clashes > 0 ? (
+                                                                        <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
+                                                                            {clashes} month{clashes === 1 ? "" : "s"} replaced
+                                                                        </span>
+                                                                    ) : null;
+                                                                })()}
+                                                            </label>
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            </>
+                                        );
+                                    })()}
+                                    {copyError ? <p className="text-sm text-red-600">{copyError}</p> : null}
+                                </div>
+                                <div className="flex items-center justify-end gap-3 border-t border-(--line) bg-(--chip)/40 p-4">
+                                    <button
+                                        type="button"
+                                        onClick={() => setCopyOpen(false)}
+                                        disabled={copying}
+                                        className="rounded-xl border border-(--line) bg-white px-4 py-2.5 font-medium text-(--ink)"
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => void handleCopyTargets()}
+                                        disabled={copying || copySelected.size === 0 || copyMonths.size === 0}
+                                        className="rounded-xl bg-(--brand) px-4 py-2.5 font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
+                                    >
+                                        {copying ? "Copying..." : `Copy to ${copySelected.size || ""} ${copySelected.size === 1 ? "salesperson" : "salespeople"}`}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    ) : null}
+
+                    {setTargetOpen ? (
+                        <div
+                            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+                            onMouseDown={(event) => event.target === event.currentTarget && !savingTarget && setSetTargetOpen(false)}
+                        >
+                            <div className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-(--line) bg-(--card) shadow-[0_20px_40px_rgba(8,23,41,0.25)]">
+                                <div className="border-b border-(--line) p-5">
+                                    <h2 className="font-display text-2xl">Set Monthly Targets</h2>
+                                    <p className="mt-1 text-sm text-(--ink-soft)">
+                                        {report.salesperson.name} · {report.month}/{report.year}. The General target applies to all brands except the specifically configured ones.
+                                    </p>
+                                </div>
+
+                                <div className="space-y-4 overflow-y-auto p-5 pb-24">
                                 {brandsError ? <p className="text-sm text-red-600">{brandsError}</p> : null}
 
                                 {targetEntries.map((entry, index) => {
@@ -1403,35 +1729,82 @@ export default function SalesTargetsPage() {
                                     );
                                 })}
 
-                                <div className="flex flex-wrap items-center gap-3">
-                                    <button
-                                        type="button"
-                                        onClick={addTargetRow}
-                                        className="inline-flex items-center rounded-xl border border-(--line) bg-white px-4 py-2.5 font-medium text-(--ink)"
-                                    >
-                                        <Plus className="mr-2 h-4 w-4" aria-hidden="true" />
-                                        Add More Target
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => void handleSaveTarget()}
-                                        disabled={savingTarget}
-                                        className="rounded-xl bg-(--brand) px-4 py-2.5 font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
-                                    >
-                                        {savingTarget ? "Saving..." : "Save Targets"}
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => setSetTargetOpen(false)}
-                                        disabled={savingTarget}
-                                        className="rounded-xl border border-(--line) bg-white px-4 py-2.5 font-medium text-(--ink)"
-                                    >
-                                        Cancel
-                                    </button>
+                                <div className="grid gap-4 sm:grid-cols-2">
+                                <label className="block">
+                                    <span className="mb-2 block text-sm font-medium">Volume target (pieces for the whole month)</span>
+                                    <input
+                                        type="text"
+                                        inputMode="decimal"
+                                        value={formatThousands(volumeTargetInput)}
+                                        onChange={(event) => setVolumeTargetInput(sanitizeNumericInput(event.target.value))}
+                                        placeholder="e.g. 5,000 — leave empty for none"
+                                        className="w-full rounded-xl border border-(--line) bg-white px-4 py-2.5"
+                                    />
+                                </label>
+                                <label className="block">
+                                    <span className="mb-2 block text-sm font-medium">Cash target (% of the whole target)</span>
+                                    <input
+                                        type="text"
+                                        inputMode="decimal"
+                                        value={cashPercentInput}
+                                        onChange={(event) => setCashPercentInput(sanitizeNumericInput(event.target.value))}
+                                        placeholder="e.g. 40 — leave empty for none"
+                                        className="w-full rounded-xl border border-(--line) bg-white px-4 py-2.5"
+                                    />
+                                </label>
+                                </div>
+
+                                    <div>
+                                        <button
+                                            type="button"
+                                            onClick={addTargetRow}
+                                            className="inline-flex items-center rounded-xl border border-(--line) bg-white px-4 py-2.5 font-medium text-(--ink)"
+                                        >
+                                            <Plus className="mr-2 h-4 w-4" aria-hidden="true" />
+                                            Add More Target
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-(--line) bg-(--chip)/40 p-4">
+                                    <div className="text-sm">
+                                        <p>
+                                            Total target: <span className="font-semibold tabular-nums">{formatCurrency(editorTotal, currencyCode)}</span>
+                                        </p>
+                                        {editorQty > 0 ? (
+                                            <p className="text-(--ink-soft)">
+                                                Volume target: <span className="font-semibold tabular-nums">{formatQty(editorQty)} pcs</span>
+                                            </p>
+                                        ) : null}
+                                        {editorCash > 0 ? (
+                                            <p className="text-(--ink-soft)">
+                                                Cash target: <span className="font-semibold tabular-nums">{formatCurrency(editorCash, currencyCode)}</span>
+                                            </p>
+                                        ) : null}
+                                        {error ? <p className="mt-1 text-red-600">{error}</p> : null}
+                                    </div>
+                                    <div className="flex items-center gap-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => setSetTargetOpen(false)}
+                                            disabled={savingTarget}
+                                            className="rounded-xl border border-(--line) bg-white px-4 py-2.5 font-medium text-(--ink)"
+                                        >
+                                            Cancel
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => void handleSaveTarget()}
+                                            disabled={savingTarget}
+                                            className="rounded-xl bg-(--brand) px-4 py-2.5 font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
+                                        >
+                                            {savingTarget ? "Saving..." : "Save Targets"}
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
-                        ) : null}
-                    </div>
+                        </div>
+                    ) : null}
 
                     {savedTargets.length > 0 ? (
                         <div className="rounded-2xl border border-(--line) bg-(--card) p-5">

@@ -270,6 +270,11 @@ type SalespersonMonthlyInvoices = {
     year: number;
     month: number;
     totalInvoiced: number;
+    /** Pieces sold / returned on those invoices (lines linked to sales orders). */
+    totalQuantity: number;
+    creditNoteQuantity: number;
+    /** Part of `totalInvoiced` already paid by the customers (invoice total minus what is still due). */
+    paidInvoiced: number;
     creditNoteTotal: number;
     invoiceCount: number;
     primaryCurrencyCode: string;
@@ -278,6 +283,7 @@ type SalespersonMonthlyInvoices = {
     brandTotals: Array<{
         brandId: number;
         totalInvoiced: number;
+        quantity: number;
         /** Live-cost (`product.standard_price`) estimate of what this
          * brand's invoiced quantity cost, and the resulting gross profit. */
         costOfGoodsSold: number;
@@ -286,6 +292,7 @@ type SalespersonMonthlyInvoices = {
     creditNoteBrandTotals: Array<{
         brandId: number;
         totalInvoiced: number;
+        quantity: number;
         costOfGoodsSold: number;
         grossProfit: number;
     }>;
@@ -4002,7 +4009,7 @@ export async function getSalespersonMonthlyInvoices(
             ["invoice_date", "<=", endDate],
         ]],
         {
-            fields: ["id", "amount_total", "currency_id"],
+            fields: ["id", "amount_total", "amount_residual", "currency_id"],
             order: "invoice_date desc",
             limit: 20000,
         }
@@ -4064,6 +4071,19 @@ export async function getSalespersonMonthlyInvoices(
                 }
                 const multiplier = multiplierByCurrencyId.get(entry.currencyId) ?? 0;
                 return sum + entry.amount * multiplier;
+            }, 0)
+            .toFixed(2)
+    );
+
+    // Cash collected: what has been paid on these invoices so far, converted the same way as the total.
+    const residualByInvoiceId = new Map(invoices.map((invoice) => [Number(invoice.id ?? 0), Number(invoice.amount_residual ?? 0)]));
+    const paidInvoiced = Number(
+        convertibleInvoiceIds
+            .reduce((sum, id) => {
+                const entry = invoiceTransactionAmounts.get(id);
+                if (!entry) return sum;
+                const paid = Math.max(0, entry.amount - (residualByInvoiceId.get(id) ?? 0));
+                return sum + paid * (multiplierByCurrencyId.get(entry.currencyId) ?? 0);
             }, 0)
             .toFixed(2)
     );
@@ -4133,7 +4153,9 @@ export async function getSalespersonMonthlyInvoices(
             });
     }
 
-    let brandTotals: Array<{ brandId: number; totalInvoiced: number; costOfGoodsSold: number; grossProfit: number }> = [];
+    let brandTotals: Array<{ brandId: number; totalInvoiced: number; quantity: number; costOfGoodsSold: number; grossProfit: number }> = [];
+    let totalQuantity = 0;
+    let creditNoteQuantity = 0;
     let brandCategoryTotals: BrandCategoryTotal[] = [];
     let brandBySaleLineId = new Map<number, number>();
     // Each sale line's product cost (Odoo's own live `standard_price`), used
@@ -4339,6 +4361,7 @@ export async function getSalespersonMonthlyInvoices(
         }
 
         const totalsByBrand = new Map<number, number>();
+        const quantityByBrand = new Map<number, number>();
         const costTotalsByBrand = new Map<number, number>();
         const totalsByBrandCategory = new Map<
             string,
@@ -4374,6 +4397,8 @@ export async function getSalespersonMonthlyInvoices(
             }
 
             const splitAmount = lineAmount / linkedBrandIds.length;
+            const lineQty = Number(line.quantity ?? 0);
+            if (Number.isFinite(lineQty)) totalQuantity += lineQty;
 
             // Cost side of the same line, for Gross Profit: the line's
             // quantity times the average live Cost across whichever
@@ -4393,6 +4418,7 @@ export async function getSalespersonMonthlyInvoices(
             for (const brandId of linkedBrandIds) {
                 const current = totalsByBrand.get(brandId) ?? 0;
                 totalsByBrand.set(brandId, current + splitAmount);
+                quantityByBrand.set(brandId, (quantityByBrand.get(brandId) ?? 0) + (Number.isFinite(lineQty) ? lineQty / linkedBrandIds.length : 0));
 
                 const currentCost = costTotalsByBrand.get(brandId) ?? 0;
                 costTotalsByBrand.set(brandId, currentCost + costSplitAmount);
@@ -4415,6 +4441,7 @@ export async function getSalespersonMonthlyInvoices(
                 return {
                     brandId,
                     totalInvoiced: Number(total.toFixed(2)),
+                    quantity: Number((quantityByBrand.get(brandId) ?? 0).toFixed(2)),
                     costOfGoodsSold: Number(costOfGoodsSold.toFixed(2)),
                     grossProfit: Number((total - costOfGoodsSold).toFixed(2)),
                 };
@@ -4433,7 +4460,7 @@ export async function getSalespersonMonthlyInvoices(
             .sort((a, b) => b.totalInvoiced - a.totalInvoiced);
     }
 
-    let creditNoteBrandTotals: Array<{ brandId: number; totalInvoiced: number; costOfGoodsSold: number; grossProfit: number }> = [];
+    let creditNoteBrandTotals: Array<{ brandId: number; totalInvoiced: number; quantity: number; costOfGoodsSold: number; grossProfit: number }> = [];
     let creditNoteBrandCategoryTotals: BrandCategoryTotal[] = [];
 
     if (input.includeCreditNotes && creditNoteIds.length > 0 && brandBySaleLineId.size > 0) {
@@ -4463,6 +4490,7 @@ export async function getSalespersonMonthlyInvoices(
         );
 
         const creditNoteTotalsByBrand = new Map<number, number>();
+        const creditNoteQuantityByBrand = new Map<number, number>();
         const creditNoteCostTotalsByBrand = new Map<number, number>();
         const creditNoteTotalsByBrandCategory = new Map<
             string,
@@ -4500,6 +4528,8 @@ export async function getSalespersonMonthlyInvoices(
             }
 
             const splitAmount = lineAmount / linkedBrandIds.length;
+            const returnedQty = Math.abs(Number(line.quantity ?? 0));
+            if (Number.isFinite(returnedQty)) creditNoteQuantity += returnedQty;
 
             // Cost given back with the return, mirroring the invoice-side
             // calculation above.
@@ -4517,6 +4547,7 @@ export async function getSalespersonMonthlyInvoices(
             for (const brandId of linkedBrandIds) {
                 const current = creditNoteTotalsByBrand.get(brandId) ?? 0;
                 creditNoteTotalsByBrand.set(brandId, current + splitAmount);
+                creditNoteQuantityByBrand.set(brandId, (creditNoteQuantityByBrand.get(brandId) ?? 0) + (Number.isFinite(returnedQty) ? returnedQty / linkedBrandIds.length : 0));
 
                 const currentCost = creditNoteCostTotalsByBrand.get(brandId) ?? 0;
                 creditNoteCostTotalsByBrand.set(brandId, currentCost + costSplitAmount);
@@ -4539,6 +4570,7 @@ export async function getSalespersonMonthlyInvoices(
                 return {
                     brandId,
                     totalInvoiced: Number(total.toFixed(2)),
+                    quantity: Number((creditNoteQuantityByBrand.get(brandId) ?? 0).toFixed(2)),
                     costOfGoodsSold: Number(costOfGoodsSold.toFixed(2)),
                     grossProfit: Number((total - costOfGoodsSold).toFixed(2)),
                 };
@@ -4562,6 +4594,9 @@ export async function getSalespersonMonthlyInvoices(
         year,
         month,
         totalInvoiced,
+        totalQuantity: Number(totalQuantity.toFixed(2)),
+        creditNoteQuantity: Number(creditNoteQuantity.toFixed(2)),
+        paidInvoiced,
         creditNoteTotal,
         invoiceCount: qualifiedInvoiceIdSet.size,
         primaryCurrencyCode,
@@ -6374,6 +6409,49 @@ export async function getPaymentFollowupForSalesperson(
         customerIds,
         "salesperson",
         salesperson,
+        resolveAsOfDate(input.asOfDate),
+        input.dateBasis === "invoice" ? "invoice" : "due",
+        input.agingSystem === "month" ? "month" : "day"
+    );
+}
+
+export async function getPaymentFollowupForTag(
+    credentials: OdooCredentials,
+    input: {
+        tagId: number;
+        asOfDate?: string;
+        dateBasis?: "due" | "invoice";
+        agingSystem?: "day" | "month";
+        /** Only customers assigned to this Odoo user (salesperson role). */
+        ownUserId?: number | null;
+    }
+): Promise<PaymentFollowupReport> {
+    const uid = await authenticate(credentials);
+    const tagId = Number(input.tagId);
+
+    if (!Number.isFinite(tagId) || tagId <= 0) {
+        throw new Error("A valid customer tag is required.");
+    }
+
+    const domain: unknown[] = [["category_id", "in", [tagId]], ["customer_rank", ">", 0]];
+    if (input.ownUserId) domain.push(["user_id", "=", input.ownUserId]);
+    const partners = await executeKw<Array<{ id: number }>>(credentials, uid, "res.partner", "search_read", [domain], { fields: ["id"], limit: 5000 });
+
+    const canonicalMap = await getCanonicalCustomerMap(
+        credentials,
+        uid,
+        partners.map((partner) => Number(partner.id))
+    );
+    const customerIds = Array.from(
+        new Set(Array.from(canonicalMap.values()).map((customer) => Number(customer.id ?? 0)))
+    ).filter((id) => id > 0);
+
+    return buildPaymentFollowupReport(
+        credentials,
+        uid,
+        customerIds,
+        "salesperson",
+        null,
         resolveAsOfDate(input.asOfDate),
         input.dateBasis === "invoice" ? "invoice" : "due",
         input.agingSystem === "month" ? "month" : "day"

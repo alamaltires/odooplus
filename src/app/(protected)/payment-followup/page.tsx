@@ -18,9 +18,10 @@ import {
     MessageCircle,
     Receipt,
     Search,
+    Tag,
     Users,
 } from "lucide-react";
-import { getCustomers, getPaymentFollowupByCustomer, getPaymentFollowupBySalesperson, getSalespeople } from "@/lib/client-odoo";
+import { getCustomerTagOptions, getCustomers, getPaymentFollowupByCustomer, getPaymentFollowupBySalesperson, getPaymentFollowupByTag, getSalespeople } from "@/lib/client-odoo";
 import { printPaymentFollowupPdf } from "@/lib/payment-followup-pdf";
 import { documentBadgeClass, documentTypeLabel, isCreditSide, signedResidual } from "@/lib/payment-followup-items";
 import { useAuth } from "@/lib/auth-context";
@@ -34,7 +35,7 @@ import {
     PaymentFollowupReport,
 } from "@/types/odoo";
 
-type Mode = "salesperson" | "customer";
+type Mode = "salesperson" | "customer" | "tag";
 type SortDirection = "asc" | "desc";
 
 function todayISO() {
@@ -818,12 +819,14 @@ function AgingMatrix({
     currencyCode,
     showCustomerColumn,
     agingSystem,
+    exportName,
 }: {
     customers: PaymentFollowupCustomerRow[];
     totals: PaymentFollowupReport["totals"];
     currencyCode: string;
     showCustomerColumn: boolean;
     agingSystem: AgingSystem;
+    exportName: string;
 }) {
     const columns = agingColumnsFor(agingSystem);
     const [sortKey, setSortKey] = useState<AgingSortKey>("total");
@@ -852,8 +855,37 @@ function AgingMatrix({
         return copy;
     }, [customers, sortKey, sortDirection]);
 
+    // Exports just this table, in the order it is shown.
+    async function exportTable() {
+        const XLSX = await import("xlsx");
+        const rows: Array<Record<string, string | number>> = sortedCustomers.map((row) => ({
+            ...(showCustomerColumn ? { Customer: row.customerName } : {}),
+            ...Object.fromEntries(columns.map((column) => [column.label, row.agingBuckets[column.key]])),
+            Total: row.totalInvoiceDue,
+        }));
+        rows.push({
+            ...(showCustomerColumn ? { Customer: "Total" } : {}),
+            ...Object.fromEntries(columns.map((column) => [column.label, totals.agingBuckets[column.key]])),
+            Total: totals.totalInvoiceDue,
+        });
+        const worksheet = XLSX.utils.json_to_sheet(rows);
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, "Aged Receivables");
+        XLSX.writeFile(workbook, `${exportName}.xlsx`);
+    }
+
     return (
         <div className="overflow-hidden rounded-2xl border border-(--line) bg-(--card)">
+            <div className="flex justify-end border-b border-(--line) px-3 py-2">
+                <button
+                    type="button"
+                    onClick={() => void exportTable()}
+                    className="inline-flex items-center gap-2 rounded-lg border border-(--line) bg-white px-3 py-1.5 text-xs font-medium hover:bg-(--chip)"
+                >
+                    <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                    Export Excel
+                </button>
+            </div>
             <div className="max-h-[28rem] overflow-auto">
                 <table className="min-w-full divide-y divide-(--line) text-sm">
                     <thead className="sticky top-0 z-10 bg-(--chip)">
@@ -898,15 +930,15 @@ function AgingMatrix({
                             </tr>
                         ))}
                     </tbody>
-                    <tfoot className="border-t-2 border-(--line) bg-(--chip)/70 font-semibold text-(--ink)">
+                    <tfoot className="font-semibold text-(--ink)">
                         <tr>
-                            {showCustomerColumn ? <td className="px-3 py-2.5">Total</td> : null}
+                            {showCustomerColumn ? <td className="sticky bottom-0 z-10 border-t-2 border-(--line) bg-(--chip) px-3 py-2.5">Total</td> : null}
                             {columns.map((column) => (
-                                <td key={column.key} className="px-3 py-2.5 text-right">
+                                <td key={column.key} className="sticky bottom-0 z-10 border-t-2 border-(--line) bg-(--chip) px-3 py-2.5 text-right">
                                     {formatCurrency(totals.agingBuckets[column.key], currencyCode)}
                                 </td>
                             ))}
-                            <td className="px-3 py-2.5 text-right">{formatCurrency(totals.totalInvoiceDue, currencyCode)}</td>
+                            <td className="sticky bottom-0 z-10 border-t-2 border-(--line) bg-(--chip) px-3 py-2.5 text-right">{formatCurrency(totals.totalInvoiceDue, currencyCode)}</td>
                         </tr>
                     </tfoot>
                 </table>
@@ -1002,6 +1034,8 @@ export default function PaymentFollowupPage() {
 
     const [selectedSalespersonId, setSelectedSalespersonId] = useState("");
     const [selectedCustomerId, setSelectedCustomerId] = useState("");
+    const [tags, setTags] = useState<Array<{ id: number; name: string }>>([]);
+    const [selectedTagId, setSelectedTagId] = useState("");
 
     const [report, setReport] = useState<PaymentFollowupReport | null>(null);
     const [reportLoading, setReportLoading] = useState(false);
@@ -1026,7 +1060,13 @@ export default function PaymentFollowupPage() {
             hasLoadedOptionsRef.current = true;
 
             try {
-                const [salespeopleData, customersData] = await Promise.all([getSalespeople(), getCustomers()]);
+                const [salespeopleData, customersData, tagData] = await Promise.all([
+                    getSalespeople(),
+                    getCustomers(),
+                    getCustomerTagOptions().catch(() => ({ tags: [] as Array<{ id: number; name: string }> })),
+                ]);
+                setTags(tagData.tags);
+                if (tagData.tags.length > 0) setSelectedTagId(String(tagData.tags[0].id));
                 setSalespeople(salespeopleData.salespeople);
                 setCustomers(customersData.customers);
                 if (salespeopleData.salespeople.length > 0) {
@@ -1064,7 +1104,9 @@ export default function PaymentFollowupPage() {
 
         try {
             const data =
-                mode === "salesperson"
+                mode === "tag"
+                    ? await getPaymentFollowupByTag({ tagId: Number(selectedTagId), asOfDate, dateBasis, agingSystem })
+                    : mode === "salesperson"
                     ? await getPaymentFollowupBySalesperson({
                         salespersonId: Number(selectedSalespersonId),
                         asOfDate,
@@ -1112,12 +1154,17 @@ export default function PaymentFollowupPage() {
         );
     }, [report, search]);
 
+    const tagName = tags.find((tag) => String(tag.id) === selectedTagId)?.name ?? "Tag";
+    const whoLabel =
+        mode === "tag" ? `Tag ${tagName}` : mode === "salesperson" ? report?.salesperson?.name ?? "Salesperson" : filteredCustomers[0]?.customerName ?? "Customer";
+    const multiCustomer = mode !== "customer";
+
     function exportPdf() {
         if (!report || filteredCustomers.length === 0) return;
         setReportError(null);
 
         try {
-            const who = mode === "salesperson" ? report.salesperson?.name ?? "Salesperson" : filteredCustomers[0]?.customerName ?? "Customer";
+            const who = whoLabel;
             printPaymentFollowupPdf({
                 report,
                 customers: filteredCustomers,
@@ -1177,7 +1224,7 @@ export default function PaymentFollowupPage() {
             const worksheet = XLSX.utils.json_to_sheet(exportRows);
             const workbook = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(workbook, worksheet, "Payment Followup");
-            XLSX.writeFile(workbook, `payment-followup-${sanitizeFileName(mode === "salesperson" ? report.salesperson?.name ?? "salesperson" : filteredCustomers[0]?.customerName ?? "customer")}-${report.asOfDate}.xlsx`);
+            XLSX.writeFile(workbook, `payment-followup-${sanitizeFileName(whoLabel)}-${report.asOfDate}.xlsx`);
         } catch (error) {
             setReportError(error instanceof Error ? error.message : "Failed to export Excel file.");
         } finally {
@@ -1215,6 +1262,14 @@ export default function PaymentFollowupPage() {
                     >
                         <Receipt className="h-3.5 w-3.5" aria-hidden="true" /> By Customer
                     </button>
+                    <button
+                        type="button"
+                        onClick={() => switchMode("tag")}
+                        className={`inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 font-medium transition ${mode === "tag" ? "bg-(--brand) text-white shadow" : "text-(--ink-soft)"
+                            }`}
+                    >
+                        <Tag className="h-3.5 w-3.5" aria-hidden="true" /> By Customer Tag
+                    </button>
                 </div>
 
                 <form onSubmit={handleSubmit} className="space-y-4">
@@ -1234,6 +1289,19 @@ export default function PaymentFollowupPage() {
                                     label: salesperson.name,
                                     description: salesperson.email || undefined,
                                 }))}
+                            />
+                        </label>
+                    ) : mode === "tag" ? (
+                        <label className="block">
+                            <span className="mb-2 block text-sm font-medium">Customer Tag</span>
+                            <Select2
+                                value={selectedTagId}
+                                onChange={setSelectedTagId}
+                                loading={optionsLoading}
+                                loadingText="Loading tags..."
+                                emptyText="No customer tags found"
+                                disabled={Boolean(optionsError)}
+                                options={tags.map((tag) => ({ value: String(tag.id), label: tag.name }))}
                             />
                         </label>
                     ) : (
@@ -1318,7 +1386,7 @@ export default function PaymentFollowupPage() {
                                 reportLoading ||
                                 optionsLoading ||
                                 !asOfDate ||
-                                (mode === "salesperson" ? !selectedSalespersonId : !selectedCustomerId)
+                                (mode === "tag" ? !selectedTagId : mode === "salesperson" ? !selectedSalespersonId : !selectedCustomerId)
                             }
                             className="w-full rounded-xl bg-(--brand) px-5 py-2.5 font-medium text-white disabled:cursor-not-allowed disabled:opacity-70 sm:w-auto"
                         >
@@ -1452,7 +1520,8 @@ export default function PaymentFollowupPage() {
                                 customers={report.customers}
                                 totals={report.totals}
                                 currencyCode={report.currencyCode}
-                                showCustomerColumn={mode === "salesperson"}
+                                showCustomerColumn={multiCustomer}
+                                exportName={`aged-receivables-${sanitizeFileName(whoLabel)}-${report.asOfDate}`}
                                 agingSystem={report.agingSystem}
                             />
                         </div>
@@ -1463,14 +1532,16 @@ export default function PaymentFollowupPage() {
                             <p className="text-sm text-(--ink-soft)">
                                 {mode === "salesperson"
                                     ? `Customers assigned to ${report.salesperson?.name ?? "-"}`
-                                    : "Customer"}
+                                    : mode === "tag"
+                                        ? `Customers tagged ${tagName}`
+                                        : "Customer"}
                             </p>
                             <p className="mt-0.5 text-xs text-(--ink-soft)">
                                 {filteredCustomers.length} of {report.customers.length} customer{report.customers.length === 1 ? "" : "s"} with an open balance
                             </p>
                         </div>
                         <div className="flex flex-wrap items-center gap-3">
-                            {mode === "salesperson" ? (
+                            {multiCustomer ? (
                                 <input
                                     type="search"
                                     value={search}

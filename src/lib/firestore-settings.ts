@@ -100,6 +100,8 @@ export async function saveSalesTarget(
         year: number;
         month: number;
         targets: SalesTargetRecord["targets"];
+        cashPercent?: number | null;
+        volumeTarget?: number | null;
     }
 ) {
     const docId = getSalesTargetDocId(input.salespersonId, input.year, input.month);
@@ -110,6 +112,8 @@ export async function saveSalesTarget(
         year: input.year,
         month: input.month,
         targets: input.targets,
+        cashPercent: input.cashPercent ?? null,
+        volumeTarget: input.volumeTarget ?? null,
         updatedAt: new Date().toISOString(),
     };
 
