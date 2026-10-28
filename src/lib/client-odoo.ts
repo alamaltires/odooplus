@@ -1005,6 +1005,8 @@ export type AgedStockRow = {
     oldestDate: string;
     lastReceivedDate?: string;
     firstReceivedDate?: string;
+    lastReceivedQty?: number | null;
+    firstReceivedQty?: number | null;
     ageDays: number;
 };
 
@@ -1023,6 +1025,37 @@ export type AgedStockResponse = {
 /** On-hand stock older than `minAgeDays`, dated from Odoo's own valuation layers (receipts still on hand). */
 export function getAgedStock(input: { minAgeDays: number }) {
     return post<AgedStockResponse>("/api/odoo/aged-stock", input);
+}
+
+export type AgedStockExplanation = {
+    productName: string;
+    lotName: string;
+    warehouse: string;
+    minAgeDays: number;
+    warehouseQuantity: number;
+    totalQuantity: number;
+    quants: Array<{ location: string; quantity: number; incomingDate: string; ageDays: number | null }>;
+    receipts: Array<{
+        date: string;
+        ageDays: number;
+        quantity: number;
+        onShelf: number;
+        onShelfWarehouse: number;
+        aged: boolean;
+        document: string;
+        partner: string;
+        source: string;
+        unitCost: number | null;
+    }>;
+    unexplainedQuantity: number;
+    unexplainedDate: string;
+    agedQuantity: number;
+    oldestDate: string;
+};
+
+/** The stock lines and receipts behind one aged-stock row. */
+export function getAgedStockExplanation(input: { productId: number; lotName: string; warehouse: string; minAgeDays: number }) {
+    return post<AgedStockExplanation>("/api/odoo/aged-stock-explain", input);
 }
 
 export type PricelistOption = { id: number; name: string; currency: string };

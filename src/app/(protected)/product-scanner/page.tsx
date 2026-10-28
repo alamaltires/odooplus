@@ -1,9 +1,9 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import { AlertCircle, ChevronDown, ChevronLeft, ChevronRight, Download, RefreshCw, Search, Warehouse } from "lucide-react";
+import { AlertCircle, ChevronDown, ChevronLeft, ChevronRight, Download, RefreshCw, Search, Warehouse, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
-import { getAgedStock, type AgedStockResponse, type AgedStockRow } from "@/lib/client-odoo";
+import { getAgedStock, getAgedStockExplanation, type AgedStockExplanation, type AgedStockResponse, type AgedStockRow } from "@/lib/client-odoo";
 
 /** One scan fetches everything older than this; the age pills then filter instantly, without asking Odoo again. */
 const SCAN_BASE_DAYS = 90;
@@ -43,6 +43,151 @@ function Stat({ label, value, hint, tone }: { label: string; value: string; hint
             <p className="text-sm text-(--ink-soft)">{label}</p>
             <p className={`mt-2 font-display text-3xl leading-tight tabular-nums ${tone ?? ""}`}>{value}</p>
             {hint ? <p className="mt-1 truncate text-xs text-(--ink-soft)">{hint}</p> : null}
+        </div>
+    );
+}
+
+const fmtQty = (value: number) => value.toLocaleString("en-US", { maximumFractionDigits: 2 });
+
+/** Shows which stock lines and receipts were counted to date one aged-stock row. */
+function ExplainModal({ row, minAgeDays, onClose }: { row: AgedStockRow; minAgeDays: number; onClose: () => void }) {
+    const [data, setData] = useState<AgedStockExplanation | null>(null);
+    const [error, setError] = useState<string | null>(null);
+    const [now] = useState(() => Date.now());
+
+    useEffect(() => {
+        let cancelled = false;
+        getAgedStockExplanation({ productId: row.productId, lotName: row.lotName, warehouse: row.warehouse, minAgeDays })
+            .then((value) => {
+                if (!cancelled) setData(value);
+            })
+            .catch((loadError) => {
+                if (!cancelled) setError(loadError instanceof Error ? loadError.message : "Failed to load the details.");
+            });
+        const onKey = (event: KeyboardEvent) => {
+            if (event.key === "Escape") onClose();
+        };
+        document.addEventListener("keydown", onKey);
+        return () => {
+            cancelled = true;
+            document.removeEventListener("keydown", onKey);
+        };
+    }, [row, minAgeDays, onClose]);
+
+    // The stock on hand here, split by the receipt it came from (whole units of each receipt), so the lines add up to the on-hand quantity.
+    const layers = useMemo(() => {
+        if (!data) return [];
+        const items = data.receipts
+            .filter((receipt) => receipt.onShelf > 0)
+            .map((receipt) => ({
+                date: receipt.date,
+                document: receipt.document || "-",
+                partner: receipt.partner || receipt.source || "-",
+                quantity: receipt.onShelfWarehouse,
+                unitCost: receipt.unitCost,
+                ageDays: receipt.ageDays,
+            }));
+        if (data.unexplainedQuantity > 1e-9) {
+            items.push({
+                date: data.unexplainedDate || "-",
+                document: "Opening balance / correction",
+                partner: "-",
+                quantity: data.unexplainedQuantity,
+                unitCost: null,
+                ageDays: data.unexplainedDate ? Math.max(0, Math.floor((now - new Date(data.unexplainedDate).getTime()) / 86_400_000)) : 0,
+            });
+        }
+        return items;
+    }, [data, now]);
+    const agedQty = layers.filter((layer) => layer.ageDays >= (data?.minAgeDays ?? 0)).reduce((total, layer) => total + layer.quantity, 0);
+    const totalQty = layers.reduce((total, layer) => total + layer.quantity, 0);
+
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+            <div className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-(--line) bg-(--card) shadow-xl">
+                <div className="flex items-start justify-between gap-3 border-b border-(--line) p-5">
+                    <div>
+                        <p className="font-display text-xl leading-snug">{row.productName}</p>
+                        <p className="mt-1 text-sm text-(--ink-soft)">
+                            {row.brand ? `${row.brand} · ` : ""}Lot: {row.lotName || "none"} · {row.warehouse}
+                        </p>
+                    </div>
+                    <button type="button" onClick={onClose} aria-label="Close" className="rounded-lg p-1.5 hover:bg-(--chip)">
+                        <X className="h-5 w-5" />
+                    </button>
+                </div>
+
+                <div className="space-y-5 overflow-y-auto p-5 text-sm">
+                    {error ? <p className="text-red-600">{error}</p> : null}
+                    {!data && !error ? <p className="text-(--ink-soft)">Loading the records...</p> : null}
+                    {data ? (
+                        <>
+                            <div className="grid grid-cols-3 gap-3">
+                                <div className="rounded-xl border border-(--line) p-3">
+                                    <p className="text-xs text-(--ink-soft)">On hand</p>
+                                    <p className="mt-1 text-2xl font-semibold tabular-nums">{fmtQty(totalQty)}</p>
+                                </div>
+                                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
+                                    <p className="text-xs text-amber-800">Aged ({data.minAgeDays}+ days)</p>
+                                    <p className="mt-1 text-2xl font-semibold tabular-nums text-amber-900">{fmtQty(agedQty)}</p>
+                                </div>
+                                <div className="rounded-xl border border-(--line) p-3">
+                                    <p className="text-xs text-(--ink-soft)">Newer</p>
+                                    <p className="mt-1 text-2xl font-semibold tabular-nums">{fmtQty(totalQty - agedQty)}</p>
+                                </div>
+                            </div>
+
+                            <div className="overflow-x-auto rounded-xl border border-(--line)">
+                                <table className="w-full min-w-136 text-left">
+                                    <thead className="bg-(--chip) text-xs text-(--ink-soft)">
+                                        <tr>
+                                            <th className="px-3 py-2 font-medium">Received</th>
+                                            <th className="px-3 py-2 font-medium">Document</th>
+                                            <th className="px-3 py-2 font-medium">Partner</th>
+                                            <th className="px-3 py-2 text-right font-medium">Qty</th>
+                                            <th className="px-3 py-2 text-right font-medium">Unit cost</th>
+                                            <th className="px-3 py-2 text-right font-medium">Age</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {layers.length === 0 ? (
+                                            <tr>
+                                                <td colSpan={6} className="px-3 py-4 text-center text-(--ink-soft)">
+                                                    No receipts were found for this stock.
+                                                </td>
+                                            </tr>
+                                        ) : null}
+                                        {layers.map((layer, index) => {
+                                            const aged = layer.ageDays >= data.minAgeDays;
+                                            return (
+                                                <tr key={index} className={`border-t border-(--line)/60 ${aged ? "bg-amber-50" : ""}`}>
+                                                    <td className="px-3 py-2 tabular-nums">{layer.date}</td>
+                                                    <td className="px-3 py-2">{layer.document}</td>
+                                                    <td className="px-3 py-2">{layer.partner}</td>
+                                                    <td className="px-3 py-2 text-right font-semibold tabular-nums">{fmtQty(layer.quantity)}</td>
+                                                    <td className="px-3 py-2 text-right tabular-nums">{layer.unitCost ? fmtQty(layer.unitCost) : "-"}</td>
+                                                    <td className="px-3 py-2 text-right">
+                                                        <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${aged ? ageBadge(layer.ageDays) : "bg-(--chip)"}`}>{ageText(layer.ageDays)}</span>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                    {layers.length > 0 ? (
+                                        <tfoot>
+                                            <tr className="border-t border-(--line) bg-(--chip) font-semibold">
+                                                <td className="px-3 py-2" colSpan={3}>Total on hand</td>
+                                                <td className="px-3 py-2 text-right tabular-nums">{fmtQty(totalQty)}</td>
+                                                <td colSpan={2} />
+                                            </tr>
+                                        </tfoot>
+                                    ) : null}
+                                </table>
+                            </div>
+                        </>
+                    ) : null}
+                </div>
+            </div>
         </div>
     );
 }
@@ -143,11 +288,16 @@ export default function ProductScannerPage() {
                     ageDays: Math.max(...items.map((item) => item.ageDays)),
                     lastReceivedDate: lasts[lasts.length - 1] ?? "",
                     firstReceivedDate: firsts[0] ?? "",
+                    // The quantities belong to the row holding the newest / oldest receipt.
+                    lastReceivedQty: items.filter((item) => item.lastReceivedDate === (lasts[lasts.length - 1] ?? "")).reduce((best, item) => Math.max(best, item.lastReceivedQty ?? 0), 0) || null,
+                    firstReceivedQty: items.filter((item) => item.firstReceivedDate === (firsts[0] ?? "")).reduce((best, item) => Math.max(best, item.firstReceivedQty ?? 0), 0) || null,
                 } as AgedStockRow,
             };
         });
     }, [rows]);
     const [expanded, setExpanded] = useState<Set<number>>(new Set());
+    const [explainRow, setExplainRow] = useState<AgedStockRow | null>(null);
+    const closeExplain = useCallback(() => setExplainRow(null), []);
     const toggleGroup = (productId: number) =>
         setExpanded((current) => {
             const next = new Set(current);
@@ -178,6 +328,8 @@ export default function ProductScannerPage() {
                     Warehouse: row.warehouse,
                     Locations: row.locations.join(", "),
                     Quantity: row.quantity,
+                    "Last Receive Qty": row.lastReceivedQty ?? "",
+                    "Oldest Receive Qty": row.firstReceivedQty ?? "",
                     "Last Receive": row.lastReceivedDate ?? "",
                     "Oldest Receive": row.firstReceivedDate ?? "",
                     "In Stock Since": row.oldestDate,
@@ -448,8 +600,14 @@ export default function ProductScannerPage() {
                                                         )}
                                                     </td>
                                                     <td className="px-3 py-3 text-right font-semibold tabular-nums">{Math.round(row.quantity).toLocaleString("en-US")}</td>
-                                                    <td className="px-3 py-3 tabular-nums">{row.lastReceivedDate || "-"}</td>
-                                                    <td className="px-3 py-3 tabular-nums">{row.firstReceivedDate || "-"}</td>
+                                                    <td className="px-3 py-3 tabular-nums">
+                                                        <p>{row.lastReceivedDate || "-"}</p>
+                                                        {row.lastReceivedQty ? <p className="text-xs text-(--ink-soft)">{fmtQty(row.lastReceivedQty)} pcs</p> : null}
+                                                    </td>
+                                                    <td className="px-3 py-3 tabular-nums">
+                                                        <p>{row.firstReceivedDate || "-"}</p>
+                                                        {row.firstReceivedQty ? <p className="text-xs text-(--ink-soft)">{fmtQty(row.firstReceivedQty)} pcs</p> : null}
+                                                    </td>
                                                     <td className="py-3 pl-3">
                                                         <div className="flex items-center gap-3">
                                                             <div className="h-1.5 w-24 shrink-0 overflow-hidden rounded-full bg-(--chip)">
@@ -463,7 +621,11 @@ export default function ProductScannerPage() {
                                             if (!folded) {
                                                 const row = group.rows[0];
                                                 return (
-                                                    <tr key={`${row.productId}-${row.lotName}-${row.warehouse}`} className="border-b border-(--line)/60 transition hover:bg-(--chip)/50">
+                                                    <tr
+                                                        key={`${row.productId}-${row.lotName}-${row.warehouse}`}
+                                                        onClick={() => setExplainRow(row)}
+                                                        className="cursor-pointer border-b border-(--line)/60 transition hover:bg-(--chip)/50"
+                                                    >
                                                         {renderCells(row, false, false)}
                                                     </tr>
                                                 );
@@ -479,7 +641,11 @@ export default function ProductScannerPage() {
                                                     </tr>
                                                     {open
                                                         ? group.rows.map((row) => (
-                                                              <tr key={`${row.productId}-${row.lotName}-${row.warehouse}`} className="border-b border-(--line)/40 bg-white/60">
+                                                              <tr
+                                                                  key={`${row.productId}-${row.lotName}-${row.warehouse}`}
+                                                                  onClick={() => setExplainRow(row)}
+                                                                            className="cursor-pointer border-b border-(--line)/40 bg-white/60 transition hover:bg-(--chip)/50"
+                                                              >
                                                                   {renderCells(row, true, false)}
                                                               </tr>
                                                           ))
@@ -510,6 +676,7 @@ export default function ProductScannerPage() {
                     </div>
                 </div>
             ) : null}
+            {explainRow ? <ExplainModal row={explainRow} minAgeDays={minAge} onClose={closeExplain} /> : null}
             <style>{`@keyframes dash-bar{from{transform:scaleX(0)}to{transform:scaleX(1)}}`}</style>
         </section>
     );

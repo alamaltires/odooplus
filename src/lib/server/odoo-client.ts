@@ -12152,6 +12152,9 @@ export type AgedStockRow = {
     /** Newest and oldest receipt of this product / lot (from suppliers, production, counts), "" when none is recorded. */
     lastReceivedDate: string;
     firstReceivedDate: string;
+    /** Quantity of the newest / oldest receipt (the whole receipt, not only what is still here). */
+    lastReceivedQty: number | null;
+    firstReceivedQty: number | null;
     ageDays: number;
 };
 
@@ -12186,7 +12189,36 @@ export type AgedCandidate = {
     /** On hand of this product / lot across every warehouse. */
     lotTotal: number;
     oldestMs: number;
+    /** Every warehouse holding this product / lot (this one included): its quantity and oldest incoming date. */
+    peers: AgedPeer[];
 };
+
+export type AgedPeer = { warehouse: string; quantity: number; oldestMs: number };
+
+/**
+ * The receipts of a product / lot are pooled across warehouses, so each warehouse has to be given whole units of them.
+ * Warehouses are lined up by the incoming date of their stock (oldest first) and the receipts from oldest to newest:
+ * the warehouse whose stock arrived first is given the oldest receipts, and so on. Returns the part of each receipt
+ * that belongs to `warehouse`; the parts of all warehouses add up to the receipts.
+ */
+function allocateLayersToWarehouse<T extends { ms: number; quantity: number }>(layers: T[], peers: AgedPeer[], warehouse: string): T[] {
+    const orderedPeers = [...peers].sort((a, b) => a.oldestMs - b.oldestMs || a.warehouse.localeCompare(b.warehouse));
+    const orderedLayers = layers.map((layer) => ({ layer, left: layer.quantity })).sort((a, b) => a.layer.ms - b.layer.ms);
+    const mine: T[] = [];
+    let index = 0;
+    for (const peer of orderedPeers) {
+        let need = peer.quantity;
+        while (need > 1e-9 && index < orderedLayers.length) {
+            const current = orderedLayers[index];
+            const take = Math.min(current.left, need);
+            if (take > 1e-9 && peer.warehouse === warehouse) mine.push({ ...current.layer, quantity: take });
+            current.left -= take;
+            need -= take;
+            if (current.left <= 1e-9) index += 1;
+        }
+    }
+    return mine;
+}
 
 export type AgedStockBase = {
     minAgeDays: number;
@@ -12270,6 +12302,7 @@ export async function getAgedStockBase(credentials: OdooCredentials, minAgeDays:
             quantity: 0,
             lotTotal: 0,
             oldestMs: received.getTime(),
+            peers: [],
         };
         info.quantity += quantity;
         info.oldestMs = Math.min(info.oldestMs, received.getTime());
@@ -12284,6 +12317,14 @@ export async function getAgedStockBase(credentials: OdooCredentials, minAgeDays:
         lotTotals.set(lotKey, (lotTotals.get(lotKey) ?? 0) + info.quantity);
     }
     for (const info of keys.values()) info.lotTotal = lotTotals.get(`${info.productId}|${info.lotName}`) ?? info.quantity;
+    const peersByLot = new Map<string, AgedPeer[]>();
+    for (const info of keys.values()) {
+        const lotKey = `${info.productId}|${info.lotName}`;
+        const peers = peersByLot.get(lotKey) ?? [];
+        peers.push({ warehouse: info.warehouse, quantity: info.quantity, oldestMs: info.oldestMs });
+        peersByLot.set(lotKey, peers);
+    }
+    for (const info of keys.values()) info.peers = peersByLot.get(`${info.productId}|${info.lotName}`) ?? [];
 
     // A key whose oldest quant is younger than the threshold cannot hold aged stock.
     const candidates: AgedCandidate[] = [];
@@ -12396,7 +12437,7 @@ export async function refineAgedStock(
         entry.oldestMs = Math.min(entry.oldestMs, info.oldestMs);
         lotInfo.set(lotKey, entry);
     }
-    const receiptRange = new Map<string, { first: number; last: number }>();
+    const receiptRange = new Map<string, { first: number; last: number; firstQty: number; lastQty: number }>();
     for (const [lotKey, receipts] of receiptsByKey) {
         let first = Infinity;
         let last = 0;
@@ -12404,7 +12445,12 @@ export async function refineAgedStock(
             first = Math.min(first, receipt.ms);
             last = Math.max(last, receipt.ms);
         }
-        receiptRange.set(lotKey, { first, last });
+        // A receipt can have several lines: add up those of the same transfer move (else the same moment).
+        const firstLine = receipts.find((receipt) => receipt.ms === first);
+        const lastLine = receipts.find((receipt) => receipt.ms === last);
+        const qtyOf = (line: Receipt | undefined) =>
+            line ? receipts.filter((receipt) => (line.moveId ? receipt.moveId === line.moveId : receipt.ms === line.ms)).reduce((total, receipt) => total + receipt.quantity, 0) : 0;
+        receiptRange.set(lotKey, { first, last, firstQty: qtyOf(firstLine), lastQty: qtyOf(lastLine) });
     }
     const layersByLot = new Map<string, AgedLayer[]>();
     const moveIds = new Set<number>();
@@ -12449,9 +12495,8 @@ export async function refineAgedStock(
     let agedUnits = 0;
     for (const info of candidateList) {
         const range = receiptRange.get(lotKeyOf(info.productId, info.lotName));
-        // This warehouse's share of the product / lot's receipts.
-        const share = info.lotTotal > 0 ? info.quantity / info.lotTotal : 1;
-        const layers = (layersByLot.get(lotKeyOf(info.productId, info.lotName)) ?? []).map((layer) => ({ ...layer, quantity: layer.quantity * share }));
+        // The whole units of the product / lot's receipts that sit in this warehouse.
+        const layers = allocateLayersToWarehouse(layersByLot.get(lotKeyOf(info.productId, info.lotName)) ?? [], info.peers, info.warehouse);
 
         const fallbackCost = productInfo.get(info.productId)?.cost ?? 0;
         let agedQuantity = 0;
@@ -12480,6 +12525,8 @@ export async function refineAgedStock(
             oldestDate: new Date(oldestMs).toISOString().slice(0, 10),
             lastReceivedDate: range ? new Date(range.last).toISOString().slice(0, 10) : "",
             firstReceivedDate: range ? new Date(range.first).toISOString().slice(0, 10) : "",
+            lastReceivedQty: range ? range.lastQty : null,
+            firstReceivedQty: range ? range.firstQty : null,
             ageDays: ageOf(oldestMs),
         });
     }
@@ -13322,5 +13369,192 @@ export async function getMyOrderDetails(credentials: OdooCredentials, orderId: n
                 total: Number(line.price_total ?? 0),
             };
         }),
+    };
+}
+
+export type AgedStockExplanation = {
+    productName: string;
+    lotName: string;
+    warehouse: string;
+    minAgeDays: number;
+    /** On hand in this warehouse, and of the product / lot across every warehouse (receipts are pooled). */
+    warehouseQuantity: number;
+    totalQuantity: number;
+    quants: Array<{ location: string; quantity: number; incomingDate: string; ageDays: number | null }>;
+    /** Receipts newest first, with how much of each is still on the shelf. */
+    receipts: Array<{
+        date: string;
+        ageDays: number;
+        quantity: number;
+        /** Units of this receipt that are part of today's stock (all warehouses). */
+        onShelf: number;
+        /** Same, scaled to this warehouse's share. */
+        onShelfWarehouse: number;
+        aged: boolean;
+        document: string;
+        partner: string;
+        source: string;
+        unitCost: number | null;
+    }>;
+    /** Stock the receipts do not explain, dated by Odoo's incoming date. */
+    unexplainedQuantity: number;
+    unexplainedDate: string;
+    agedQuantity: number;
+    oldestDate: string;
+};
+
+/** Shows how one aged-stock row was dated: the stock lines and the receipts that were counted. Mirrors refineAgedStock for one product / lot. */
+export async function getAgedStockExplanation(
+    credentials: OdooCredentials,
+    input: { productId: number; lotName: string; warehouse: string; minAgeDays: number }
+): Promise<AgedStockExplanation> {
+    const uid = await authenticate(credentials);
+    const minAge = normalizeMinAge(input.minAgeDays);
+    const now = Date.now();
+    const ageOf = (ms: number) => Math.max(0, Math.floor((now - ms) / 86_400_000));
+    const toMs = (value: unknown) => (typeof value === "string" && value ? new Date(`${value.replace(" ", "T")}Z`).getTime() : NaN);
+    const dayOf = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+
+    const quantDomain: unknown[] = [["location_id.usage", "=", "internal"], ["quantity", ">", 0], ["product_id", "=", input.productId]];
+    quantDomain.push(input.lotName ? ["lot_id.name", "=", input.lotName] : ["lot_id", "=", false]);
+    const quantRows = await searchReadAll(credentials, uid, "stock.quant", quantDomain, ["product_id", "lot_id", "location_id", "quantity", "in_date"]);
+
+    let totalQuantity = 0;
+    let warehouseQuantity = 0;
+    let oldestIncoming = Infinity;
+    const quants: AgedStockExplanation["quants"] = [];
+    for (const quant of quantRows) {
+        const quantity = Number(quant.quantity ?? 0);
+        if (quantity <= 0) continue;
+        totalQuantity += quantity;
+        const location = getRelationalName(quant.location_id);
+        const inWarehouse = (location.split("/")[0].trim() || "Unknown") === input.warehouse;
+        const incoming = toMs(quant.in_date);
+        if (Number.isFinite(incoming)) oldestIncoming = Math.min(oldestIncoming, incoming);
+        if (!inWarehouse) continue;
+        warehouseQuantity += quantity;
+        quants.push({ location, quantity, incomingDate: Number.isFinite(incoming) ? dayOf(incoming) : "", ageDays: Number.isFinite(incoming) ? ageOf(incoming) : null });
+    }
+    quants.sort((a, b) => (a.incomingDate || "9").localeCompare(b.incomingDate || "9"));
+
+    const internal = await searchReadAll(credentials, uid, "stock.location", [["usage", "=", "internal"]], ["id"]);
+    const internalIds = new Set(internal.map((location) => Number(location.id)));
+    const transit = await searchReadAll(credentials, uid, "stock.location", [["usage", "=", "transit"]], ["id"]).catch(() => [] as Array<Record<string, unknown>>);
+    const transitIds = new Set(transit.map((location) => Number(location.id)));
+
+    const lineDomain: unknown[] = [["product_id", "=", input.productId], ["state", "=", "done"], ["location_dest_id", "in", Array.from(internalIds)]];
+    lineDomain.push(input.lotName ? ["lot_id.name", "=", input.lotName] : ["lot_id", "=", false]);
+    const lines = await searchReadAll(
+        credentials,
+        uid,
+        "stock.move.line",
+        lineDomain,
+        ["move_id", "picking_id", "quantity", "qty_done", "date", "location_id", "reference"],
+        { order: "date desc, id desc" }
+    ).catch(() => [] as Array<Record<string, unknown>>);
+
+    type Receipt = { ms: number; quantity: number; moveId: number; pickingId: number; document: string; source: string };
+    const receipts: Receipt[] = [];
+    for (const line of lines) {
+        const quantity = Number(line.quantity ?? line.qty_done ?? 0);
+        const ms = toMs(line.date);
+        if (!(quantity > 0) || Number.isNaN(ms)) continue;
+        const fromId = getRelationalId(line.location_id);
+        if (fromId && (internalIds.has(fromId) || transitIds.has(fromId))) continue;
+        receipts.push({
+            ms,
+            quantity,
+            moveId: getRelationalId(line.move_id) ?? 0,
+            pickingId: getRelationalId(line.picking_id) ?? 0,
+            document: toDisplayString(line.reference) || getRelationalName(line.picking_id) || getRelationalName(line.move_id),
+            source: getRelationalName(line.location_id),
+        });
+    }
+    receipts.sort((a, b) => b.ms - a.ms);
+
+    const moveIds = Array.from(new Set(receipts.map((receipt) => receipt.moveId).filter(Boolean)));
+    const pickingIds = Array.from(new Set(receipts.map((receipt) => receipt.pickingId).filter(Boolean)));
+    const priceByMove = new Map<number, number>();
+    if (moveIds.length > 0) {
+        const moves = await readInBatches(credentials, uid, "stock.move", moveIds, ["id", "price_unit"]).catch(() => [] as Array<Record<string, unknown>>);
+        for (const move of moves) priceByMove.set(Number(move.id), Number(move.price_unit ?? 0));
+    }
+    const partnerByPicking = new Map<number, string>();
+    if (pickingIds.length > 0) {
+        const pickings = await readInBatches(credentials, uid, "stock.picking", pickingIds, ["id", "partner_id"]).catch(() => [] as Array<Record<string, unknown>>);
+        for (const picking of pickings) partnerByPicking.set(Number(picking.id), getRelationalName(picking.partner_id));
+    }
+    const product = (await readInBatches(credentials, uid, "product.product", [input.productId], ["display_name", "standard_price"]).catch(() => [] as Array<Record<string, unknown>>))[0];
+    const fallbackCost = Number(product?.standard_price ?? 0);
+
+    // Same walk as the report: newest receipts first until they add up to what is on hand (all warehouses).
+    type Layer = { ms: number; quantity: number; receiptIndex: number };
+    let covered = 0;
+    const layers: Layer[] = [];
+    receipts.forEach((receipt, receiptIndex) => {
+        const take = covered >= totalQuantity - 1e-9 ? 0 : Math.min(receipt.quantity, totalQuantity - covered);
+        covered += take;
+        if (take > 0) layers.push({ ms: receipt.ms, quantity: take, receiptIndex });
+    });
+    const unexplainedQuantity = Math.max(0, totalQuantity - covered);
+    const unexplainedMs = Number.isFinite(oldestIncoming) ? oldestIncoming : NaN;
+    if (unexplainedQuantity > 1e-9) layers.push({ ms: Number.isNaN(unexplainedMs) ? 0 : unexplainedMs, quantity: unexplainedQuantity, receiptIndex: -1 });
+
+    // Hand the whole units to the warehouses: the warehouse whose stock arrived first gets the oldest receipts.
+    const peers = new Map<string, AgedPeer>();
+    for (const quant of quantRows) {
+        const quantity = Number(quant.quantity ?? 0);
+        if (quantity <= 0) continue;
+        const warehouse = getRelationalName(quant.location_id).split("/")[0].trim() || "Unknown";
+        const incoming = toMs(quant.in_date);
+        const peer = peers.get(warehouse) ?? { warehouse, quantity: 0, oldestMs: Infinity };
+        peer.quantity += quantity;
+        if (Number.isFinite(incoming)) peer.oldestMs = Math.min(peer.oldestMs, incoming);
+        peers.set(warehouse, peer);
+    }
+    const mine = allocateLayersToWarehouse(layers, Array.from(peers.values()), input.warehouse);
+    const mineByReceipt = new Map<number, number>();
+    for (const layer of mine) mineByReceipt.set(layer.receiptIndex, (mineByReceipt.get(layer.receiptIndex) ?? 0) + layer.quantity);
+
+    let agedQuantity = 0;
+    const explained: AgedStockExplanation["receipts"] = receipts.map((receipt, receiptIndex) => {
+        const onShelfWarehouse = mineByReceipt.get(receiptIndex) ?? 0;
+        const age = ageOf(receipt.ms);
+        const aged = onShelfWarehouse > 0 && age >= minAge;
+        if (aged) agedQuantity += onShelfWarehouse;
+        const price = priceByMove.get(receipt.moveId) ?? 0;
+        return {
+            date: dayOf(receipt.ms),
+            ageDays: age,
+            quantity: receipt.quantity,
+            onShelf: onShelfWarehouse,
+            onShelfWarehouse,
+            aged,
+            document: receipt.document,
+            partner: partnerByPicking.get(receipt.pickingId) ?? "",
+            source: receipt.source,
+            unitCost: price > 0 ? price : fallbackCost > 0 ? fallbackCost : null,
+        };
+    });
+
+    const unexplainedMine = mineByReceipt.get(-1) ?? 0;
+    if (unexplainedMine > 1e-9 && !Number.isNaN(unexplainedMs) && ageOf(unexplainedMs) >= minAge) agedQuantity += unexplainedMine;
+    const agedDates = explained.filter((item) => item.aged).map((item) => item.date);
+    if (unexplainedMine > 1e-9 && !Number.isNaN(unexplainedMs) && ageOf(unexplainedMs) >= minAge) agedDates.push(dayOf(unexplainedMs));
+    const oldestDate = agedDates.sort()[0] ?? "";
+
+    return {
+        productName: toDisplayString(product?.display_name),
+        lotName: input.lotName,
+        warehouse: input.warehouse,
+        minAgeDays: minAge,
+        warehouseQuantity,
+        totalQuantity,
+        quants,
+        receipts: explained,
+        unexplainedQuantity: unexplainedMine,
+        unexplainedDate: Number.isNaN(unexplainedMs) ? "" : dayOf(unexplainedMs),
+        agedQuantity,
+        oldestDate,
     };
 }
