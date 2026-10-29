@@ -368,7 +368,9 @@ export default function SalespersonActivityPage() {
             try {
                 const data = await getSalespeople();
                 setSalespeople(data.salespeople);
-                if (data.salespeople.length > 0 && !hasRestoredStateRef.current) {
+                // Only preselect when there's no choice to make (a salesperson restricted to themself);
+                // otherwise the first entry is just "Administrator", so leave it for the user to pick.
+                if (data.salespeople.length === 1 && !hasRestoredStateRef.current) {
                     setSelectedSalespersonIds([String(data.salespeople[0].id)]);
                 }
             } catch (error) {

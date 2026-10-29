@@ -129,6 +129,8 @@ export type OdooContact = {
     phone: string;
     street: string;
     city: string;
+    companyName?: string;
+    tags?: string[];
 };
 
 export type OdooProductOption = {

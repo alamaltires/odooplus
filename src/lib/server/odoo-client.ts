@@ -190,6 +190,8 @@ type CustomerSummary = {
     phone: string;
     street: string;
     city: string;
+    companyName?: string;
+    tags?: string[];
 };
 
 type ServicedCustomerRow = CustomerSummary & {
@@ -1769,7 +1771,7 @@ async function loadCustomerSummaries(
     tagFilter: CustomerTagFilter
 ): Promise<CustomerSummary[]> {
     const uid = await authenticate(credentials);
-    const partnerFields = await getAvailablePartnerFields(credentials, uid);
+    const partnerFields = [...(await getAvailablePartnerFields(credentials, uid)), "company_id", "category_id"];
 
     const partners = await executeKw<Array<Record<string, unknown>>>(
         credentials,
@@ -1805,11 +1807,33 @@ async function loadCustomerSummaries(
         partnerById.set(Number(partner.id), partner);
     }
 
+    const tagIds = Array.from(
+        new Set(Array.from(partnerById.values()).flatMap((partner) => (Array.isArray(partner.category_id) ? (partner.category_id as number[]) : [])))
+    );
+    const tagNameById = new Map<number, string>();
+    if (tagIds.length > 0) {
+        const tagRecords = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "res.partner.category",
+            "read",
+            [tagIds],
+            { fields: ["display_name"] }
+        );
+        for (const tag of tagRecords) tagNameById.set(Number(tag.id), toDisplayString(tag.display_name));
+    }
+
     const seen = new Set<number>();
     const customers: CustomerSummary[] = [];
     for (const partner of partners) {
         const canonical = partnerById.get(commercialIdOf(partner)) ?? partner;
-        const summary = toCustomerSummary(canonical, "-");
+        const summary: CustomerSummary = {
+            ...toCustomerSummary(canonical, "-"),
+            companyName: getRelationalName(canonical.company_id),
+            tags: (Array.isArray(canonical.category_id) ? (canonical.category_id as number[]) : [])
+                .map((id) => tagNameById.get(Number(id)) ?? "")
+                .filter(Boolean),
+        };
         if (seen.has(summary.customerId)) continue;
         seen.add(summary.customerId);
         customers.push(summary);
