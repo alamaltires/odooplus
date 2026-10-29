@@ -121,6 +121,16 @@ export type OdooCustomerOption = {
     salespersonName: string;
 };
 
+export type OdooContact = {
+    customerId: number;
+    customerName: string;
+    salespersonName: string;
+    email: string;
+    phone: string;
+    street: string;
+    city: string;
+};
+
 export type OdooProductOption = {
     id: number;
     name: string;

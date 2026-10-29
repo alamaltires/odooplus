@@ -4,7 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useCallback, useRef, useState } from "react";
-import { ClipboardList, HandCoins, LayoutDashboard, LogOut, Menu, PackageSearch, Percent, Pin, PinOff, Ship, ScanSearch, Settings, ShoppingBasket, Tag, Target, TrendingUp, UserSearch, Users, X, type LucideIcon } from "lucide-react";
+import { ClipboardList, HandCoins, LayoutDashboard, LogOut, Menu, PackageSearch, Percent, Pin, PinOff, Ship, ScanSearch, Settings, ShoppingBasket, Tag, Target, TrendingUp, UserSearch, Users, BookUser, X, type LucideIcon } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { CompanySelector } from "@/components/company-selector";
 import { APP_DEFINITIONS, defaultAppHrefsForRole } from "@/lib/app-permissions";
@@ -14,6 +14,7 @@ import { APP_DEFINITIONS, defaultAppHrefsForRole } from "@/lib/app-permissions";
 // modal in Settings) so both stay in sync automatically.
 const ICONS: Record<string, LucideIcon> = {
     "/dashboard": LayoutDashboard,
+    "/my-contacts": BookUser,
     "/orders/pending": ClipboardList,
     "/product-scanner": ScanSearch,
     "/product-requests": PackageSearch,
@@ -131,6 +132,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             visibleLinks.some((link) => link.href === "/salesperson-activity" || link.href === "/payment-followup") &&
             path.startsWith("/customers/")
         ) {
+            return true;
+        }
+        // Customer reports are also opened from My Contacts.
+        if (visibleLinks.some((link) => link.href === "/my-contacts") && path.startsWith("/customers/")) {
             return true;
         }
         // Sales target details drill-down is linked from Sales Targets but isn't

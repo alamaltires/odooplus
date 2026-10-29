@@ -757,10 +757,17 @@ const basePartnerFields = [
     "customer_rank",
 ];
 
+// Field availability never changes at runtime, so look it up once per database.
+const partnerFieldsCache = new Map<string, string[]>();
+
 async function getAvailablePartnerFields(
     credentials: OdooCredentials,
     uid: number
 ): Promise<string[]> {
+    const fieldsCacheKey = `${credentials.url}|${credentials.db}`;
+    const cachedFields = partnerFieldsCache.get(fieldsCacheKey);
+    if (cachedFields) return cachedFields;
+
     const optionalContactFields = ["phone", "mobile"];
     const availableFields = await executeKw<Record<string, { string?: string }>>(
         credentials,
@@ -773,10 +780,12 @@ async function getAvailablePartnerFields(
         }
     );
 
-    return [
+    const fields = [
         ...basePartnerFields,
         ...optionalContactFields.filter((fieldName) => Boolean(availableFields[fieldName])),
     ];
+    partnerFieldsCache.set(fieldsCacheKey, fields);
+    return fields;
 }
 
 const CUSTOMER_MONTHLY_TARGET_LABEL = "customer monthly target";
@@ -1726,11 +1735,39 @@ export async function isCustomerInTagScope(
     return ids.length > 0;
 }
 
-export async function getCustomers(
+// Customer dropdowns are opened all over the app and the list rarely changes, so
+// share one result per scope for a few minutes (concurrent requests share the load too).
+const CUSTOMER_SUMMARIES_TTL_MS = 5 * 60_000;
+const customerSummariesCache = new Map<string, { at: number; value: Promise<CustomerSummary[]> }>();
+
+function getCustomerSummaries(
     credentials: OdooCredentials,
-    assignedToUserId?: number | null,
-    tagFilter: CustomerTagFilter = null
-): Promise<CustomerOption[]> {
+    assignedToUserId: number | null | undefined,
+    tagFilter: CustomerTagFilter
+): Promise<CustomerSummary[]> {
+    const cacheKey = [
+        credentials.url,
+        credentials.db,
+        credentials.username,
+        (companyContextStorage.getStore() ?? []).join(","),
+        assignedToUserId ?? "",
+        JSON.stringify(tagFilter),
+    ].join("|");
+    const hit = customerSummariesCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < CUSTOMER_SUMMARIES_TTL_MS) return hit.value;
+
+    const value = loadCustomerSummaries(credentials, assignedToUserId, tagFilter);
+    customerSummariesCache.set(cacheKey, { at: Date.now(), value });
+    // Failures are never cached.
+    value.catch(() => customerSummariesCache.delete(cacheKey));
+    return value;
+}
+
+async function loadCustomerSummaries(
+    credentials: OdooCredentials,
+    assignedToUserId: number | null | undefined,
+    tagFilter: CustomerTagFilter
+): Promise<CustomerSummary[]> {
     const uid = await authenticate(credentials);
     const partnerFields = await getAvailablePartnerFields(credentials, uid);
 
@@ -1755,30 +1792,53 @@ export async function getCustomers(
         }
     );
 
-    const canonicalIds = Array.from(
-        new Set(
-            partners
-                .map((partner) => getRelationalId(partner.commercial_partner_id) ?? Number(partner.id ?? 0))
-                .filter((id) => Number.isFinite(id) && id > 0)
-        )
+    // Each contact is shown as its commercial partner. Most already are one, so only
+    // fetch the commercial partners that weren't part of the search result itself.
+    const partnerById = new Map<number, Record<string, unknown>>();
+    for (const partner of partners) partnerById.set(Number(partner.id), partner);
+    const commercialIdOf = (partner: Record<string, unknown>) => getRelationalId(partner.commercial_partner_id) ?? Number(partner.id ?? 0);
+
+    const missingIds = Array.from(
+        new Set(partners.map(commercialIdOf).filter((id) => Number.isFinite(id) && id > 0 && !partnerById.has(id)))
     );
+    for (const partner of await readPartnersByIds(credentials, uid, missingIds, partnerFields)) {
+        partnerById.set(Number(partner.id), partner);
+    }
 
-    const canonicalCustomerMap = await getCanonicalCustomerMap(credentials, uid, canonicalIds);
-    const customers = Array.from(canonicalCustomerMap.values()).map((customer) => {
-        const summary = toCustomerSummary(customer, "-");
-        return {
-            id: summary.customerId,
-            name: summary.customerName,
-            salespersonName: summary.salespersonName || "-",
-        };
-    });
+    const seen = new Set<number>();
+    const customers: CustomerSummary[] = [];
+    for (const partner of partners) {
+        const canonical = partnerById.get(commercialIdOf(partner)) ?? partner;
+        const summary = toCustomerSummary(canonical, "-");
+        if (seen.has(summary.customerId)) continue;
+        seen.add(summary.customerId);
+        customers.push(summary);
+    }
 
-    customers.sort((left, right) => left.name.localeCompare(right.name));
+    customers.sort((left, right) => left.customerName.localeCompare(right.customerName));
+    return customers;
+}
 
-    return customers.filter(
-        (customer, index, allCustomers) =>
-            index === allCustomers.findIndex((candidate) => candidate.id === customer.id)
-    );
+export async function getCustomers(
+    credentials: OdooCredentials,
+    assignedToUserId?: number | null,
+    tagFilter: CustomerTagFilter = null
+): Promise<CustomerOption[]> {
+    const summaries = await getCustomerSummaries(credentials, assignedToUserId, tagFilter);
+    return summaries.map((summary) => ({
+        id: summary.customerId,
+        name: summary.customerName,
+        salespersonName: summary.salespersonName || "-",
+    }));
+}
+
+/** Contact cards for "My Contacts": the same customers getCustomers allows, with their contact details. */
+export async function getMyContacts(
+    credentials: OdooCredentials,
+    assignedToUserId?: number | null,
+    tagFilter: CustomerTagFilter = null
+): Promise<CustomerSummary[]> {
+    return getCustomerSummaries(credentials, assignedToUserId, tagFilter);
 }
 
 export async function getProducts(

@@ -8,6 +8,7 @@ export type AppUserRole = "admin" | "purchase" | "salesperson" | "sales_manager"
  */
 export const APP_DEFINITIONS: Array<{ href: string; label: string }> = [
     { href: "/dashboard", label: "Dashboard" },
+    { href: "/my-contacts", label: "My Contacts" },
     { href: "/orders/pending", label: "Pending Orders" },
     { href: "/product-scanner", label: "Aged Stock" },
     { href: "/product-requests", label: "Fast Orders" },
@@ -34,6 +35,7 @@ export function defaultAppHrefsForRole(role: AppUserRole): string[] {
     switch (role) {
         case "purchase":
             return [
+                "/my-contacts",
                 "/orders/pending",
                 "/purchase-order",
                 "/po-tracking",
@@ -44,17 +46,17 @@ export function defaultAppHrefsForRole(role: AppUserRole): string[] {
                 "/msrp-finder",
             ];
         case "salesperson":
-            return ["/sales-targets", "/salesperson-activity", "/payment-followup", "/settings", "/product-requests"];
+            return ["/my-contacts", "/sales-targets", "/salesperson-activity", "/payment-followup", "/settings", "/product-requests"];
         case "sales_manager":
-            return ["/sales-targets", "/salesperson-activity", "/customer-activity", "/payment-followup", "/settings", "/product-requests"];
+            return ["/my-contacts", "/sales-targets", "/salesperson-activity", "/customer-activity", "/payment-followup", "/settings", "/product-requests"];
         case "manager":
             return [...APP_HREFS];
         case "accountant":
-            return ["/payment-followup", "/customer-activity", "/margin-analytics", "/settings", "/product-requests"];
+            return ["/my-contacts", "/payment-followup", "/customer-activity", "/margin-analytics", "/settings", "/product-requests"];
         case "store":
-            return ["/orders/pending", "/product-scanner", "/settings", "/product-requests"];
+            return ["/my-contacts", "/orders/pending", "/product-scanner", "/settings", "/product-requests"];
         case "user":
-            return ["/product-requests", "/settings"];
+            return ["/my-contacts", "/product-requests", "/settings"];
         case "admin":
         default:
             return [...APP_HREFS];

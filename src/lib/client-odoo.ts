@@ -7,6 +7,7 @@ import {
     OdooDashboardActivityType,
     OdooDashboardStats,
     OdooCustomerActivityReport,
+    OdooContact,
     OdooCustomerReport,
     OdooPartnerLedger,
     OdooNearExpiryProduct,
@@ -539,8 +540,54 @@ export function getSalespeople() {
     return post<{ salespeople: OdooSalesperson[] }>("/api/odoo/salespeople", {});
 }
 
+// The customer list is requested by many screens and changes rarely: keep it in
+// memory (and sessionStorage across reloads) and refresh in the background.
+const CUSTOMER_LIST_TTL_MS = 5 * 60_000;
+const customerListMemory = new Map<string, { at: number; promise: Promise<unknown> }>();
+
+function cachedCustomerList<T>(path: string, load: () => Promise<T>): Promise<T> {
+    const uid = getAuth().currentUser?.uid ?? "";
+    const key = `odoopp:list:${path}:${uid}:${getSelectedCompanyIds().join(",")}`;
+    const memory = customerListMemory.get(key);
+    if (memory && Date.now() - memory.at < CUSTOMER_LIST_TTL_MS) return memory.promise as Promise<T>;
+
+    const fetchFresh = () => {
+        const promise = load();
+        customerListMemory.set(key, { at: Date.now(), promise });
+        promise.then(
+            (value) => {
+                try {
+                    window.sessionStorage.setItem(key, JSON.stringify({ at: Date.now(), value }));
+                } catch {
+                    // storage full or unavailable: memory cache still works
+                }
+            },
+            () => customerListMemory.delete(key)
+        );
+        return promise;
+    };
+
+    try {
+        const stored = window.sessionStorage.getItem(key);
+        if (stored) {
+            const parsed = JSON.parse(stored) as { at: number; value: T };
+            // Show the saved list instantly; stale ones are refreshed in the background.
+            if (Date.now() - parsed.at >= CUSTOMER_LIST_TTL_MS) fetchFresh().catch(() => undefined);
+            else customerListMemory.set(key, { at: parsed.at, promise: Promise.resolve(parsed.value) });
+            return Promise.resolve(parsed.value);
+        }
+    } catch {
+        // unreadable cache: fall through to a normal load
+    }
+    return fetchFresh();
+}
+
 export function getCustomers() {
-    return post<{ customers: OdooCustomerOption[] }>("/api/odoo/customers", {});
+    return cachedCustomerList("customers", () => post<{ customers: OdooCustomerOption[] }>("/api/odoo/customers", {}));
+}
+
+export function getMyContacts() {
+    return cachedCustomerList("my-contacts", () => post<{ contacts: OdooContact[] }>("/api/odoo/my-contacts", {}));
 }
 
 export function getProducts(input?: { query?: string; limit?: number; offset?: number }) {
