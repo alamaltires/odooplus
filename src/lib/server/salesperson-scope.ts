@@ -54,7 +54,10 @@ export async function getAllowedSalespersonIds(
         if (Number.isFinite(salesTeamId) && salesTeamId > 0) {
             const teams = await getSalesTeams(credentials);
             const team = teams.find((item) => item.id === salesTeamId);
-            return { ids: team ? team.memberIds : [], restrictedToSelf: false };
+            // The manager is listed beside their team (they may not be a member of it in Odoo).
+            const ownId = await getOdooUserId(credentials);
+            const memberIds = team ? team.memberIds : [];
+            return { ids: memberIds.includes(ownId) ? memberIds : [ownId, ...memberIds], restrictedToSelf: false };
         }
     }
 
