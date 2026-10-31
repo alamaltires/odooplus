@@ -11766,7 +11766,7 @@ function localMonthKey(odooDatetime: string, timeZone: string): string {
  */
 export async function getCustomerActivityReport(
     credentials: OdooCredentials,
-    input: { customerId: number; startDate: string; endDate: string }
+    input: { customerId: number; startDate: string; endDate: string; includeCost?: boolean }
 ): Promise<OdooCustomerActivityReport> {
     const uid = await authenticate(credentials);
     const customerId = Number(input.customerId);
@@ -11852,7 +11852,9 @@ export async function getCustomerActivityReport(
         )
         : [];
     const saleLineIds = saleLines.map((line) => Number(line.id));
-    const costLayers = saleLineIds.length > 0
+    // Salespeople don't see margins, so their report never reads stock valuation (which needs extra Odoo rights).
+    const costAvailable = input.includeCost !== false;
+    const costLayers = saleLineIds.length > 0 && costAvailable
         ? await searchReadAll(credentials, uid, "stock.valuation.layer", [["stock_move_id.sale_line_id", "in", saleLineIds]], ["stock_move_id", "value", "currency_id"])
         : [];
     const layerMoveIds = Array.from(new Set(costLayers.map((layer) => getRelationalId(layer.stock_move_id)).filter((id): id is number => !!id)));
@@ -11943,7 +11945,8 @@ export async function getCustomerActivityReport(
             costOfGoods: Number((deliveredRevenue - grossProfit).toFixed(2)),
             grossProfit,
             gpPercent: deliveredRevenue > 0 ? Number(((grossProfit / deliveredRevenue) * 100).toFixed(1)) : null,
-            linesWithoutCost,
+            linesWithoutCost: costAvailable ? linesWithoutCost : 0,
+            costAvailable,
         },
         months: monthRows,
         orders: orderRows,

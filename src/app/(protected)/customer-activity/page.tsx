@@ -103,6 +103,7 @@ export default function CustomerActivityPage() {
         if (!report) return;
         const XLSX = await import("xlsx");
         const workbook = XLSX.utils.book_new();
+        const withGp = report.totals.costAvailable !== false;
 
         XLSX.utils.book_append_sheet(
             workbook,
@@ -117,9 +118,13 @@ export default function CustomerActivityPage() {
                 { Metric: "Orders", Value: report.totals.orderCount },
                 { Metric: `Net sales ex VAT (${getDisplayCurrency()})`, Value: report.totals.netSales },
                 { Metric: `Delivered revenue ex VAT (${getDisplayCurrency()})`, Value: report.totals.deliveredRevenue },
-                { Metric: `Cost of goods (${getDisplayCurrency()})`, Value: report.totals.costOfGoods },
-                { Metric: `Gross profit (${getDisplayCurrency()})`, Value: report.totals.grossProfit },
-                { Metric: "GP %", Value: report.totals.gpPercent ?? "" },
+                ...(withGp
+                    ? [
+                          { Metric: `Cost of goods (${getDisplayCurrency()})`, Value: report.totals.costOfGoods },
+                          { Metric: `Gross profit (${getDisplayCurrency()})`, Value: report.totals.grossProfit },
+                          { Metric: "GP %", Value: report.totals.gpPercent ?? "" },
+                      ]
+                    : []),
                 { Metric: "Open quotations", Value: report.totals.openQuotationCount },
             ]),
             "Summary"
@@ -134,8 +139,12 @@ export default function CustomerActivityPage() {
                     Target: month.target,
                     "Achieved %": month.target > 0 ? Number(((month.sales / month.target) * 100).toFixed(1)) : "",
                     "Delivered revenue": month.deliveredRevenue,
-                    GP: month.grossProfit,
-                    "GP %": month.deliveredRevenue > 0 ? Number(((month.grossProfit / month.deliveredRevenue) * 100).toFixed(1)) : "",
+                    ...(withGp
+                        ? {
+                              GP: month.grossProfit,
+                              "GP %": month.deliveredRevenue > 0 ? Number(((month.grossProfit / month.deliveredRevenue) * 100).toFixed(1)) : "",
+                          }
+                        : {}),
                 }))
             ),
             "Monthly"
@@ -149,8 +158,12 @@ export default function CustomerActivityPage() {
                     Salesperson: order.salespersonName,
                     Amount: order.amount,
                     "Delivered revenue (ex VAT)": order.deliveredRevenue,
-                    GP: order.grossProfit,
-                    "GP %": order.deliveredRevenue > 0 ? Number(((order.grossProfit / order.deliveredRevenue) * 100).toFixed(1)) : "",
+                    ...(withGp
+                        ? {
+                              GP: order.grossProfit,
+                              "GP %": order.deliveredRevenue > 0 ? Number(((order.grossProfit / order.deliveredRevenue) * 100).toFixed(1)) : "",
+                          }
+                        : {}),
                 }))
             ),
             "Orders"
@@ -287,6 +300,7 @@ export default function CustomerActivityPage() {
                             </p>
                             <p className="mt-1 text-xs text-(--ink-soft)">Sales ÷ target for the period</p>
                         </div>
+                        {report.totals.costAvailable !== false ? (
                         <div className="rounded-2xl border border-(--line) bg-(--card) p-4">
                             <p className="text-xs text-(--ink-soft)">Gross profit (GP)</p>
                             <p className={`mt-1 font-display text-2xl ${report.totals.grossProfit < 0 ? "text-red-600" : ""}`}>
@@ -303,6 +317,7 @@ export default function CustomerActivityPage() {
                                 )}
                             </p>
                         </div>
+                        ) : null}
                         <Metric
                             label="Last order"
                             value={report.totals.lastSaleDate ? formatDate(report.totals.lastSaleDate) : "None"}
@@ -316,6 +331,7 @@ export default function CustomerActivityPage() {
                         <Metric label="Lifetime sales" value={formatCurrency(report.totals.lifetimeSales)} hint="All confirmed orders, any date" />
                     </div>
 
+                    {report.totals.costAvailable !== false ? (
                     <p className="-mt-2 text-xs text-(--ink-soft)">
                         GP = delivered revenue (excluding VAT, in {getDisplayCurrency()}) minus the cost Odoo booked on those deliveries. Of {formatCurrency(report.totals.netSales)} ordered
                         (ex VAT), {formatCurrency(report.totals.deliveredRevenue)} has been delivered so far.
@@ -323,6 +339,7 @@ export default function CustomerActivityPage() {
                             ? ` ${report.totals.linesWithoutCost} delivered line${report.totals.linesWithoutCost === 1 ? " has" : "s have"} no cost recorded in Odoo, so GP is overstated by their cost.`
                             : ""}
                     </p>
+                    ) : null}
 
                     {/* Month by month vs target */}
                     <Panel icon={<CalendarDays className="h-5 w-5" />} title="Month by month vs target">
@@ -337,7 +354,7 @@ export default function CustomerActivityPage() {
                                             <span className="text-(--ink-soft)">
                                                 {formatCurrency(month.sales)}
                                                 {month.target > 0 ? ` of ${formatCurrency(month.target)}` : ""} · {month.orderCount} order{month.orderCount === 1 ? "" : "s"}
-                                                {month.deliveredRevenue > 0 ? (
+                                                {report.totals.costAvailable !== false && month.deliveredRevenue > 0 ? (
                                                     <span className={month.grossProfit < 0 ? "text-red-600" : ""}>
                                                         {" "}· GP {formatCurrency(month.grossProfit)} ({formatNumber((month.grossProfit / month.deliveredRevenue) * 100)}%)
                                                     </span>
@@ -365,7 +382,7 @@ export default function CustomerActivityPage() {
                     </Panel>
 
                     <Panel icon={<ShoppingCart className="h-5 w-5" />} title={`Orders in period (${report.orders.length})`}>
-                        <OrdersTable rows={report.orders} empty="No confirmed orders in this period." showGp />
+                        <OrdersTable rows={report.orders} empty="No confirmed orders in this period." showGp={report.totals.costAvailable !== false} />
                     </Panel>
 
                     <Panel icon={<FileText className="h-5 w-5" />} title={`Open quotations (${report.openQuotations.length})`}>

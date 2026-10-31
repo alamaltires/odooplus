@@ -534,6 +534,8 @@ export type OdooCustomerActivityReport = {
         gpPercent: number | null;
         /** Delivered order lines with no cost recorded (their profit is overstated). */
         linesWithoutCost: number;
+        /** False when margins are withheld (salesperson role), so gross profit isn't shown. */
+        costAvailable?: boolean;
     };
     months: OdooCustomerActivityMonth[];
     orders: OdooCustomerActivityOrder[];
