@@ -3617,12 +3617,12 @@ export async function getSalespersonActivityReport(
         ...allSalespersonOrders.map((order) => getRelationalId(order.partner_id) ?? 0),
     ];
 
-    const termFields = await getExistingPartnerFields(credentials, uid, ["property_supplier_payment_term_id", "credit_limit", "credit"]);
+    const termFields = await getExistingPartnerFields(credentials, uid, ["property_payment_term_id", "credit_limit", "credit"]);
     const canonicalCustomerMap = await getCanonicalCustomerMap(
         credentials,
         uid,
         relevantPartnerIds,
-        [...(monthlyTargetField ? [monthlyTargetField] : []), ...termFields.filter((field) => field === "property_supplier_payment_term_id")]
+        [...(monthlyTargetField ? [monthlyTargetField] : []), ...termFields.filter((field) => field === "property_payment_term_id")]
     );
 
     const money = await getMoneyConverter(credentials, uid);
@@ -3648,7 +3648,7 @@ export async function getSalespersonActivityReport(
         if (!existing) {
             servicedByCustomerId.set(key, {
                 ...summary,
-                paymentTerm: getRelationalName(customer.property_supplier_payment_term_id),
+                paymentTerm: getRelationalName(customer.property_payment_term_id),
                 assignedToSelf: getRelationalId(customer.user_id) === salespersonId,
                 orderCount: 1,
                 totalSales: Number(orderAmount.toFixed(2)),
@@ -11829,10 +11829,10 @@ export async function getCustomerActivityReport(
         uid,
         "res.partner",
         "fields_get",
-        [["property_supplier_payment_term_id", "credit_limit", "credit"]],
+        [["property_payment_term_id", "credit_limit", "credit"]],
         { attributes: ["string"] }
     ).catch(() => ({} as Record<string, unknown>));
-    const termFields = ["property_supplier_payment_term_id", "credit_limit", "credit"].filter((field) => field in termFieldsAvailable);
+    const termFields = ["property_payment_term_id", "credit_limit", "credit"].filter((field) => field in termFieldsAvailable);
     const canonical = await getCanonicalCustomerMap(
         credentials,
         uid,
@@ -11979,7 +11979,7 @@ export async function getCustomerActivityReport(
         startDate,
         endDate,
         customerMonthlyTarget,
-        paymentTerm: getRelationalName(customerRecord.property_supplier_payment_term_id),
+        paymentTerm: getRelationalName(customerRecord.property_payment_term_id),
         creditLimit: "credit_limit" in customerRecord ? Number(customerRecord.credit_limit ?? 0) || 0 : null,
         receivable: "credit" in customerRecord ? Number(customerRecord.credit ?? 0) || 0 : null,
         totals: {
