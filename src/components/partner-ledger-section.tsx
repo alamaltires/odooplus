@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { BookOpen, ChevronDown, Download } from "lucide-react";
 import { getPartnerLedger } from "@/lib/client-odoo";
 import type { OdooPartnerLedger } from "@/types/odoo";
+import { writeWorkbook } from "@/lib/client-activity";
 
 function formatNumber(value: number) {
     return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -66,7 +67,7 @@ export function PartnerLedgerSection({ customerId, asOfDate }: { customerId: num
         );
         const workbook = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(workbook, sheet, "Partner Ledger");
-        XLSX.writeFile(workbook, `partner-ledger-${ledger.customerName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${ledger.asOfDate}.xlsx`);
+        writeWorkbook(XLSX, workbook, `partner-ledger-${ledger.customerName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${ledger.asOfDate}.xlsx`);
     }
 
     return (

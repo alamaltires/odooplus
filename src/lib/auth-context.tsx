@@ -1,5 +1,6 @@
 "use client";
 
+import { logActivity } from "@/lib/client-activity";
 import {
     createContext,
     useContext,
@@ -101,11 +102,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             // for itself instead of inheriting anything from this login.
             login: async (email, password) => {
                 await signInWithEmailAndPassword(auth, email, password);
+                void logActivity({ action: "Signed in", category: "account" });
             },
             register: async (email, password) => {
                 await createUserWithEmailAndPassword(auth, email, password);
             },
             logout: async () => {
+                // Before signing out: the log call needs the still-valid session.
+                await logActivity({ action: "Signed out", category: "account" });
                 await signOut(auth);
             },
         }),

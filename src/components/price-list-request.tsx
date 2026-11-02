@@ -20,6 +20,7 @@ import {
 import { subscribeSelectedCompanyIds } from "@/lib/company-filter";
 import { Select2, type Select2Option } from "@/components/select2";
 import { useAuth } from "@/lib/auth-context";
+import { writeWorkbook } from "@/lib/client-activity";
 
 type Option = { id: number | string; name: string };
 type FilterField = "brand" | "origin" | "category" | "oe" | "lot" | "location" | "searchName";
@@ -726,7 +727,7 @@ export function PriceListRequest() {
             worksheet["!cols"] = columns.map((column) => ({ wch: column.width }));
             const workbook = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(workbook, worksheet, "Price List");
-            XLSX.writeFile(workbook, `price-list-${new Date().toISOString().slice(0, 10)}.xlsx`);
+            writeWorkbook(XLSX, workbook, `price-list-${new Date().toISOString().slice(0, 10)}.xlsx`);
         } catch (exportError) {
             setError(exportError instanceof Error ? exportError.message : "Failed to create the Excel file.");
         } finally {

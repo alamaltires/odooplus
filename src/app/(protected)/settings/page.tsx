@@ -2,13 +2,15 @@
 
 import { FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { getAuth } from "firebase/auth";
-import { ChevronDown, Pencil, Shield, Trash2, X } from "lucide-react";
+import { ChevronDown, History, KeyRound, Pencil, Plug, Shield, Trash2, UserRound, Users, X, type LucideIcon } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { getOdooSettings, saveOdooSettings } from "@/lib/firestore-settings";
 import { getCustomerTags, getPricelists, getPoTrackingPasswordStatus, getSalesTeams, getSystemOdooSettings, savePoTrackingPassword, saveSystemOdooSettings } from "@/lib/client-odoo";
 import { OdooUserCredentials } from "@/types/odoo";
 import { APP_DEFINITIONS, defaultAppHrefsForRole } from "@/lib/app-permissions";
 import { Select2, type Select2Option } from "@/components/select2";
+import { ActivityLogSection } from "@/components/activity-log-section";
+import { logActivity } from "@/lib/client-activity";
 
 type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "accountant" | "manager" | "store" | "user";
 
@@ -44,10 +46,25 @@ const initialState: OdooUserCredentials = {
 
 const initialSystemState = { url: "", db: "" };
 
+type SettingsTab = "login" | "connection" | "po" | "users" | "activity";
+
+const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; icon: LucideIcon; adminOnly: boolean }> = [
+    { id: "users", label: "Users", icon: Users, adminOnly: true },
+    { id: "activity", label: "Activity Log", icon: History, adminOnly: true },
+    { id: "login", label: "My Odoo Login", icon: UserRound, adminOnly: false },
+    { id: "connection", label: "Odoo Connection", icon: Plug, adminOnly: true },
+    { id: "po", label: "PO Tracking Password", icon: KeyRound, adminOnly: true },
+];
+
 export default function SettingsPage() {
     const { user, role } = useAuth();
+    // Admins land on Users; everyone else on their own Odoo login (the only tab they have).
+    const [selectedTab, setTab] = useState<SettingsTab | null>(null);
+    const tab: SettingsTab = selectedTab ?? (role === "admin" ? "users" : "login");
+    // Each tab loads its data the first time it is opened, not when the page opens.
+    const loadedTabs = useRef(new Set<SettingsTab>());
     const [values, setValues] = useState<OdooUserCredentials>(initialState);
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
     const [message, setMessage] = useState<string | null>(null);
 
@@ -138,59 +155,41 @@ export default function SettingsPage() {
     }, [getBearerToken]);
 
     useEffect(() => {
-        async function loadSettings() {
-            if (!user) {
-                setLoading(false);
-                return;
-            }
+        if (!user || loadedTabs.current.has(tab)) return;
+        if (tab !== "login" && role !== "admin") return;
+        loadedTabs.current.add(tab);
 
-            try {
-                const saved = await getOdooSettings(user.uid);
-                if (saved) {
-                    setValues(saved);
-                }
-            } catch (error) {
-                setMessage(
-                    error instanceof Error
-                        ? `Failed to load settings: ${error.message}`
-                        : "Failed to load settings."
-                );
-            } finally {
-                setLoading(false);
-            }
-        }
-
-        void loadSettings();
-    }, [user]);
-
-    useEffect(() => {
-        if (!user || role !== "admin") {
-            return;
-        }
-
-        void loadUsers();
-
-        async function loadSystemSettings() {
+        if (tab === "login") {
+            setLoading(true);
+            getOdooSettings(user.uid)
+                .then((saved) => {
+                    if (saved) setValues(saved);
+                })
+                .catch((error) => setMessage(error instanceof Error ? `Failed to load settings: ${error.message}` : "Failed to load settings."))
+                .finally(() => setLoading(false));
+        } else if (tab === "connection") {
             setSystemLoading(true);
             setSystemMessage(null);
-            try {
-                const data = await getSystemOdooSettings();
-                if (data.settings) {
-                    setSystemValues(data.settings);
-                }
-            } catch (error) {
-                setSystemMessage(error instanceof Error ? error.message : "Failed to load system settings.");
-            } finally {
-                setSystemLoading(false);
+            getSystemOdooSettings()
+                .then((data) => {
+                    if (data.settings) setSystemValues(data.settings);
+                })
+                .catch((error) => setSystemMessage(error instanceof Error ? error.message : "Failed to load system settings."))
+                .finally(() => setSystemLoading(false));
+        } else if (tab === "po") {
+            getPoTrackingPasswordStatus()
+                .then(setPoPasswordSet)
+                .catch(() => undefined);
+        } else if (tab === "users") {
+            void loadUsers();
+        } else if (tab === "activity") {
+            // The log's user filter needs the user list, which is otherwise loaded by the Users tab.
+            if (!loadedTabs.current.has("users")) {
+                loadedTabs.current.add("users");
+                void loadUsers();
             }
         }
-
-        void loadSystemSettings();
-
-        getPoTrackingPasswordStatus()
-            .then(setPoPasswordSet)
-            .catch(() => undefined);
-    }, [user, role, loadUsers]);
+    }, [tab, user, role, loadUsers]);
 
     async function handleSubmit(event: FormEvent) {
         event.preventDefault();
@@ -203,6 +202,7 @@ export default function SettingsPage() {
 
         try {
             await saveOdooSettings(user.uid, values);
+            void logActivity({ action: "Changed their own Odoo login", category: "settings", detail: values.username });
             setMessage("Settings saved successfully.");
         } catch (error) {
             setMessage(error instanceof Error ? error.message : "Failed to save settings.");
@@ -240,10 +240,6 @@ export default function SettingsPage() {
         } finally {
             setPoPasswordSaving(false);
         }
-    }
-
-    if (loading) {
-        return <p>Loading settings...</p>;
     }
 
     async function handleCreateUser(event: FormEvent) {
@@ -433,7 +429,27 @@ export default function SettingsPage() {
 
     return (
         <section className="max-w-5xl space-y-6">
-            {role === "admin" ? (
+            <nav className="flex flex-wrap gap-1 rounded-2xl border border-(--line) bg-(--card) p-1.5" aria-label="Settings sections" role="tablist">
+                {SETTINGS_TABS.filter((item) => !item.adminOnly || role === "admin").map((item) => {
+                    const Icon = item.icon;
+                    const active = tab === item.id;
+                    return (
+                        <button
+                            key={item.id}
+                            type="button"
+                            role="tab"
+                            aria-selected={active}
+                            onClick={() => setTab(item.id)}
+                            className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${active ? "bg-(--brand) text-white shadow-sm" : "text-(--ink-soft) hover:bg-(--chip) hover:text-(--ink)"}`}
+                        >
+                            <Icon className="h-4 w-4" aria-hidden="true" />
+                            {item.label}
+                        </button>
+                    );
+                })}
+            </nav>
+
+            {role === "admin" && tab === "connection" ? (
                 <article className="rounded-3xl border border-(--line) bg-(--card) p-6">
                     <h1 className="font-display text-2xl">System Odoo Connection</h1>
                     <p className="mt-1 text-sm text-(--ink-soft)">
@@ -478,7 +494,7 @@ export default function SettingsPage() {
                 </article>
             ) : null}
 
-            {role === "admin" ? (
+            {role === "admin" && tab === "po" ? (
                 <article className="rounded-3xl border border-(--line) bg-(--card) p-6">
                     <h2 className="font-display text-2xl">PO Tracking Update Password</h2>
                     <p className="mt-1 text-sm text-(--ink-soft)">
@@ -522,6 +538,7 @@ export default function SettingsPage() {
                 </article>
             ) : null}
 
+            {tab === "login" ? (
             <article className="rounded-3xl border border-(--line) bg-(--card) p-6">
                 <h1 className="font-display text-2xl">Your Odoo Login</h1>
                 <p className="mt-1 text-sm text-(--ink-soft)">
@@ -531,6 +548,8 @@ export default function SettingsPage() {
                     Odoo API key as the password instead. The URL and Database are configured system-wide by an
                     admin.
                 </p>
+
+                {loading ? <p className="mt-4 text-sm text-(--ink-soft)">Loading your saved login...</p> : null}
 
                 <form onSubmit={handleSubmit} className="mt-6 grid gap-4 sm:grid-cols-2">
                     <label>
@@ -569,8 +588,9 @@ export default function SettingsPage() {
 
                 {message ? <p className="mt-4 text-sm text-(--ink-soft)">{message}</p> : null}
             </article>
+            ) : null}
 
-            {role === "admin" ? (
+            {role === "admin" && tab === "users" ? (
                 <article className="rounded-3xl border border-(--line) bg-(--card) p-6">
                     <h2 className="font-display text-2xl">User Management</h2>
                     <p className="mt-1 text-sm text-(--ink-soft)">
@@ -691,6 +711,8 @@ export default function SettingsPage() {
                     </div>
                 </article>
             ) : null}
+
+            {role === "admin" && tab === "activity" ? <ActivityLogSection users={users.map((item) => ({ id: item.id, email: item.email }))} /> : null}
 
             {permissionsUser ? (
                 <PermissionsModal

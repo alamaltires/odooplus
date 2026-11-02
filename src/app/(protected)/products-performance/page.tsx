@@ -5,6 +5,7 @@ import { ChevronDown, ChevronRight, Download, Search, TrendingUp, X } from "luci
 import { useAuth } from "@/lib/auth-context";
 import { Select2 } from "@/components/select2";
 import { resolveExactNameMatch } from "@/lib/combobox-match";
+import { writeWorkbook } from "@/lib/client-activity";
 import {
     getProductBrands,
     getProductCategories,
@@ -741,7 +742,7 @@ export default function ProductsPerformancePage() {
 
             const workbook = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(workbook, worksheet, "Products Performance");
-            XLSX.writeFile(workbook, `${exportFileName}.xlsx`);
+            writeWorkbook(XLSX, workbook, `${exportFileName}.xlsx`);
         } catch (exportError) {
             setReportError(
                 exportError instanceof Error ? exportError.message : "Failed to export products performance report."

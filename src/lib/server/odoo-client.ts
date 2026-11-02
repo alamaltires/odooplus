@@ -195,6 +195,9 @@ type CustomerSummary = {
 };
 
 type ServicedCustomerRow = CustomerSummary & {
+    paymentTerm: string;
+    /** True when the customer is assigned to the salesperson (not just sold to by them). */
+    assignedToSelf: boolean;
     orderCount: number;
     totalSales: number;
     lastSaleDate: string;
@@ -240,6 +243,8 @@ type CustomerSalesBrand = {
 
 type CustomerReport = {
     customer: CustomerSummary;
+    /** Set when the report was limited to a date range. */
+    range?: { startDate: string; endDate: string };
     totalSales: number;
     lastVisitDate: string;
     lastVisitReference: string;
@@ -758,6 +763,22 @@ const basePartnerFields = [
     "commercial_partner_id",
     "customer_rank",
 ];
+
+const existingPartnerFieldsCache = new Map<string, Set<string>>();
+
+/** Which of these optional res.partner fields exist in this database (a missing field would fail a read). */
+async function getExistingPartnerFields(credentials: OdooCredentials, uid: number, names: string[]): Promise<string[]> {
+    const cacheKey = `${credentials.url}|${credentials.db}`;
+    let known = existingPartnerFieldsCache.get(cacheKey);
+    if (!known) {
+        const meta = await executeKw<Record<string, unknown>>(credentials, uid, "res.partner", "fields_get", [names], { attributes: ["string"] }).catch(
+            () => ({}) as Record<string, unknown>
+        );
+        known = new Set(Object.keys(meta));
+        existingPartnerFieldsCache.set(cacheKey, known);
+    }
+    return names.filter((name) => known.has(name));
+}
 
 // Field availability never changes at runtime, so look it up once per database.
 const partnerFieldsCache = new Map<string, string[]>();
@@ -3596,11 +3617,12 @@ export async function getSalespersonActivityReport(
         ...allSalespersonOrders.map((order) => getRelationalId(order.partner_id) ?? 0),
     ];
 
+    const termFields = await getExistingPartnerFields(credentials, uid, ["property_supplier_payment_term_id", "credit_limit", "credit"]);
     const canonicalCustomerMap = await getCanonicalCustomerMap(
         credentials,
         uid,
         relevantPartnerIds,
-        monthlyTargetField ? [monthlyTargetField] : []
+        [...(monthlyTargetField ? [monthlyTargetField] : []), ...termFields.filter((field) => field === "property_supplier_payment_term_id")]
     );
 
     const money = await getMoneyConverter(credentials, uid);
@@ -3626,6 +3648,8 @@ export async function getSalespersonActivityReport(
         if (!existing) {
             servicedByCustomerId.set(key, {
                 ...summary,
+                paymentTerm: getRelationalName(customer.property_supplier_payment_term_id),
+                assignedToSelf: getRelationalId(customer.user_id) === salespersonId,
                 orderCount: 1,
                 totalSales: Number(orderAmount.toFixed(2)),
                 lastSaleDate,
@@ -3742,9 +3766,21 @@ export async function getSalespersonActivityReport(
 
 export async function getCustomerReport(
     credentials: OdooCredentials,
-    customerId: number
+    customerId: number,
+    range?: { startDate: string; endDate: string }
 ): Promise<CustomerReport> {
     const uid = await authenticate(credentials);
+    // With a range, sales figures and brand breakdowns cover only orders dated inside it.
+    let orderDateDomain: unknown[] = [];
+    let lineDateDomain: unknown[] = [];
+    if (range) {
+        ensureDateRange(range.startDate, range.endDate);
+        const timeZone = await getUserTimezone(credentials, uid);
+        const from = toOdooDateBoundary(range.startDate, false, timeZone);
+        const to = toOdooDateBoundary(range.endDate, true, timeZone);
+        orderDateDomain = [["date_order", ">=", from], ["date_order", "<=", to]];
+        lineDateDomain = [["order_id.date_order", ">=", from], ["order_id.date_order", "<=", to]];
+    }
     const parsedCustomerId = Number(customerId);
 
     if (!Number.isFinite(parsedCustomerId) || parsedCustomerId <= 0) {
@@ -3764,6 +3800,7 @@ export async function getCustomerReport(
             [[
                 ["partner_id", "child_of", commercialPartnerId],
                 ["state", "in", ["sale", "done"]],
+                ...orderDateDomain,
             ]],
             {
                 fields: ["id", "amount_total", "currency_id"],
@@ -3816,6 +3853,7 @@ export async function getCustomerReport(
             ["order_id.state", "in", ["sale", "done"]],
             ["display_type", "=", false],
             ["product_id", "!=", false],
+            ...lineDateDomain,
         ]],
         {
             fields: ["product_id", "product_uom_qty", "price_subtotal", "currency_id"],
@@ -3978,6 +4016,7 @@ export async function getCustomerReport(
 
     return {
         customer: customerSummary,
+        ...(range ? { range: { startDate: range.startDate, endDate: range.endDate } } : {}),
         totalSales,
         lastVisitDate,
         lastVisitReference: toDisplayString(lastVisit?.name),
@@ -11783,11 +11822,22 @@ export async function getCustomerActivityReport(
 
     const commercial = await getCommercialPartner(credentials, uid, customerId);
     const commercialPartnerId = Number(commercial.id ?? 0);
+    // Payment terms / credit limit / receivable balance: standard partner fields, but only
+    // asked for when this database has them (a missing field would fail the whole read).
+    const termFieldsAvailable = await executeKw<Record<string, unknown>>(
+        credentials,
+        uid,
+        "res.partner",
+        "fields_get",
+        [["property_supplier_payment_term_id", "credit_limit", "credit"]],
+        { attributes: ["string"] }
+    ).catch(() => ({} as Record<string, unknown>));
+    const termFields = ["property_supplier_payment_term_id", "credit_limit", "credit"].filter((field) => field in termFieldsAvailable);
     const canonical = await getCanonicalCustomerMap(
         credentials,
         uid,
         [commercialPartnerId],
-        monthlyTargetField ? [monthlyTargetField] : []
+        [...(monthlyTargetField ? [monthlyTargetField] : []), ...termFields]
     );
     const customerRecord = canonical.get(commercialPartnerId) ?? commercial;
     const customer = toCustomerSummary(customerRecord, getRelationalName(customerRecord.user_id));
@@ -11929,6 +11979,9 @@ export async function getCustomerActivityReport(
         startDate,
         endDate,
         customerMonthlyTarget,
+        paymentTerm: getRelationalName(customerRecord.property_supplier_payment_term_id),
+        creditLimit: "credit_limit" in customerRecord ? Number(customerRecord.credit_limit ?? 0) || 0 : null,
+        receivable: "credit" in customerRecord ? Number(customerRecord.credit ?? 0) || 0 : null,
         totals: {
             orderCount: orderRows.length,
             totalSales,
@@ -13722,4 +13775,67 @@ export async function getAgedStockExplanation(
         agedQuantity,
         oldestDate,
     };
+}
+
+
+export type MyProductHistoryRow = {
+    orderId: number;
+    orderName: string;
+    date: string;
+    customerName: string;
+    state: string;
+    quantity: number;
+    deliveredQuantity: number;
+    unitPrice: number;
+    discount: number;
+    subtotal: number;
+    currency: string;
+};
+
+/** Every order line the signed-in user sold of one product (newest first), quotations included. */
+export async function getMyProductHistory(credentials: OdooCredentials, productId: number): Promise<MyProductHistoryRow[]> {
+    const uid = await authenticate(credentials);
+    if (!Number.isFinite(productId) || productId <= 0) throw new Error("A valid product is required.");
+
+    const lines = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "sale.order.line",
+        "search_read",
+        [[
+            ["product_id", "=", productId],
+            ["order_id.user_id", "=", uid],
+            ["order_id.state", "!=", "cancel"],
+            ["display_type", "=", false],
+        ]],
+        {
+            fields: ["order_id", "order_partner_id", "product_uom_qty", "qty_delivered", "price_unit", "discount", "price_subtotal", "currency_id"],
+            order: "id desc",
+            limit: 200,
+        }
+    );
+
+    const orderIds = Array.from(new Set(lines.map((line) => getRelationalId(line.order_id)).filter((id): id is number => !!id)));
+    const orders = orderIds.length > 0 ? await readInBatches(credentials, uid, "sale.order", orderIds, ["id", "date_order", "state"]) : [];
+    const orderById = new Map(orders.map((order) => [Number(order.id), order]));
+
+    return lines
+        .map((line): MyProductHistoryRow => {
+            const orderId = getRelationalId(line.order_id) ?? 0;
+            const order = orderById.get(orderId);
+            return {
+                orderId,
+                orderName: getRelationalName(line.order_id),
+                date: normalizeOdooDate(order?.date_order),
+                customerName: getRelationalName(line.order_partner_id),
+                state: toDisplayString(order?.state),
+                quantity: Number(line.product_uom_qty ?? 0),
+                deliveredQuantity: Number(line.qty_delivered ?? 0),
+                unitPrice: Number(line.price_unit ?? 0),
+                discount: Number(line.discount ?? 0),
+                subtotal: Number(line.price_subtotal ?? 0),
+                currency: getRelationalName(line.currency_id),
+            };
+        })
+        .sort((a, b) => b.date.localeCompare(a.date));
 }

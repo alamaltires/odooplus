@@ -36,6 +36,12 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /activity_log/{docId} {
+      // Admin audit trail — written and read only server-side via the Admin SDK
+      // (src/lib/server/activity-log.ts, src/app/api/activity/route.ts).
+      allow read, write: if false;
+    }
+
     match /product-requests/{docId} {
       // Each user can only ever see their own requests; admins see every
       // request, from every user. That split is enforced server-side

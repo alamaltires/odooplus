@@ -7,6 +7,7 @@ import { useAuth } from "@/lib/auth-context";
 import { Select2 } from "@/components/select2";
 import { resolveExactNameMatch } from "@/lib/combobox-match";
 import { getProductBrands, getProductCategories, getPurchaseOrderReport } from "@/lib/client-odoo";
+import { writeWorkbook } from "@/lib/client-activity";
 
 type Category = {
     id: number;
@@ -364,7 +365,7 @@ export default function PurchaseOrderPage() {
 
             const workbook = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(workbook, worksheet, "Purchase Report");
-            XLSX.writeFile(workbook, `${exportFileName}.xlsx`);
+            writeWorkbook(XLSX, workbook, `${exportFileName}.xlsx`);
         } catch (exportError) {
             setReportError(
                 exportError instanceof Error

@@ -2,13 +2,13 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { CalendarDays, Download, FileText, Mail, MapPin, Phone, ShoppingCart, Target, UserSearch } from "lucide-react";
+import { CalendarDays, CreditCard, Download, FileText, Mail, MapPin, Phone, ShoppingCart, Target, UserSearch } from "lucide-react";
 import { getCustomerActivityReport, getCustomers } from "@/lib/client-odoo";
-import { LimitedMultiSelect } from "@/components/limited-multi-select";
-import { ReportTabs } from "@/components/report-tabs";
+import { Select2 } from "@/components/select2";
 import { BrandSalesTree } from "@/components/brand-sales-tree";
 import type { OdooCustomerActivityOrder, OdooCustomerActivityReport, OdooCustomerOption } from "@/types/odoo";
 import { getDisplayCurrency } from "@/lib/display-currency";
+import { writeWorkbook } from "@/lib/client-activity";
 
 function todayISO() {
     return new Date().toISOString().slice(0, 10);
@@ -54,18 +54,20 @@ function targetTone(percent: number | null) {
     return { bar: "bg-red-500", pill: "bg-red-100 text-red-700" };
 }
 
+// Months shown in "Month by month vs target" before expanding.
+const MONTHS_COLLAPSED = 6;
+
 export default function CustomerActivityPage() {
     const [customers, setCustomers] = useState<OdooCustomerOption[]>([]);
     const [customersLoading, setCustomersLoading] = useState(true);
     const [customersError, setCustomersError] = useState<string | null>(null);
 
-    const [customerIds, setCustomerIds] = useState<string[]>([]);
+    const [customerId, setCustomerId] = useState("");
     const [startDate, setStartDate] = useState(() => monthsAgoISO(6));
     const [endDate, setEndDate] = useState(todayISO);
 
-    const [reports, setReports] = useState<OdooCustomerActivityReport[]>([]);
-    const [activeIndex, setActiveIndex] = useState(0);
-    const report: OdooCustomerActivityReport | null = reports[Math.min(activeIndex, reports.length - 1)] ?? null;
+    const [report, setReport] = useState<OdooCustomerActivityReport | null>(null);
+    const [showAllMonths, setShowAllMonths] = useState(false);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
@@ -78,15 +80,15 @@ export default function CustomerActivityPage() {
 
     async function handleGenerate(event: FormEvent) {
         event.preventDefault();
-        if (customerIds.length === 0) return;
+        if (!customerId) return;
 
         setLoading(true);
         setError(null);
         try {
-            setReports(await Promise.all(customerIds.map((id) => getCustomerActivityReport({ customerId: Number(id), startDate, endDate }))));
-            setActiveIndex(0);
+            setReport(await getCustomerActivityReport({ customerId: Number(customerId), startDate, endDate }));
+            setShowAllMonths(false);
         } catch (generateError) {
-            setReports([]);
+            setReport(null);
             setError(generateError instanceof Error ? generateError.message : "Failed to load customer activity.");
         } finally {
             setLoading(false);
@@ -168,7 +170,7 @@ export default function CustomerActivityPage() {
             ),
             "Orders"
         );
-        XLSX.writeFile(workbook, `customer-activity-${sanitizeFileName(report.customer.customerName)}-${report.endDate}.xlsx`);
+        writeWorkbook(XLSX, workbook, `customer-activity-${sanitizeFileName(report.customer.customerName)}-${report.endDate}.xlsx`);
     }
 
     const lastSaleDays = daysSince(report?.totals.lastSaleDate ?? "");
@@ -179,7 +181,7 @@ export default function CustomerActivityPage() {
                 <div>
                     <h1 className="font-display text-3xl">Customer Activity</h1>
                     <p className="mt-1 text-sm text-(--ink-soft)">
-                        Orders and quotations of up to 4 customers over a period, measured against their monthly targets.
+                        Orders and quotations of a customer over a period, measured against their monthly target.
                     </p>
                 </div>
                 <UserSearch className="h-8 w-8 shrink-0 text-(--brand)" aria-hidden="true" />
@@ -188,18 +190,18 @@ export default function CustomerActivityPage() {
             <form onSubmit={handleGenerate} className="mt-6 rounded-2xl border border-(--line) bg-(--card) p-5">
                 <div className="grid gap-4 lg:grid-cols-[2fr_1fr_1fr]">
                     <label className="block">
-                        <span className="mb-2 block text-sm font-medium">Customers (up to 4)</span>
-                        <LimitedMultiSelect
-                            values={customerIds}
-                            onChange={setCustomerIds}
-                            max={4}
+                        <span className="mb-2 block text-sm font-medium">Customer</span>
+                        <Select2
+                            value={customerId}
+                            onChange={setCustomerId}
                             options={customers.map((customer) => ({
                                 value: String(customer.id),
                                 label: customer.name,
                                 description: customer.salespersonName || undefined,
                             }))}
                             loading={customersLoading}
-                            placeholder="Select up to 4 customers"
+                            loadingText="Loading customers..."
+                            placeholder="Select a customer"
                             searchPlaceholder="Search customers..."
                         />
                     </label>
@@ -226,20 +228,40 @@ export default function CustomerActivityPage() {
                         />
                     </label>
                 </div>
+                <div className="mt-4 flex flex-wrap items-center gap-3 text-xs">
+                    <span className="text-(--ink-soft)">Quick range</span>
+                    <div className="inline-flex rounded-full border border-(--line) bg-white p-1" role="group" aria-label="Quick range">
+                        {[3, 6, 12, 24].map((months) => {
+                            const active = endDate === todayISO() && startDate === monthsAgoISO(months);
+                            return (
+                                <button
+                                    key={months}
+                                    type="button"
+                                    aria-pressed={active}
+                                    onClick={() => {
+                                        setStartDate(monthsAgoISO(months));
+                                        setEndDate(todayISO());
+                                    }}
+                                    className={`rounded-full px-3.5 py-1.5 font-medium transition ${active ? "bg-(--brand) text-white shadow-sm" : "text-(--ink-soft) hover:bg-(--chip)"}`}
+                                >
+                                    {months} months
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
                 <div className="mt-5 flex flex-wrap items-center gap-3">
                     <button
                         type="submit"
-                        disabled={loading || customerIds.length === 0}
+                        disabled={loading || !customerId}
                         className="rounded-xl bg-(--brand) px-5 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
                     >
-                        {loading ? "Loading..." : customerIds.length > 1 ? `Generate (${customerIds.length})` : "Generate"}
+                        {loading ? "Loading..." : "Generate"}
                     </button>
                     {customersError ? <p className="text-sm text-red-600">{customersError}</p> : null}
                 </div>
                 {error ? <p className="mt-4 text-sm text-red-600">{error}</p> : null}
             </form>
-
-            <ReportTabs labels={reports.map((item) => item.customer.customerName)} active={Math.min(activeIndex, reports.length - 1)} onChange={setActiveIndex} />
 
             {report ? (
                 <div className="mt-6 space-y-6">
@@ -257,6 +279,49 @@ export default function CustomerActivityPage() {
                                 ) : null}
                                 {report.customer.city ? (
                                     <span className="inline-flex items-center gap-1.5"><MapPin className="h-4 w-4" />{report.customer.city}</span>
+                                ) : null}
+                            </div>
+                            <div className="mt-4 flex flex-wrap gap-3">
+                                <div className="min-w-48 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sky-950">
+                                    <p className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-sky-700 uppercase">
+                                        <CalendarDays className="h-4 w-4" />
+                                        Payment terms
+                                    </p>
+                                    <p className="mt-1 font-display text-xl">{report.paymentTerm || "Not set"}</p>
+                                </div>
+                                {report.creditLimit !== null ? (
+                                    (() => {
+                                        const limit = report.creditLimit;
+                                        const owed = report.receivable;
+                                        const used = limit > 0 && owed !== null ? (owed / limit) * 100 : null;
+                                        const over = used !== null && used > 100;
+                                        const warn = used !== null && used >= 80;
+                                        const palette = over
+                                            ? { box: "border-red-200 bg-red-50 text-red-950", label: "text-red-700", bar: "bg-red-500" }
+                                            : warn
+                                              ? { box: "border-amber-200 bg-amber-50 text-amber-950", label: "text-amber-700", bar: "bg-amber-500" }
+                                              : { box: "border-emerald-200 bg-emerald-50 text-emerald-950", label: "text-emerald-700", bar: "bg-emerald-500" };
+                                        return (
+                                            <div className={`min-w-64 rounded-2xl border px-4 py-3 ${limit > 0 ? palette.box : "border-(--line) bg-(--chip)"}`}>
+                                                <p className={`flex items-center gap-1.5 text-xs font-semibold tracking-wide uppercase ${limit > 0 ? palette.label : "text-(--ink-soft)"}`}>
+                                                    <CreditCard className="h-4 w-4" />
+                                                    Credit limit
+                                                </p>
+                                                <p className="mt-1 font-display text-xl">{limit > 0 ? formatCurrency(limit) : "None"}</p>
+                                                {limit > 0 && owed !== null && used !== null ? (
+                                                    <>
+                                                        <div className="mt-2 h-2 rounded-full bg-white/70">
+                                                            <div className={`h-2 rounded-full ${palette.bar}`} style={{ width: `${Math.min(100, used)}%` }} />
+                                                        </div>
+                                                        <p className="mt-1 text-xs">
+                                                            Owes {formatCurrency(owed)} · {formatNumber(used)}% used
+                                                            {over ? ` · over by ${formatCurrency(owed - limit)}` : ""}
+                                                        </p>
+                                                    </>
+                                                ) : null}
+                                            </div>
+                                        );
+                                    })()
                                 ) : null}
                             </div>
                         </div>
@@ -344,7 +409,7 @@ export default function CustomerActivityPage() {
                     {/* Month by month vs target */}
                     <Panel icon={<CalendarDays className="h-5 w-5" />} title="Month by month vs target">
                         <div className="space-y-3">
-                            {report.months.map((month) => {
+                            {(showAllMonths ? report.months : report.months.slice(-MONTHS_COLLAPSED)).map((month) => {
                                 const percent = month.target > 0 ? (month.sales / month.target) * 100 : null;
                                 const monthTone = targetTone(percent);
                                 return (
@@ -378,6 +443,15 @@ export default function CustomerActivityPage() {
                                 );
                             })}
                         </div>
+                        {report.months.length > MONTHS_COLLAPSED ? (
+                            <button
+                                type="button"
+                                onClick={() => setShowAllMonths((value) => !value)}
+                                className="mt-3 rounded-full border border-(--line) bg-white px-4 py-1.5 text-xs font-medium hover:bg-(--chip)"
+                            >
+                                {showAllMonths ? `Show latest ${MONTHS_COLLAPSED} months` : `Show all ${report.months.length} months`}
+                            </button>
+                        ) : null}
                         <p className="mt-3 text-xs text-(--ink-soft)">The dark tick marks each month&apos;s target. The first and last month count in full against the target even if the range covers only part of them.</p>
                     </Panel>
 

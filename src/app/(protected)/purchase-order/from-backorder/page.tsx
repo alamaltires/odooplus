@@ -6,6 +6,7 @@ import { ArrowLeft, Download, Search } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { getPurchaseFromBackorderReport } from "@/lib/client-odoo";
 import { PurchaseFromBackorderRow } from "@/types/odoo";
+import { writeWorkbook } from "@/lib/client-activity";
 
 function sanitizeFileName(value: string) {
     return (
@@ -121,7 +122,7 @@ export default function PurchaseFromBackorderPage() {
             XLSX.utils.book_append_sheet(workbook, worksheet, "Backorder Purchase");
 
             const dateStamp = new Date().toISOString().slice(0, 10);
-            XLSX.writeFile(
+            writeWorkbook(XLSX, 
                 workbook,
                 `purchase-from-backorder-${sanitizeFileName(dateStamp)}.xlsx`
             );

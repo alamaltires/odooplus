@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
-import { ArrowLeft, BadgeDollarSign, Building2, ClipboardList, Clock3 } from "lucide-react";
+import { useParams, useSearchParams } from "next/navigation";
+import { ArrowLeft, BadgeDollarSign, Building2, CalendarRange, ClipboardList, Clock3 } from "lucide-react";
 import { getCustomerReport } from "@/lib/client-odoo";
 import { useAuth } from "@/lib/auth-context";
 import { OdooCustomerReport } from "@/types/odoo";
@@ -19,6 +19,10 @@ function formatNumber(value: number) {
 
 function formatCurrency(value: number) {
     return `${getDisplayCurrency()} ${formatNumber(value)}`;
+}
+
+function formatDate(value: string) {
+    return new Date(`${value}T00:00:00`).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }
 
 function formatDateTime(value: string) {
@@ -55,7 +59,28 @@ function MetricCard({
 }
 
 export default function CustomerReportPage() {
+    // useSearchParams needs a Suspense boundary.
+    return (
+        <Suspense fallback={<p className="text-sm text-(--ink-soft)">Loading customer report...</p>}>
+            <CustomerReportContent />
+        </Suspense>
+    );
+}
+
+function CustomerReportContent() {
     const params = useParams<{ id: string }>();
+    const searchParams = useSearchParams();
+    // Set when opened from Salesperson Activity: the report then covers only that period.
+    const from = searchParams.get("from");
+    const to = searchParams.get("to");
+    const isoDate = /^\d{4}-\d{2}-\d{2}$/;
+    const urlRange = from && to && isoDate.test(from) && isoDate.test(to) ? { startDate: from, endDate: to } : undefined;
+    // The period the report currently covers (none = all time) and the dates being edited.
+    const [range, setRange] = useState<{ startDate: string; endDate: string } | undefined>(urlRange);
+    const [draftStart, setDraftStart] = useState(urlRange?.startDate ?? "");
+    const [draftEnd, setDraftEnd] = useState(urlRange?.endDate ?? "");
+    const rangeStart = range?.startDate;
+    const rangeEnd = range?.endDate;
     const customerId = Number(params.id);
     const { user } = useAuth();
 
@@ -63,14 +88,27 @@ export default function CustomerReportPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
+    function applyRange() {
+        if (!draftStart || !draftEnd || draftStart > draftEnd) return;
+        setRange({ startDate: draftStart, endDate: draftEnd });
+    }
+
+    function clearRange() {
+        setDraftStart("");
+        setDraftEnd("");
+        setRange(undefined);
+    }
+
     useEffect(() => {
         async function loadReport() {
             if (!user) {
                 return;
             }
 
+            setLoading(true);
+            setError(null);
             try {
-                const data = await getCustomerReport(customerId);
+                const data = await getCustomerReport(customerId, rangeStart && rangeEnd ? { startDate: rangeStart, endDate: rangeEnd } : undefined);
                 setReport(data);
             } catch (loadError) {
                 setError(
@@ -82,7 +120,7 @@ export default function CustomerReportPage() {
         }
 
         void loadReport();
-    }, [customerId, user]);
+    }, [customerId, user, rangeStart, rangeEnd]);
 
     return (
         <section>
@@ -103,6 +141,58 @@ export default function CustomerReportPage() {
                     </p>
                 </div>
             </div>
+
+            <div className="mt-6 flex flex-wrap items-end gap-3 rounded-2xl border border-(--line) bg-(--card) p-4">
+                <label className="block text-sm">
+                    <span className="mb-1.5 block font-medium">Start date</span>
+                    <input
+                        type="date"
+                        value={draftStart}
+                        max={draftEnd || undefined}
+                        onChange={(event) => setDraftStart(event.target.value)}
+                        className="rounded-xl border border-(--line) bg-white px-3 py-2"
+                    />
+                </label>
+                <label className="block text-sm">
+                    <span className="mb-1.5 block font-medium">End date</span>
+                    <input
+                        type="date"
+                        value={draftEnd}
+                        min={draftStart || undefined}
+                        onChange={(event) => setDraftEnd(event.target.value)}
+                        className="rounded-xl border border-(--line) bg-white px-3 py-2"
+                    />
+                </label>
+                <button
+                    type="button"
+                    onClick={applyRange}
+                    disabled={!draftStart || !draftEnd || draftStart > draftEnd || loading}
+                    className="rounded-xl bg-(--brand) px-5 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                    Apply
+                </button>
+                {range ? (
+                    <button
+                        type="button"
+                        onClick={clearRange}
+                        disabled={loading}
+                        className="rounded-xl border border-(--line) bg-white px-4 py-2 text-sm font-medium disabled:opacity-60"
+                    >
+                        All time
+                    </button>
+                ) : null}
+            </div>
+
+            {range ? (
+                <div className="mt-4 flex items-start gap-3 rounded-2xl border border-sky-200 bg-sky-50 p-4 text-sky-950">
+                    <CalendarRange className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
+                    <p className="text-sm">
+                        <span className="font-semibold">Date-range report:</span> sales figures and brand breakdowns cover only{" "}
+                        <span className="font-semibold">{formatDate(range.startDate)}</span> to <span className="font-semibold">{formatDate(range.endDate)}</span>.
+                        Open quotations and the last CRM visit are not limited to this period.
+                    </p>
+                </div>
+            ) : null}
 
             {error ? (
                 <div className="mt-6 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
@@ -135,7 +225,7 @@ export default function CustomerReportPage() {
                         <MetricCard
                             title="Total Sales"
                             value={formatCurrency(report.totalSales)}
-                            description="Confirmed sales across all completed sales orders for this customer."
+                            description={range ? "Confirmed sales in the selected period." : "Confirmed sales across all completed sales orders for this customer."}
                             icon={BadgeDollarSign}
                         />
                         <MetricCard

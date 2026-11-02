@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { recordActivity } from "@/lib/server/activity-log";
 import { getOdooSystemSettings, getUserIdFromRequest, getUserRoleFromRequest, saveOdooSystemSettings } from "@/lib/server/auth-helpers";
 
 export async function GET(request: Request) {
@@ -39,6 +40,7 @@ export async function POST(request: Request) {
         }
 
         await saveOdooSystemSettings({ url, db: dbName, updatedBy: actorId });
+        await recordActivity(actorId, request, { action: "Changed the Odoo URL / database", category: "settings", detail: `${url} · ${dbName}` });
 
         return NextResponse.json({ settings: { url, db: dbName } });
     } catch (error) {

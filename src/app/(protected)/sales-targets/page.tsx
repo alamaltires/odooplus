@@ -18,6 +18,7 @@ import {
 } from "@/lib/client-odoo";
 import { useAuth } from "@/lib/auth-context";
 import { Select2 } from "@/components/select2";
+import { logActivity } from "@/lib/client-activity";
 import {
     OdooSalesperson,
     OdooSalespersonMonthlyInvoices,
@@ -794,6 +795,7 @@ export default function SalesTargetsPage() {
             setSetTargetOpen(false);
             setTargetEntries([emptyTargetEntry()]);
             setMessage("Sales target saved successfully.");
+            void logActivity({ action: "Saved a sales target", category: "write", target: report.salesperson.name, detail: `${report.year}-${String(report.month).padStart(2, "0")}` });
         } catch (saveError) {
             setError(
                 saveError instanceof Error ? saveError.message : "Failed to save sales target."
@@ -895,6 +897,12 @@ export default function SalesTargetsPage() {
                 }
             }
             setCopyOpen(false);
+            void logActivity({
+                action: "Copied sales targets",
+                category: "write",
+                target: `from ${report.salesperson.name}`,
+                detail: `to ${recipients.length} salesperson(s), ${copyMonths.size} month(s) of ${year}`,
+            });
             setMessage(`Targets copied to ${recipients.length} salesperson${recipients.length === 1 ? "" : "s"} for ${copyMonths.size} month${copyMonths.size === 1 ? "" : "s"} (${copied} saved).`);
         } catch (copyFailure) {
             setCopyError(copyFailure instanceof Error ? copyFailure.message : "Failed to copy the targets.");

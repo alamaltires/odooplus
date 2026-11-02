@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAdminDb } from "@/lib/server/firebase-admin";
 import { getUserIdFromRequest, getUserRoleFromRequest } from "@/lib/server/auth-helpers";
+import { recordActivity } from "@/lib/server/activity-log";
 import { createProductRequest, listProductRequests } from "@/lib/server/product-requests-store";
 
 export async function GET(request: Request) {
@@ -42,6 +43,7 @@ export async function POST(request: Request) {
             requestedByName: email,
         });
 
+        await recordActivity(userId, request, { action: "Created a product request", category: "write", target: String(body.requestType ?? ""), detail: String(body.searchQuery ?? "") });
         return NextResponse.json({ request: record });
     } catch (error) {
         return NextResponse.json(

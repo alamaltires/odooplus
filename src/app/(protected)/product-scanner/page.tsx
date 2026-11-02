@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { AlertCircle, ChevronDown, ChevronLeft, ChevronRight, Download, RefreshCw, Search, Warehouse, X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { getAgedStock, getAgedStockExplanation, type AgedStockExplanation, type AgedStockResponse, type AgedStockRow } from "@/lib/client-odoo";
+import { writeWorkbook } from "@/lib/client-activity";
 
 /** One scan fetches everything older than this; the age pills then filter instantly, without asking Odoo again. */
 const SCAN_BASE_DAYS = 90;
@@ -338,7 +339,7 @@ export default function ProductScannerPage() {
             );
             const workbook = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(workbook, worksheet, "Aged Stock");
-            XLSX.writeFile(workbook, `aged-stock-${minAge}d-${new Date().toISOString().slice(0, 10)}.xlsx`);
+            writeWorkbook(XLSX, workbook, `aged-stock-${minAge}d-${new Date().toISOString().slice(0, 10)}.xlsx`);
         } catch (exportError) {
             setError(exportError instanceof Error ? exportError.message : "Failed to export Excel file.");
         } finally {

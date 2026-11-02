@@ -8,6 +8,7 @@ import { ClipboardList, HandCoins, LayoutDashboard, LogOut, Menu, PackageSearch,
 import { useAuth } from "@/lib/auth-context";
 import { CompanySelector } from "@/components/company-selector";
 import { APP_DEFINITIONS, defaultAppHrefsForRole } from "@/lib/app-permissions";
+import { logActivity } from "@/lib/client-activity";
 
 // Add new sidebar entries here — each one just needs an icon; the route and
 // label live in `APP_DEFINITIONS` (shared with the per-user permissions
@@ -105,6 +106,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     }, [pathname]);
 
     useEffect(() => clearHoverTimer, []);
+
+    // Opening an app is recorded in the admin activity log (once per visit, not on re-renders).
+    const lastLoggedPath = useRef("");
+    useEffect(() => {
+        if (loading || !user || pathname === lastLoggedPath.current) return;
+        const app = links.find((link) => pathname === link.href || pathname.startsWith(`${link.href}/`));
+        if (!app) return;
+        lastLoggedPath.current = pathname;
+        void logActivity({ action: `Opened ${app.label}`, category: "navigation", target: pathname });
+    }, [pathname, loading, user]);
 
     const visibleLinks = useMemo(() => {
         if (role === "admin") {

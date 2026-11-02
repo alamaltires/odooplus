@@ -159,6 +159,8 @@ export type OdooCustomerSummary = {
 };
 
 export type OdooServicedCustomer = OdooCustomerSummary & {
+    paymentTerm: string;
+    assignedToSelf: boolean;
     orderCount: number;
     totalSales: number;
     lastSaleDate: string;
@@ -213,6 +215,8 @@ export type OdooCustomerSalesBrand = {
 
 export type OdooCustomerReport = {
     customer: OdooCustomerSummary;
+    /** Set when the report was limited to a date range. */
+    range?: { startDate: string; endDate: string };
     totalSales: number;
     lastVisitDate: string;
     lastVisitReference: string;
@@ -509,6 +513,12 @@ export type OdooCustomerActivityReport = {
     endDate: string;
     /** The customer's "Customer Monthly Target" from Odoo (0 when not set). */
     customerMonthlyTarget: number;
+    /** The customer's payment terms (empty when none are set). */
+    paymentTerm: string;
+    /** The customer's credit limit in the company currency; 0 = none set, null = field not in this Odoo. */
+    creditLimit: number | null;
+    /** What the customer currently owes (Odoo's receivable balance), company currency. */
+    receivable: number | null;
     totals: {
         orderCount: number;
         totalSales: number;

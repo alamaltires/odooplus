@@ -728,8 +728,8 @@ export function getSalespersonActivityReport(input: {
     return post<OdooSalespersonActivityReport>("/api/odoo/salesperson-activity-report", input);
 }
 
-export function getCustomerReport(customerId: number) {
-    return post<OdooCustomerReport>("/api/odoo/customer-report", { customerId });
+export function getCustomerReport(customerId: number, range?: { startDate: string; endDate: string }) {
+    return post<OdooCustomerReport>("/api/odoo/customer-report", { customerId, ...range });
 }
 
 export function getSalespersonMonthlyInvoices(input: {
@@ -1232,6 +1232,24 @@ export type MyDocumentRow = {
 
 export function getMyDocuments(input: { kind: "orders" | "quotations" | "invoices"; status?: "all" | "quotation" | "confirmed" | "cancelled"; search?: string; limit?: number; offset?: number }) {
     return post<{ rows: MyDocumentRow[]; totalCount: number }>("/api/odoo/my-documents", input);
+}
+
+export type MyProductHistoryRow = {
+    orderId: number;
+    orderName: string;
+    date: string;
+    customerName: string;
+    state: string;
+    quantity: number;
+    deliveredQuantity: number;
+    unitPrice: number;
+    discount: number;
+    subtotal: number;
+    currency: string;
+};
+
+export function getMyProductHistory(productId: number) {
+    return post<{ rows: MyProductHistoryRow[] }>("/api/odoo/my-product-history", { productId });
 }
 
 export type MyOrderDetails = {

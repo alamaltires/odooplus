@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { createSalesQuotations, isCustomerInTagScope, runWithCompanyIds } from "@/lib/server/odoo-client";
 import type { SalesQuotationLine } from "@/lib/server/odoo-client";
+import { recordActivity } from "@/lib/server/activity-log";
 import { getCompanyIdsFromRequest, getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
 import { assertCustomerInScope, getCustomerTagScope, getOwnSalespersonScope } from "@/lib/server/salesperson-scope";
 
 export async function POST(request: Request) {
     try {
-        const { credentials } = await getOdooCredentialsFromRequest(request);
+        const { userId, credentials } = await getOdooCredentialsFromRequest(request);
         const ownUserId = await getOwnSalespersonScope(request, credentials);
         const companyIds = await getCompanyIdsFromRequest(request);
         const body = (await request.json()) as { customerId?: number; lines?: SalesQuotationLine[] };
@@ -35,6 +36,12 @@ export async function POST(request: Request) {
             })
         );
 
+        await recordActivity(userId, request, {
+            action: "Created a quotation",
+            category: "write",
+            target: quotations.map((quotation) => quotation.name).join(", "),
+            detail: `customerId: ${customerId}, ${Array.isArray(body.lines) ? body.lines.length : 0} line(s)`,
+        });
         return NextResponse.json({ quotations });
     } catch (error) {
         return NextResponse.json(

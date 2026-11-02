@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAdminDb } from "@/lib/server/firebase-admin";
 import { getUserIdFromRequest, getUserRoleFromRequest } from "@/lib/server/auth-helpers";
+import { recordActivity } from "@/lib/server/activity-log";
 import { deleteProductRequest, setProductRequestSeen } from "@/lib/server/product-requests-store";
 
 type RouteContext = {
@@ -25,6 +26,7 @@ export async function PATCH(request: Request, context: RouteContext) {
         const email = String(userDoc.data()?.email ?? "");
 
         const record = await setProductRequestSeen(id, { seen, seenByEmail: email });
+        await recordActivity(userId, request, { action: seen ? "Marked a product request as seen" : "Marked a product request as unseen", category: "write", target: id });
         return NextResponse.json({ request: record });
     } catch (error) {
         return NextResponse.json(
@@ -43,6 +45,7 @@ export async function DELETE(request: Request, context: RouteContext) {
 
         const { id } = await context.params;
         await deleteProductRequest(id);
+        await recordActivity(await getUserIdFromRequest(request), request, { action: "Deleted a product request", category: "write", target: id });
         return NextResponse.json({ success: true });
     } catch (error) {
         return NextResponse.json(

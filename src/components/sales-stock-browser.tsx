@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
     CheckCircle2,
     ChevronDown,
@@ -10,6 +10,8 @@ import {
     LayoutGrid,
     List,
     MessageSquarePlus,
+    History,
+    Loader2,
     Minus,
     Package,
     Plus,
@@ -34,6 +36,8 @@ import {
     type SalesStockFilters,
     type ProductRequestType,
     type SalesStockRow,
+    type MyProductHistoryRow,
+    getMyProductHistory,
 } from "@/lib/client-odoo";
 import { Select2, type Select2Option } from "@/components/select2";
 
@@ -60,9 +64,10 @@ type CartLine = {
 };
 
 type ViewMode = "cards" | "list";
-type GroupBy = "category" | "product" | "lot" | "company" | "brand";
+type GroupBy = "location" | "category" | "product" | "lot" | "company" | "brand";
 
 const GROUP_BY_OPTIONS: Array<{ value: GroupBy; label: string }> = [
+    { value: "location", label: "Location" },
     { value: "category", label: "Category" },
     { value: "product", label: "Product" },
     { value: "lot", label: "Lot" },
@@ -72,7 +77,8 @@ const GROUP_BY_OPTIONS: Array<{ value: GroupBy; label: string }> = [
 
 function groupLabelOf(row: SalesStockRow, groupBy: GroupBy) {
     const value =
-        groupBy === "category" ? row.categoryName
+        groupBy === "location" ? row.location
+        : groupBy === "category" ? row.categoryName
         : groupBy === "product" ? row.productName
         : groupBy === "lot" ? row.lotName
         : groupBy === "company" ? row.companyName
@@ -125,6 +131,108 @@ function formatQty(value: number | null) {
 
 function formatMoney(value: number | null) {
     return value === null ? "-" : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+const HISTORY_STATE_LABEL: Record<string, string> = { draft: "Quotation", sent: "Quotation", sale: "Confirmed", done: "Done" };
+
+/** Everything the signed-in user has sold of one product, in a popup. */
+function ProductHistoryModal({ row, onClose }: { row: SalesStockRow; onClose: () => void }) {
+    const [rows, setRows] = useState<MyProductHistoryRow[] | null>(null);
+    const [error, setError] = useState<string | null>(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        getMyProductHistory(row.productId)
+            .then((data) => {
+                if (!cancelled) setRows(data.rows);
+            })
+            .catch((err) => {
+                if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load the history.");
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [row.productId]);
+
+    useEffect(() => {
+        function onKeyDown(event: KeyboardEvent) {
+            if (event.key === "Escape") onClose();
+        }
+        window.addEventListener("keydown", onKeyDown);
+        return () => window.removeEventListener("keydown", onKeyDown);
+    }, [onClose]);
+
+    const totalQty = (rows ?? []).reduce((sum, item) => sum + item.quantity, 0);
+
+    return (
+        <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Product order history"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            onClick={onClose}
+        >
+            <div className="flex max-h-[85vh] w-full max-w-4xl flex-col rounded-2xl border border-(--line) bg-(--card) shadow-xl" onClick={(event) => event.stopPropagation()}>
+                <div className="flex items-start justify-between gap-4 border-b border-(--line) p-5">
+                    <div className="min-w-0">
+                        <p className="text-xs text-(--ink-soft)">Your sales of this product</p>
+                        <h2 className="truncate font-display text-xl">{row.productName}</h2>
+                        {rows ? (
+                            <p className="mt-1 text-sm text-(--ink-soft)">
+                                {rows.length} line{rows.length === 1 ? "" : "s"} · {totalQty.toLocaleString()} pcs sold
+                            </p>
+                        ) : null}
+                    </div>
+                    <button type="button" onClick={onClose} aria-label="Close" className="rounded-lg p-1.5 text-(--ink-soft) hover:bg-(--chip)">
+                        <X className="h-5 w-5" />
+                    </button>
+                </div>
+                <div className="overflow-auto p-5">
+                    {error ? (
+                        <p className="text-sm text-red-600">{error}</p>
+                    ) : rows === null ? (
+                        <p className="flex items-center gap-2 text-sm text-(--ink-soft)">
+                            <Loader2 className="h-4 w-4 animate-spin" /> Loading history...
+                        </p>
+                    ) : rows.length === 0 ? (
+                        <p className="py-8 text-center text-sm text-(--ink-soft)">You haven&apos;t sold this product yet.</p>
+                    ) : (
+                        <table className="min-w-full text-sm">
+                            <thead className="sticky top-0 bg-(--chip) text-left text-xs text-(--ink-soft)">
+                                <tr>
+                                    <th className="px-3 py-2 font-medium">Date</th>
+                                    <th className="px-3 py-2 font-medium">Order</th>
+                                    <th className="px-3 py-2 font-medium">Customer</th>
+                                    <th className="px-3 py-2 text-right font-medium">Qty</th>
+                                    <th className="px-3 py-2 text-right font-medium">Unit price</th>
+                                    <th className="px-3 py-2 text-right font-medium">Disc.</th>
+                                    <th className="px-3 py-2 text-right font-medium">Total</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-(--line)">
+                                {rows.map((item, index) => (
+                                    <tr key={`${item.orderId}-${index}`}>
+                                        <td className="px-3 py-2 whitespace-nowrap">{item.date ? new Date(item.date.includes("T") ? item.date : `${item.date.replace(" ", "T")}Z`).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "-"}</td>
+                                        <td className="px-3 py-2 whitespace-nowrap">
+                                            {item.orderName}
+                                            {HISTORY_STATE_LABEL[item.state] === "Quotation" ? (
+                                                <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] text-amber-800">Quotation</span>
+                                            ) : null}
+                                        </td>
+                                        <td className="px-3 py-2">{item.customerName || "-"}</td>
+                                        <td className="px-3 py-2 text-right">{item.quantity.toLocaleString()}</td>
+                                        <td className="px-3 py-2 text-right whitespace-nowrap">{item.currency} {formatMoney(item.unitPrice)}</td>
+                                        <td className="px-3 py-2 text-right">{item.discount > 0 ? `${item.discount}%` : "-"}</td>
+                                        <td className="px-3 py-2 text-right font-medium whitespace-nowrap">{item.currency} {formatMoney(item.subtotal)}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
 }
 
 type SearchAnswer = Awaited<ReturnType<typeof searchSalesStock>>;
@@ -190,6 +298,42 @@ export function SalesStockBrowser({
     onRequestFromRow: (row: SalesStockRow) => void;
 }) {
     const { role } = useAuth();
+    const searchInputRef = useRef<HTMLInputElement>(null);
+    const [historyRow, setHistoryRow] = useState<SalesStockRow | null>(null);
+    const groupMenuRef = useRef<HTMLDetailsElement>(null);
+
+    // The Group by menu closes when you click anywhere else (or press Escape).
+    useEffect(() => {
+        function closeMenu(event: Event) {
+            const menu = groupMenuRef.current;
+            if (!menu?.open) return;
+            if (event.type === "keydown" && (event as KeyboardEvent).key !== "Escape") return;
+            if (event.type === "mousedown" && menu.contains(event.target as Node)) return;
+            menu.open = false;
+        }
+        document.addEventListener("mousedown", closeMenu);
+        document.addEventListener("keydown", closeMenu);
+        return () => {
+            document.removeEventListener("mousedown", closeMenu);
+            document.removeEventListener("keydown", closeMenu);
+        };
+    }, []);
+
+    // Typing anywhere outside an input jumps to the product search; the keystroke lands in it.
+    useEffect(() => {
+        function onKeyDown(event: KeyboardEvent) {
+            if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.key.length !== 1) return;
+            const target = event.target as HTMLElement | null;
+            if (target?.closest("input, textarea, select, [contenteditable=''], [contenteditable='true']")) return;
+            // A space on a focused button/link should still activate it.
+            if (event.key === " " && target && target !== document.body) return;
+            // Leave open dialogs/panels alone.
+            if (document.querySelector("[role='dialog'], [aria-modal='true']")) return;
+            searchInputRef.current?.focus();
+        }
+        window.addEventListener("keydown", onKeyDown);
+        return () => window.removeEventListener("keydown", onKeyDown);
+    }, []);
     // Same rule as the sales targets page: salespeople don't see cost/margin data.
     const showCosts = role !== "salesperson";
 
@@ -238,6 +382,7 @@ export function SalesStockBrowser({
     useEffect(() => {
         if (cartLoaded) writeStorage(CART_STORAGE_KEY, cart);
     }, [cart, cartLoaded]);
+
 
     function changeView(next: ViewMode) {
         setView(next);
@@ -560,11 +705,15 @@ export function SalesStockBrowser({
         );
     }
 
-    // The same product and lot sitting in several locations is folded into one line; opening it shows each location.
+    // Sections on the rows of the current page, nested in the order they were chosen. Without a location section, the same product and lot sitting in several
+    // locations is folded into one line instead; opening it shows each location.
+    const [groupBy, setGroupBy] = useState<GroupBy[]>([]);
+    const foldLocations = !groupBy.includes("location");
+    const sectionLevels = groupBy;
     const groups = useMemo(() => {
         const byKey = new Map<string, SalesStockRow[]>();
         for (const row of rows) {
-            const key = `${row.productId}|${row.lotName}`;
+            const key = foldLocations ? `${row.productId}|${row.lotName}` : `row:${row.id}`;
             const list = byKey.get(key);
             if (list) list.push(row);
             else byKey.set(key, [row]);
@@ -580,10 +729,7 @@ export function SalesStockBrowser({
                 reservedQty: items.reduce((total, item) => total + item.reservedQty, 0),
             } as SalesStockRow,
         }));
-    }, [rows]);
-    // An optional outer grouping (on the rows of the current page); the product/lot -> locations fold stays inside it.
-    // Several levels can be picked; they nest in the order they were chosen.
-    const [groupBy, setGroupBy] = useState<GroupBy[]>([]);
+    }, [rows, foldLocations]);
     const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
     type DisplayEntry =
         | { kind: "header"; key: string; label: string; depth: number; count: number; available: number }
@@ -591,19 +737,19 @@ export function SalesStockBrowser({
     const displayItems = useMemo<DisplayEntry[]>(() => {
         const entries: DisplayEntry[] = [];
         const build = (items: typeof groups, level: number, parentKey: string) => {
-            if (level >= groupBy.length) {
+            if (level >= sectionLevels.length) {
                 entries.push(...items.map((group) => ({ kind: "group" as const, group })));
                 return;
             }
             const bySection = new Map<string, typeof groups>();
             for (const group of items) {
-                const label = groupLabelOf(group.rows[0], groupBy[level]);
+                const label = groupLabelOf(group.rows[0], sectionLevels[level]);
                 const list = bySection.get(label);
                 if (list) list.push(group);
                 else bySection.set(label, [group]);
             }
             for (const [label, subItems] of Array.from(bySection).sort((x, y) => x[0].localeCompare(y[0]))) {
-                const key = `${parentKey}/${groupBy[level]}:${label}`;
+                const key = `${parentKey}/${sectionLevels[level]}:${label}`;
                 entries.push({
                     kind: "header",
                     key,
@@ -617,7 +763,7 @@ export function SalesStockBrowser({
         };
         build(groups, 0, "");
         return entries;
-    }, [groups, groupBy, collapsedSections]);
+    }, [groups, sectionLevels, collapsedSections]);
     const toggleSection = (key: string) =>
         setCollapsedSections((current) => {
             const next = new Set(current);
@@ -781,6 +927,7 @@ export function SalesStockBrowser({
                             </span>
                         ))}
                         <input
+                            ref={searchInputRef}
                             value={draft}
                             onChange={(event) => {
                                 const value = event.target.value;
@@ -814,7 +961,7 @@ export function SalesStockBrowser({
                         </span>
                     ) : null}
                 </div>
-                <details className="relative shrink-0">
+                <details ref={groupMenuRef} className="relative shrink-0">
                     <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl border border-(--line) bg-white px-3 py-2.5 text-sm">
                         <span className="text-(--ink-soft)">Group by</span>
                         <span className="font-medium">
@@ -842,18 +989,6 @@ export function SalesStockBrowser({
                                 </label>
                             );
                         })}
-                        {groupBy.length > 0 ? (
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    setGroupBy([]);
-                                    setCollapsedSections(new Set());
-                                }}
-                                className="mt-1 w-full rounded-lg px-2 py-1.5 text-left text-sm text-(--brand) hover:bg-(--chip)"
-                            >
-                                Clear grouping
-                            </button>
-                        ) : null}
                     </div>
                 </details>
                 {canFold ? (
@@ -1135,6 +1270,16 @@ export function SalesStockBrowser({
                                                     )}
                                                 </td>
                                                 <td className="border border-(--line)/70 px-3 py-2.5 align-top" onClick={(event) => event.stopPropagation()}>
+                                                    <div className="flex items-center gap-1.5">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setHistoryRow(row)}
+                                                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-(--line) bg-white text-(--ink-soft) shadow-sm transition hover:border-(--brand) hover:bg-[rgba(229,26,39,0.06)] hover:text-(--brand)"
+                                                        aria-label="My order history of this product"
+                                                        title="My order history of this product"
+                                                    >
+                                                        <History className="h-4 w-4" aria-hidden="true" />
+                                                    </button>
                                                     <button
                                                         type="button"
                                                         onClick={() => onRequestFromRow(row)}
@@ -1144,6 +1289,7 @@ export function SalesStockBrowser({
                                                     >
                                                         <MessageSquarePlus className="h-4 w-4" aria-hidden="true" />
                                                     </button>
+                                                    </div>
                                                 </td>
                                             </tr>
                                         );
@@ -1287,6 +1433,16 @@ export function SalesStockBrowser({
 
                                     <div className="mt-3 flex items-center justify-between gap-2 border-t border-(--line) pt-3">
                                         {folded ? <span className="text-xs text-(--ink-soft)">Add from a location above</span> : renderCartControl(row)}
+                                        <div className="flex items-center gap-1.5">
+                                        <button
+                                            type="button"
+                                            onClick={() => setHistoryRow(row)}
+                                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-(--line) bg-white text-(--ink-soft) shadow-sm transition hover:border-(--brand) hover:bg-[rgba(229,26,39,0.06)] hover:text-(--brand)"
+                                            aria-label="My order history of this product"
+                                            title="My order history of this product"
+                                        >
+                                            <History className="h-4 w-4" aria-hidden="true" />
+                                        </button>
                                         <button
                                             type="button"
                                             onClick={() => onRequestFromRow(row)}
@@ -1296,6 +1452,7 @@ export function SalesStockBrowser({
                                         >
                                             <MessageSquarePlus className="h-4 w-4" aria-hidden="true" />
                                         </button>
+                                        </div>
                                     </div>
                                 </article>
                                 );
@@ -1482,6 +1639,7 @@ export function SalesStockBrowser({
                     </aside>
                 </div>
             ) : null}
+            {historyRow ? <ProductHistoryModal row={historyRow} onClose={() => setHistoryRow(null)} /> : null}
         </div>
     );
 }

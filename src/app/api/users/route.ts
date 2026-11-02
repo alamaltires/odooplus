@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { Timestamp } from "firebase-admin/firestore";
 import { getAdminAuth, getAdminDb } from "@/lib/server/firebase-admin";
 import { getUserIdFromRequest, getUserRoleFromRequest } from "@/lib/server/auth-helpers";
+import { recordActivity } from "@/lib/server/activity-log";
 
 type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "accountant" | "manager" | "store" | "user";
 
@@ -158,6 +159,8 @@ export async function POST(request: Request) {
             },
             { merge: true }
         );
+
+        await recordActivity(actorId, request, { action: "Created a user", category: "settings", target: email, detail: `role: ${nextRole}` });
 
         // This account's own Odoo login is unrelated — the person signs in
         // to Odoo separately for themselves under "Your Odoo Login" in

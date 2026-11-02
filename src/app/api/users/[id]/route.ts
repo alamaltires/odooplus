@@ -3,6 +3,7 @@ import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { getAdminAuth, getAdminDb } from "@/lib/server/firebase-admin";
 import { getUserIdFromRequest, getUserRoleFromRequest } from "@/lib/server/auth-helpers";
 import { APP_HREFS } from "@/lib/app-permissions";
+import { recordActivity } from "@/lib/server/activity-log";
 
 type Role = "admin" | "purchase" | "salesperson" | "sales_manager" | "accountant" | "manager" | "store" | "user";
 
@@ -109,7 +110,23 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
 
         await getAdminDb().collection("users").doc(id).set(firestoreUpdate, { merge: true });
 
+        const changed = [
+            body.email !== undefined && "email",
+            body.password !== undefined && body.password !== "" && "password",
+            body.role !== undefined && `role → ${body.role}`,
+            body.enabledApps !== undefined && "app permissions",
+            body.salesTeamId !== undefined && "sales team",
+            body.customerTags !== undefined && "customer tags",
+            body.allowedPricelistIds !== undefined && "allowed pricelists",
+        ].filter(Boolean);
+
         const updatedDoc = await getAdminDb().collection("users").doc(id).get();
+        await recordActivity(actorId, request, {
+            action: "Changed a user",
+            category: "settings",
+            target: String(updatedDoc.data()?.email ?? id),
+            detail: changed.join(", "),
+        });
         const data = updatedDoc.data() as
             | { email?: string; role?: string; createdAt?: Timestamp; enabledApps?: string[]; salesTeamId?: number; customerTagsAll?: boolean; customerTagIds?: number[]; allowedPricelistIds?: number[] }
             | undefined;
@@ -152,8 +169,10 @@ export async function DELETE(request: Request, context: { params: Promise<{ id: 
             throw new Error("You cannot delete your own account.");
         }
 
+        const deletedEmail = String((await getAdminDb().collection("users").doc(id).get()).data()?.email ?? id);
         await getAdminAuth().deleteUser(id);
         await getAdminDb().collection("users").doc(id).delete();
+        await recordActivity(actorId, request, { action: "Deleted a user", category: "settings", target: deletedEmail });
 
         return NextResponse.json({ success: true });
     } catch (error) {

@@ -1,5 +1,6 @@
 import { randomBytes, scryptSync, timingSafeEqual } from "crypto";
 import { getAdminAuth, getAdminDb } from "@/lib/server/firebase-admin";
+import { recordActivity, type ActivityCategory } from "@/lib/server/activity-log";
 import { OdooCredentials } from "@/types/odoo";
 
 async function getUserIdFromAuthHeader(request: Request): Promise<string> {
@@ -144,10 +145,54 @@ export async function getStoredOdooCredentials(): Promise<OdooCredentials | null
 const CREDENTIALS_CACHE_TTL_MS = 30_000;
 const credentialsCache = new Map<string, { at: number; credentials: OdooCredentials }>();
 
+// Endpoints that count as "someone ran a report / sent an email": logged when they ask for Odoo access.
+const LOGGED_ENDPOINTS: Record<string, { action: string; category: ActivityCategory }> = {
+    "odoo/salesperson-activity-report": { action: "Ran Salesperson Activity report", category: "report" },
+    "odoo/customer-activity-report": { action: "Ran Customer Activity report", category: "report" },
+    "odoo/customer-report": { action: "Opened a Customer Report", category: "report" },
+    "odoo/payment-followup-by-salesperson": { action: "Ran Payment Follow-up (by salesperson)", category: "report" },
+    "odoo/payment-followup-by-customer": { action: "Ran Payment Follow-up (by customer)", category: "report" },
+    "odoo/payment-followup-by-tag": { action: "Ran Payment Follow-up (by tag)", category: "report" },
+    "odoo/partner-ledger": { action: "Opened a Partner Ledger", category: "report" },
+    "odoo/margin-analytics": { action: "Ran Margin Analytics", category: "report" },
+    "odoo/margin-analytics-breakdown": { action: "Opened a Margin Analytics breakdown", category: "report" },
+    "odoo/products-performance": { action: "Ran Products Performance", category: "report" },
+    "odoo/aged-stock": { action: "Ran Aged Stock", category: "report" },
+    "odoo/purchase-order-report": { action: "Ran Purchase Order report", category: "report" },
+    "odoo/sales-target-details": { action: "Opened Sales Target details", category: "report" },
+    "odoo/salesperson-monthly-invoices": { action: "Loaded Sales Targets report", category: "report" },
+    "odoo/price-list-request": { action: "Generated a Price List", category: "report" },
+    "odoo/sales-target-email": { action: "Emailed a Sales Target report", category: "write" },
+    "odoo/sales-target-category-email": { action: "Emailed a Sales Target category report", category: "write" },
+    "odoo/pending-order-email": { action: "Sent a pending order email", category: "write" },
+    "odoo/add-line": { action: "Added a product line to an order", category: "write" },
+    "backorder-to-order": { action: "Created an order from a backorder", category: "write" },
+    "backorder-email": { action: "Sent a backorder email", category: "write" },
+    "backorder-whatsapp": { action: "Sent a backorder WhatsApp message", category: "write" },
+    "po-tracking/telex": { action: "Updated PO Tracking telex date", category: "write" },
+};
+const LOGGED_BODY_KEYS = ["customerId", "salespersonId", "tagId", "startDate", "endDate", "asOfDate", "year", "month", "kind"];
+
+async function logEndpointUse(userId: string, request: Request) {
+    const endpoint = LOGGED_ENDPOINTS[new URL(request.url).pathname.replace(/^\/api\//, "")];
+    if (!endpoint) return;
+    let detail = "";
+    try {
+        const body = (await request.clone().json()) as Record<string, unknown>;
+        detail = LOGGED_BODY_KEYS.filter((key) => body[key] !== undefined && body[key] !== null && body[key] !== "")
+            .map((key) => `${key}: ${String(body[key])}`)
+            .join(", ");
+    } catch {
+        // no JSON body
+    }
+    await recordActivity(userId, request, { action: endpoint.action, category: endpoint.category, detail });
+}
+
 export async function getOdooCredentialsFromRequest(
     request: Request
 ): Promise<{ userId: string; credentials: OdooCredentials }> {
     const userId = await getUserIdFromAuthHeader(request);
+    await logEndpointUse(userId, request);
     const cached = credentialsCache.get(userId);
     if (cached && Date.now() - cached.at < CREDENTIALS_CACHE_TTL_MS) {
         return { userId, credentials: cached.credentials };

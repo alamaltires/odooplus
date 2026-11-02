@@ -8,8 +8,7 @@ import {
     getSalespersonActivityReport,
 } from "@/lib/client-odoo";
 import { useAuth } from "@/lib/auth-context";
-import { LimitedMultiSelect } from "@/components/limited-multi-select";
-import { ReportTabs } from "@/components/report-tabs";
+import { Select2 } from "@/components/select2";
 import {
     OdooCustomerSummary,
     OdooInactiveCustomer,
@@ -18,6 +17,7 @@ import {
     OdooServicedCustomer,
 } from "@/types/odoo";
 import { getDisplayCurrency } from "@/lib/display-currency";
+import { writeWorkbook } from "@/lib/client-activity";
 
 function todayISO() {
     return new Date().toISOString().slice(0, 10);
@@ -166,10 +166,10 @@ function TableSearchInput({
     );
 }
 
-function CustomerReportButton({ customerId }: { customerId: number }) {
+function CustomerReportButton({ customerId, range }: { customerId: number; range?: { startDate: string; endDate: string } }) {
     return (
         <Link
-            href={`/customers/${customerId}`}
+            href={range ? `/customers/${customerId}?from=${range.startDate}&to=${range.endDate}` : `/customers/${customerId}`}
             className="inline-flex whitespace-nowrap items-center justify-center rounded-full border border-(--line) px-3 py-1.5 text-xs font-medium text-(--ink) hover:bg-(--chip)"
         >
             Customer Report
@@ -224,7 +224,7 @@ function ScrollableTable({ children }: { children: React.ReactNode }) {
     );
 }
 
-function ServicedCustomersTable({ rows }: { rows: OdooServicedCustomer[] }) {
+function ServicedCustomersTable({ rows, range }: { rows: OdooServicedCustomer[]; range: { startDate: string; endDate: string } }) {
     if (rows.length === 0) {
         return <EmptyState message="No serviced customers were found for this salesperson in the selected period." />;
     }
@@ -235,6 +235,7 @@ function ServicedCustomersTable({ rows }: { rows: OdooServicedCustomer[] }) {
                 <thead className="sticky top-0 z-10 bg-(--chip)">
                     <tr>
                         <th className="px-4 py-3 text-left font-medium">Customer</th>
+                        <th className="px-4 py-3 text-left font-medium">Payment Terms</th>
                         <th className="px-4 py-3 text-right font-medium">Orders</th>
                         <th className="px-4 py-3 text-right font-medium">Total Sales</th>
                         <th className="px-4 py-3 text-right font-medium">Customer Monthly Target</th>
@@ -247,6 +248,7 @@ function ServicedCustomersTable({ rows }: { rows: OdooServicedCustomer[] }) {
                     {rows.map((row) => (
                         <tr key={row.customerId}>
                             <td className="px-4 py-3 align-top"><CustomerCell row={row} /></td>
+                            <td className="px-4 py-3 align-top">{row.paymentTerm || "-"}</td>
                             <td className="px-4 py-3 text-right align-top">
                                 <MetricPill value={formatNumber(row.orderCount)} />
                             </td>
@@ -260,7 +262,7 @@ function ServicedCustomersTable({ rows }: { rows: OdooServicedCustomer[] }) {
                                 <MonthlyTargetPill row={row} />
                             </td>
                             <td className="px-4 py-3 align-top">{formatDateTime(row.lastSaleDate)}</td>
-                            <td className="px-4 py-3 text-right align-top"><CustomerReportButton customerId={row.customerId} /></td>
+                            <td className="px-4 py-3 text-right align-top"><CustomerReportButton customerId={row.customerId} range={range} /></td>
                         </tr>
                     ))}
                 </tbody>
@@ -320,7 +322,8 @@ export default function SalespersonActivityPage() {
     const [salespeople, setSalespeople] = useState<OdooSalesperson[]>([]);
     const [salespeopleLoading, setSalespeopleLoading] = useState(true);
     const [salespeopleError, setSalespeopleError] = useState<string | null>(null);
-    const [selectedSalespersonIds, setSelectedSalespersonIds] = useState<string[]>([]);
+    const [selectedSalespersonId, setSelectedSalespersonId] = useState("");
+    const [onlyAssigned, setOnlyAssigned] = useState(false);
 
     const [startDate, setStartDate] = useState(oneMonthAgoISO);
     const [endDate, setEndDate] = useState(todayISO);
@@ -331,19 +334,17 @@ export default function SalespersonActivityPage() {
             if (saved) {
                 const state = JSON.parse(saved) as SavedActivityState;
                 hasRestoredStateRef.current = true;
-                setSelectedSalespersonIds(state.selectedSalespersonIds ?? (state.selectedSalespersonId ? [state.selectedSalespersonId] : []));
+                setSelectedSalespersonId(state.selectedSalespersonIds?.[0] ?? state.selectedSalespersonId ?? "");
                 setStartDate(state.startDate);
                 setEndDate(state.endDate);
-                setReports(state.reports ?? (state.report ? [state.report] : []));
+                setReport(state.reports?.[0] ?? state.report ?? null);
             }
         } catch {
             // ignore corrupt storage
         }
     }, []);
 
-    const [reports, setReports] = useState<OdooSalespersonActivityReport[]>([]);
-    const [activeIndex, setActiveIndex] = useState(0);
-    const report: OdooSalespersonActivityReport | null = reports[Math.min(activeIndex, reports.length - 1)] ?? null;
+    const [report, setReport] = useState<OdooSalespersonActivityReport | null>(null);
     const [reportLoading, setReportLoading] = useState(false);
     const [reportError, setReportError] = useState<string | null>(null);
     const [exportingTable, setExportingTable] = useState<"serviced" | "inactive" | null>(null);
@@ -371,7 +372,7 @@ export default function SalespersonActivityPage() {
                 // Only preselect when there's no choice to make (a salesperson restricted to themself);
                 // otherwise the first entry is just "Administrator", so leave it for the user to pick.
                 if (data.salespeople.length === 1 && !hasRestoredStateRef.current) {
-                    setSelectedSalespersonIds([String(data.salespeople[0].id)]);
+                    setSelectedSalespersonId(String(data.salespeople[0].id));
                 }
             } catch (error) {
                 setSalespeopleError(
@@ -387,26 +388,21 @@ export default function SalespersonActivityPage() {
 
     async function handleSubmit(event: FormEvent) {
         event.preventDefault();
-        if (selectedSalespersonIds.length === 0) {
+        if (!selectedSalespersonId) {
             return;
         }
 
         setReportLoading(true);
         setReportError(null);
-        setReports([]);
-        setActiveIndex(0);
+        setReport(null);
         setServicedSearch("");
         setInactiveSearch("");
 
         try {
-            const data = await Promise.all(
-                selectedSalespersonIds.map((id) =>
-                    getSalespersonActivityReport({ salespersonId: Number(id), startDate, endDate })
-                )
-            );
-            setReports(data);
+            const data = await getSalespersonActivityReport({ salespersonId: Number(selectedSalespersonId), startDate, endDate });
+            setReport(data);
             try {
-                const stateToSave: SavedActivityState = { selectedSalespersonIds, startDate, endDate, reports: data };
+                const stateToSave: SavedActivityState = { selectedSalespersonIds: [selectedSalespersonId], startDate, endDate, reports: [data] };
                 sessionStorage.setItem(SESSION_KEY, JSON.stringify(stateToSave));
             } catch {
                 // ignore storage errors
@@ -427,8 +423,10 @@ export default function SalespersonActivityPage() {
             return [] as OdooServicedCustomer[];
         }
 
-        return report.servicedCustomers.filter((row) => matchesCustomerSearch(row, servicedSearch));
-    }, [report, servicedSearch]);
+        return report.servicedCustomers.filter(
+            (row) => (!onlyAssigned || row.assignedToSelf !== false) && matchesCustomerSearch(row, servicedSearch)
+        );
+    }, [report, servicedSearch, onlyAssigned]);
 
     const filteredInactiveCustomers = useMemo(() => {
         if (!report) {
@@ -470,6 +468,7 @@ export default function SalespersonActivityPage() {
                         Phone: row.phone,
                         Address: row.street,
                         City: row.city,
+                        "Payment Terms": row.paymentTerm,
                         Orders: row.orderCount,
                         "Total Sales": row.totalSales,
                         "Customer Monthly Target": row.customerMonthlyTarget,
@@ -489,7 +488,7 @@ export default function SalespersonActivityPage() {
             const worksheet = XLSX.utils.json_to_sheet(exportRows);
             const workbook = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(workbook, worksheet, "Report");
-            XLSX.writeFile(
+            writeWorkbook(XLSX, 
                 workbook,
                 `${sanitizeFileName(report.salesperson.name)}-${tableNameByKey[table]}-${report.startDate}-to-${report.endDate}.xlsx`
             );
@@ -508,7 +507,7 @@ export default function SalespersonActivityPage() {
                 <div>
                     <h1 className="font-display text-3xl">Salesperson Activity Report</h1>
                     <p className="mt-1 text-sm text-(--ink-soft)">
-                        Compare serviced customers and assigned inactive customers for up to 4 salespeople.
+                        Serviced customers and assigned inactive customers of a salesperson.
                     </p>
                 </div>
                 <BarChart3 className="h-8 w-8 text-(--brand)" aria-hidden="true" />
@@ -520,14 +519,14 @@ export default function SalespersonActivityPage() {
             >
                 <div className="grid gap-4 md:grid-cols-4">
                     <label className="block md:col-span-2">
-                        <span className="mb-2 block text-sm font-medium">Salespeople (up to 4)</span>
-                        <LimitedMultiSelect
-                            values={selectedSalespersonIds}
-                            onChange={setSelectedSalespersonIds}
-                            max={4}
+                        <span className="mb-2 block text-sm font-medium">Salesperson</span>
+                        <Select2
+                            value={selectedSalespersonId}
+                            onChange={setSelectedSalespersonId}
                             loading={salespeopleLoading}
                             loadingText="Loading salespeople..."
                             emptyText="No salespeople found"
+                            placeholder="Select a salesperson"
                             disabled={Boolean(salespeopleError)}
                             options={salespeople.map((salesperson) => ({
                                 value: String(salesperson.id),
@@ -563,10 +562,10 @@ export default function SalespersonActivityPage() {
                 <div className="mt-4 flex items-center gap-3">
                     <button
                         type="submit"
-                        disabled={reportLoading || selectedSalespersonIds.length === 0 || salespeopleLoading}
+                        disabled={reportLoading || !selectedSalespersonId || salespeopleLoading}
                         className="rounded-xl bg-(--brand) px-4 py-2.5 font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
                     >
-                        {reportLoading ? "Generating..." : selectedSalespersonIds.length > 1 ? `Generate Report (${selectedSalespersonIds.length})` : "Generate Report"}
+                        {reportLoading ? "Generating..." : "Generate Report"}
                     </button>
 
                     {salespeopleError ? (
@@ -576,16 +575,30 @@ export default function SalespersonActivityPage() {
                 </div>
             </form>
 
-            <ReportTabs labels={reports.map((item) => item.salesperson.name)} active={Math.min(activeIndex, reports.length - 1)} onChange={setActiveIndex} />
-
             {report ? (
                 <div className="mt-6 space-y-6">
-                    <div className="rounded-2xl border border-(--line) bg-(--card) p-5">
-                        <p className="text-sm text-(--ink-soft)">Selected salesperson</p>
-                        <p className="mt-1 font-display text-2xl">{report.salesperson.name}</p>
-                        <p className="mt-2 text-sm text-(--ink-soft)">
-                            Period: {report.startDate} to {report.endDate}
-                        </p>
+                    <div className="flex flex-wrap items-start justify-between gap-4 rounded-2xl border border-(--line) bg-(--card) p-5">
+                        <div>
+                            <p className="text-sm text-(--ink-soft)">Selected salesperson</p>
+                            <p className="mt-1 font-display text-2xl">{report.salesperson.name}</p>
+                            <p className="mt-2 text-sm text-(--ink-soft)">
+                                Period: {report.startDate} to {report.endDate}
+                            </p>
+                        </div>
+                        <label className="flex cursor-pointer items-center gap-3 rounded-2xl border border-(--line) bg-white px-4 py-3">
+                            <input
+                                type="checkbox"
+                                role="switch"
+                                checked={onlyAssigned}
+                                onChange={(event) => setOnlyAssigned(event.target.checked)}
+                                className="peer sr-only"
+                            />
+                            <span className="relative h-6 w-11 shrink-0 rounded-full bg-slate-300 transition peer-checked:bg-(--brand) peer-focus-visible:ring-2 peer-focus-visible:ring-(--brand) after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow after:transition peer-checked:after:translate-x-5" />
+                            <span className="text-sm">
+                                <span className="block font-medium">Only his assigned customers</span>
+                                <span className="block text-xs text-(--ink-soft)">Hide customers assigned to other salespeople</span>
+                            </span>
+                        </label>
                     </div>
 
                     <TableCard
@@ -607,7 +620,7 @@ export default function SalespersonActivityPage() {
                                     <MetricPill value={formatCurrency(servicedSalesTotal)} />
                                 </div>
                             </div>
-                            <ServicedCustomersTable rows={filteredServicedCustomers} />
+                            <ServicedCustomersTable rows={filteredServicedCustomers} range={{ startDate: report.startDate, endDate: report.endDate }} />
                         </div>
                     </TableCard>
 

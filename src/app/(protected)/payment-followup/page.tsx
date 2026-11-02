@@ -27,6 +27,7 @@ import { documentBadgeClass, documentTypeLabel, isCreditSide, signedResidual } f
 import { useAuth } from "@/lib/auth-context";
 import { Select2 } from "@/components/select2";
 import { PartnerLedgerSection } from "@/components/partner-ledger-section";
+import { writeWorkbook } from "@/lib/client-activity";
 import {
     OdooCustomerOption,
     OdooSalesperson,
@@ -871,7 +872,7 @@ function AgingMatrix({
         const worksheet = XLSX.utils.json_to_sheet(rows);
         const workbook = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(workbook, worksheet, "Aged Receivables");
-        XLSX.writeFile(workbook, `${exportName}.xlsx`);
+        writeWorkbook(XLSX, workbook, `${exportName}.xlsx`);
     }
 
     return (
@@ -1224,7 +1225,7 @@ export default function PaymentFollowupPage() {
             const worksheet = XLSX.utils.json_to_sheet(exportRows);
             const workbook = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(workbook, worksheet, "Payment Followup");
-            XLSX.writeFile(workbook, `payment-followup-${sanitizeFileName(whoLabel)}-${report.asOfDate}.xlsx`);
+            writeWorkbook(XLSX, workbook, `payment-followup-${sanitizeFileName(whoLabel)}-${report.asOfDate}.xlsx`);
         } catch (error) {
             setReportError(error instanceof Error ? error.message : "Failed to export Excel file.");
         } finally {

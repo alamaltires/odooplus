@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { recordActivity } from "@/lib/server/activity-log";
 import { getUserIdFromRequest, getUserRoleFromRequest, hasPoTrackingPassword, setPoTrackingPassword } from "@/lib/server/auth-helpers";
 
 export async function GET(request: Request) {
@@ -22,6 +23,7 @@ export async function POST(request: Request) {
         const body = (await request.json()) as { password?: string };
         const password = String(body.password ?? "");
         await setPoTrackingPassword(password, actorId);
+        await recordActivity(actorId, request, { action: password ? "Set the PO Tracking password" : "Removed the PO Tracking password", category: "settings" });
         return NextResponse.json({ isSet: password.length > 0 });
     } catch (error) {
         return NextResponse.json({ error: error instanceof Error ? error.message : "Failed to save" }, { status: 400 });

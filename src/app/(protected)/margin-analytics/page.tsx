@@ -5,6 +5,7 @@ import { ChevronDown, ChevronRight, Coins, Download, ListTree, Percent, Search, 
 import { useAuth } from "@/lib/auth-context";
 import { Select2 } from "@/components/select2";
 import { resolveExactNameMatch } from "@/lib/combobox-match";
+import { writeWorkbook } from "@/lib/client-activity";
 import {
     getCustomers,
     getMarginAnalyticsBreakdown,
@@ -1105,7 +1106,7 @@ export default function MarginAnalyticsPage() {
 
             const workbook = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(workbook, worksheet, "Margin Analytics");
-            XLSX.writeFile(workbook, `${exportFileName}.xlsx`);
+            writeWorkbook(XLSX, workbook, `${exportFileName}.xlsx`);
         } catch (exportError) {
             setReportError(exportError instanceof Error ? exportError.message : "Failed to export margin analytics report.");
         } finally {
@@ -2090,7 +2091,7 @@ function BreakdownModal({
             appendSection(breakdown.unlinkedAdjustments, "Unlinked Adjustments", "Qty", `Entry (${currencyCode})`);
             appendSection(breakdown.sales, "Sales Orders", "Qty", `Unit (${currencyCode})`);
 
-            XLSX.writeFile(workbook, `${sanitizeFileName(product.productName)}-breakdown.xlsx`);
+            writeWorkbook(XLSX, workbook, `${sanitizeFileName(product.productName)}-breakdown.xlsx`);
         } catch (exportErr) {
             setExportError(exportErr instanceof Error ? exportErr.message : "Failed to export breakdown.");
         } finally {
