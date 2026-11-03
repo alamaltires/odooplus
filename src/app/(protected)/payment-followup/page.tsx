@@ -912,7 +912,10 @@ function AgingMatrix({
                         {sortedCustomers.map((row) => (
                             <tr key={row.customerId}>
                                 {showCustomerColumn ? (
-                                    <td className="max-w-48 truncate px-3 py-2 font-medium text-(--ink)">{row.customerName}</td>
+                                    <td className="max-w-48 px-3 py-2">
+                                        <span className="block truncate font-medium text-(--ink)">{row.customerName}</span>
+                                        <span className="block truncate text-xs text-(--ink-soft)">{row.paymentTerm || "No payment terms"}</span>
+                                    </td>
                                 ) : null}
                                 {columns.map((column) => {
                                     const amount = row.agingBuckets[column.key];
@@ -980,6 +983,9 @@ function CustomerCard({
                         </span>
                         <span className="mt-1 block text-xs text-(--ink-soft)">
                             {row.salespersonName} · {row.phone || "no phone"} · {row.email || "no email"}
+                        </span>
+                        <span className="mt-0.5 block text-xs text-(--ink-soft)">
+                            Payment terms: {row.paymentTerm || "Not set"}
                         </span>
                     </span>
                 </button>

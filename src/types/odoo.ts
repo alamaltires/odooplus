@@ -429,6 +429,8 @@ export type PaymentFollowupCustomerRow = {
     phone: string;
     street: string;
     city: string;
+    /** The customer's payment terms (empty when none are set). */
+    paymentTerm: string;
     currencyCode: string;
     totalInvoiceDue: number;
     totalUnapplied: number;

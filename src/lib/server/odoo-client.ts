@@ -4807,6 +4807,8 @@ export type PaymentFollowupCustomerRow = {
     phone: string;
     street: string;
     city: string;
+    /** The customer's payment terms (empty when none are set). */
+    paymentTerm: string;
     currencyCode: string;
     totalInvoiceDue: number;
     totalUnapplied: number;
@@ -5660,7 +5662,8 @@ async function buildPaymentFollowupReport(
         };
     }
 
-    const partnerFields = await getAvailablePartnerFields(credentials, uid);
+    const termFields = await getExistingPartnerFields(credentials, uid, ["property_payment_term_id"]);
+    const partnerFields = [...(await getAvailablePartnerFields(credentials, uid)), ...termFields];
     const customerRecords = await readPartnersByIds(credentials, uid, customerIds, partnerFields);
     const customerRecordById = new Map<number, Record<string, unknown>>();
     for (const record of customerRecords) {
@@ -5983,6 +5986,7 @@ async function buildPaymentFollowupReport(
             phone: summary.phone,
             street: summary.street,
             city: summary.city,
+            paymentTerm: record ? getRelationalName(record.property_payment_term_id) : "",
             currencyCode: TARGET_CURRENCY_CODE,
             totalInvoiceDue: 0,
             totalUnapplied: 0,

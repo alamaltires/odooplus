@@ -764,6 +764,21 @@ export function SalesStockBrowser({
         build(groups, 0, "");
         return entries;
     }, [groups, sectionLevels, collapsedSections]);
+    // Fresh results, or a changed grouping, arrive folded: the user opens only the sections and lines they want.
+    useEffect(() => {
+        // Every section at every depth starts folded, so each one is opened on its own.
+        const keys = new Set<string>();
+        for (const row of rows) {
+            let key = "";
+            for (const level of sectionLevels) {
+                key += `/${level}:${groupLabelOf(row, level)}`;
+                keys.add(key);
+            }
+        }
+        setCollapsedSections(keys);
+        setExpanded(new Set());
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [rows, groupBy]);
     const toggleSection = (key: string) =>
         setCollapsedSections((current) => {
             const next = new Set(current);
@@ -981,7 +996,6 @@ export function SalesStockBrowser({
                                             setGroupBy((current) =>
                                                 current.includes(option.value) ? current.filter((value) => value !== option.value) : [...current, option.value]
                                             );
-                                            setCollapsedSections(new Set());
                                         }}
                                     />
                                     <span className="flex-1">{option.label}</span>
