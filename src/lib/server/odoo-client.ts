@@ -2429,6 +2429,28 @@ type SalesStockSpec = { key: string; tech: string[]; labels: string[]; type: "te
 // technical names can't be known up front, so each is located by its
 // technical name (when standard) or its on-screen label via `fields_get`,
 // looking on the stock line first, then its lot, then the product.
+/**
+ * Odoo lists fields a user may not read (e.g. a cost field limited to accounting) in `fields_get`
+ * but refuses the read. Runs `read` with the given fields and, when Odoo names the fields it
+ * refused, retries without them so the rest of the data still loads.
+ */
+async function readSkippingDeniedFields<T>(read: (fields: string[]) => Promise<T>, fields: string[], protectedFields: string[] = []): Promise<T> {
+    let remaining = fields;
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            return await read(remaining);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : "";
+            if (attempt >= 3 || !/enough rights to access the fields/i.test(message)) throw error;
+            const listed = message.split(/Fields:/i)[1] ?? "";
+            const denied = new Set(Array.from(listed.matchAll(/-\s*([a-z_][\w]*)/gi), (match) => match[1]));
+            const next = remaining.filter((name) => !denied.has(name) || protectedFields.includes(name));
+            if (next.length === remaining.length) throw error;
+            remaining = next;
+        }
+    }
+}
+
 const SALES_STOCK_SPECS: SalesStockSpec[] = [
     { key: "copyName", tech: [], labels: ["copy name"], type: "text" },
     { key: "sku", tech: ["x_studio_product_custom_sku"], labels: [], type: "text" },
@@ -2651,12 +2673,17 @@ export async function searchSalesStock(
     // The total and the page of rows are independent: ask Odoo for both at once. When the first
     // page comes back short, that already is the total, so the count is not waited for.
     const countPromise = executeKw<number>(credentials, uid, "stock.quant", "search_count", [quantDomain]);
-    const quants = await executeKw<Array<Record<string, unknown>>>(credentials, uid, "stock.quant", "search_read", [quantDomain], {
-        fields: Array.from(quantFields),
-        order: "quantity desc, id asc",
-        limit,
-        offset,
-    });
+    const quants = await readSkippingDeniedFields(
+        (fields) =>
+            executeKw<Array<Record<string, unknown>>>(credentials, uid, "stock.quant", "search_read", [quantDomain], {
+                fields,
+                order: "quantity desc, id asc",
+                limit,
+                offset,
+            }),
+        Array.from(quantFields),
+        ["product_id", "location_id", "lot_id", "quantity"]
+    );
     const knownTotal = quants.length < limit ? offset + quants.length : null;
     if (knownTotal !== null) countPromise.catch(() => undefined);
     const totalCount = knownTotal ?? (await countPromise);
@@ -2671,12 +2698,17 @@ export async function searchSalesStock(
 
     const [lots, products] = await Promise.all([
         lotIds.length > 0 && lotFields.length > 0
-            ? executeKw<Array<Record<string, unknown>>>(credentials, uid, "stock.lot", "read", [lotIds], { fields: lotFields })
+            ? readSkippingDeniedFields((fields) => executeKw<Array<Record<string, unknown>>>(credentials, uid, "stock.lot", "read", [lotIds], { fields }), lotFields)
             : Promise.resolve([] as Array<Record<string, unknown>>),
-        executeKw<Array<Record<string, unknown>>>(credentials, uid, "product.product", "read", [productIds], {
-            fields: productFields,
-            context: { active_test: false },
-        }),
+        readSkippingDeniedFields(
+            (fields) =>
+                executeKw<Array<Record<string, unknown>>>(credentials, uid, "product.product", "read", [productIds], {
+                    fields,
+                    context: { active_test: false },
+                }),
+            productFields,
+            ["display_name"]
+        ),
     ]);
     mark("lotsAndProducts");
     const lotById = new Map(lots.map((lot) => [Number(lot.id), lot]));

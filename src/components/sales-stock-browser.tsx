@@ -786,6 +786,8 @@ export function SalesStockBrowser({
             else next.add(key);
             return next;
         });
+    // The cost column is blank by design for logins Odoo doesn't let read it, so it isn't worth a warning.
+    const unresolvedShown = unresolved.filter((name) => name !== "lotAverageCost");
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
     const foldedKeys = useMemo(() => groups.filter((group) => group.rows.length > 1).map((group) => group.key), [groups]);
     const sectionKeys = useMemo(
@@ -1077,9 +1079,9 @@ export function SalesStockBrowser({
             ) : null}
 
             {error ? <p className="text-sm text-red-600">{error}</p> : null}
-            {!error && rows.length > 0 && unresolved.length > 0 ? (
+            {!error && rows.length > 0 && unresolvedShown.length > 0 ? (
                 <p className="text-xs text-(--ink-soft)">
-                    Some columns couldn&rsquo;t be matched to Odoo fields and show &ldquo;-&rdquo;: {unresolved.join(", ")}.
+                    Some columns couldn&rsquo;t be matched to Odoo fields and show &ldquo;-&rdquo;: {unresolvedShown.join(", ")}.
                 </p>
             ) : null}
 
