@@ -2551,9 +2551,15 @@ export async function searchSalesStock(
         for (const token of term.split(/\s+/).filter(Boolean)) {
             const sizeMatch = token.match(/^(\d{3})\/?(\d{2})\s*[A-Za-z]?\s*(\d{2})$/);
             const keyword = sizeMatch ? `${sizeMatch[1]}${sizeMatch[2]}${sizeMatch[3]}` : token.replace(/[\/\-_.]/g, "");
+            // Rim sizes like 22.5 may be stored with their dot ("3856522.5") or without it, so both spellings are tried.
+            const keepDot = token.includes(".") ? token.replace(/[\/\-_]/g, "") : "";
             if (keyword) {
                 // Each word matches the normalized Search Name OR the product's own name.
-                domain.push("|", ["product_tmpl_id.second_name", "ilike", keyword], ["product_tmpl_id.name", "ilike", token]);
+                if (keepDot && keepDot !== keyword) {
+                    domain.push("|", "|", ["product_tmpl_id.second_name", "ilike", keyword], ["product_tmpl_id.second_name", "ilike", keepDot], ["product_tmpl_id.name", "ilike", token]);
+                } else {
+                    domain.push("|", ["product_tmpl_id.second_name", "ilike", keyword], ["product_tmpl_id.name", "ilike", token]);
+                }
             }
         }
         return domain;
