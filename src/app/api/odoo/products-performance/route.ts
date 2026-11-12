@@ -13,6 +13,9 @@ export async function POST(request: Request) {
             categoryId?: number | null;
             categoryIds?: number[];
             originIds?: number[];
+            rimIds?: number[];
+            widthValues?: string[];
+            ratioValues?: string[];
             startDate: string;
             endDate: string;
             dateBasis?: "order" | "transaction" | null;

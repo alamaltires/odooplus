@@ -10,6 +10,8 @@ import {
     getProductBrands,
     getProductCategories,
     getProductOrigins,
+    getRimDiameters,
+    getTireDimensionOptions,
     getProducts,
     getProductsPerformanceReport,
     searchPurchaseOrders,
@@ -171,6 +173,22 @@ export default function ProductsPerformancePage() {
     const [originQuery, setOriginQuery] = useState("");
     const [originMenuOpen, setOriginMenuOpen] = useState(false);
     const [selectedOrigins, setSelectedOrigins] = useState<Array<{ id: number; name: string }>>([]);
+    const [rims, setRims] = useState<Array<{ id: number; name: string }>>([]);
+    const [rimsLoading, setRimsLoading] = useState(true);
+    const [rimQuery, setRimQuery] = useState("");
+    const [rimMenuOpen, setRimMenuOpen] = useState(false);
+    const [selectedRims, setSelectedRims] = useState<Array<{ id: number; name: string }>>([]);
+    // Tire width and aspect ratio: options are the distinct values found in Odoo (id = the value to filter by).
+    const [widths, setWidths] = useState<Array<{ id: string; name: string }>>([]);
+    const [widthsLoading, setWidthsLoading] = useState(true);
+    const [widthQuery, setWidthQuery] = useState("");
+    const [widthMenuOpen, setWidthMenuOpen] = useState(false);
+    const [selectedWidths, setSelectedWidths] = useState<Array<{ id: string; name: string }>>([]);
+    const [ratios, setRatios] = useState<Array<{ id: string; name: string }>>([]);
+    const [ratiosLoading, setRatiosLoading] = useState(true);
+    const [ratioQuery, setRatioQuery] = useState("");
+    const [ratioMenuOpen, setRatioMenuOpen] = useState(false);
+    const [selectedRatios, setSelectedRatios] = useState<Array<{ id: string; name: string }>>([]);
 
     const [brands, setBrands] = useState<Brand[]>([]);
     const [brandsLoading, setBrandsLoading] = useState(true);
@@ -266,6 +284,26 @@ export default function ProductsPerformancePage() {
         }
 
         void loadCategories();
+    }, [user]);
+
+    useEffect(() => {
+        if (!user) return;
+        getTireDimensionOptions("width")
+            .then((data) => setWidths(data.options.map((option) => ({ id: option.value, name: option.label }))))
+            .catch(() => setWidths([]))
+            .finally(() => setWidthsLoading(false));
+        getTireDimensionOptions("ratio")
+            .then((data) => setRatios(data.options.map((option) => ({ id: option.value, name: option.label }))))
+            .catch(() => setRatios([]))
+            .finally(() => setRatiosLoading(false));
+    }, [user]);
+
+    useEffect(() => {
+        if (!user) return;
+        getRimDiameters()
+            .then((data) => setRims(data.rimDiameters))
+            .catch(() => setRims([]))
+            .finally(() => setRimsLoading(false));
     }, [user]);
 
     useEffect(() => {
@@ -428,6 +466,21 @@ export default function ProductsPerformancePage() {
         return query ? origins.filter((origin) => origin.name.toLowerCase().includes(query)) : origins;
     }, [originQuery, origins]);
 
+    const filteredRims = useMemo(() => {
+        const query = rimQuery.trim().toLowerCase();
+        return query ? rims.filter((rim) => rim.name.toLowerCase().includes(query)) : rims;
+    }, [rimQuery, rims]);
+
+    const filteredWidths = useMemo(() => {
+        const query = widthQuery.trim().toLowerCase();
+        return query ? widths.filter((item) => item.name.toLowerCase().includes(query)) : widths;
+    }, [widthQuery, widths]);
+
+    const filteredRatios = useMemo(() => {
+        const query = ratioQuery.trim().toLowerCase();
+        return query ? ratios.filter((item) => item.name.toLowerCase().includes(query)) : ratios;
+    }, [ratioQuery, ratios]);
+
     const filteredBrands = useMemo(() => {
         if (!brandQuery.trim()) {
             return brands;
@@ -446,6 +499,9 @@ export default function ProductsPerformancePage() {
         selectedBrand ||
         selectedCategories.length > 0 ||
         selectedOrigins.length > 0 ||
+        selectedRims.length > 0 ||
+        selectedWidths.length > 0 ||
+        selectedRatios.length > 0 ||
         poQuery.trim() ||
         productQuery.trim() ||
         brandQuery.trim() ||
@@ -517,10 +573,13 @@ export default function ProductsPerformancePage() {
             selectedBrand?.name,
             selectedCategories.length > 0 ? selectedCategories.map((category) => category.name).join("+") : undefined,
             selectedOrigins.length > 0 ? selectedOrigins.map((origin) => origin.name).join("+") : undefined,
+            selectedRims.length > 0 ? selectedRims.map((rim) => rim.name).join("+") : undefined,
+            selectedWidths.length > 0 ? selectedWidths.map((item) => item.name).join("+") : undefined,
+            selectedRatios.length > 0 ? selectedRatios.map((item) => item.name).join("+") : undefined,
         ].filter(Boolean);
         const scope = parts.join("-") || "products-performance";
         return `products-performance-${sanitizeFileName(scope)}-${startDate}-to-${endDate}`;
-    }, [endDate, selectedBrand?.name, selectedCategories, selectedOrigins, selectedProduct?.name, selectedPurchaseOrder?.name, startDate]);
+    }, [endDate, selectedBrand?.name, selectedCategories, selectedOrigins, selectedRims, selectedWidths, selectedRatios, selectedProduct?.name, selectedPurchaseOrder?.name, startDate]);
 
     // Resolves a scanner field that was typed but never clicked: an exact
     // (case/whitespace-insensitive) name match against whatever's already
@@ -590,7 +649,7 @@ export default function ProductsPerformancePage() {
         const resolvedBrand = resolveBrandSelection();
         const resolvedCategories = resolveCategorySelection();
 
-        if (!resolvedPurchaseOrder && !resolvedProduct && !resolvedBrand && resolvedCategories.length === 0 && selectedOrigins.length === 0) {
+        if (!resolvedPurchaseOrder && !resolvedProduct && !resolvedBrand && resolvedCategories.length === 0 && selectedOrigins.length === 0 && selectedRims.length === 0 && selectedWidths.length === 0 && selectedRatios.length === 0) {
             return;
         }
 
@@ -640,6 +699,9 @@ export default function ProductsPerformancePage() {
                 brandId: resolvedBrand?.id,
                 categoryIds: resolvedCategories.map((category) => category.id),
                 originIds: selectedOrigins.map((origin) => origin.id),
+                rimIds: selectedRims.map((rim) => rim.id),
+                widthValues: selectedWidths.map((item) => item.id),
+                ratioValues: selectedRatios.map((item) => item.id),
                 startDate: effectiveStartDate,
                 endDate: effectiveEndDate,
                 dateBasis,
@@ -1076,6 +1138,200 @@ export default function ProductsPerformancePage() {
                             </div>
                         ) : null}
                     </label>
+
+                    <label className="relative block">
+                        <span className="mb-2 block text-sm font-medium">Rim Size</span>
+                        <div className="relative">
+                            <Search
+                                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-(--ink-soft)"
+                                aria-hidden="true"
+                            />
+                            <input
+                                value={rimQuery}
+                                onChange={(event) => {
+                                    setRimQuery(event.target.value);
+                                    setRimMenuOpen(true);
+                                }}
+                                onFocus={() => setRimMenuOpen(true)}
+                                onBlur={() => window.setTimeout(() => setRimMenuOpen(false), 120)}
+                                placeholder={rimsLoading ? "Loading..." : "Search sizes"}
+                                className="w-full rounded-xl border border-(--line) bg-white py-2 pl-10 pr-3"
+                                disabled={rimsLoading}
+                            />
+                        </div>
+
+                        {rimMenuOpen && filteredRims.length > 0 ? (
+                            <ul className="absolute z-20 mt-2 max-h-64 w-full overflow-auto rounded-xl border border-(--line) bg-white p-1 shadow-lg">
+                                {filteredRims.map((option) => {
+                                    const picked = selectedRims.some((item) => item.id === option.id);
+                                    return (
+                                        <li key={option.id}>
+                                            <button
+                                                type="button"
+                                                onMouseDown={(event) => {
+                                                    event.preventDefault();
+                                                    setSelectedRims((current) =>
+                                                        picked ? current.filter((item) => item.id !== option.id) : [...current, option]
+                                                    );
+                                                }}
+                                                className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-(--chip) ${picked ? "bg-(--chip) font-medium text-(--brand)" : ""}`}
+                                            >
+                                                <input type="checkbox" checked={picked} readOnly tabIndex={-1} className="h-4 w-4 shrink-0 rounded border-(--line)" />
+                                                {option.name}
+                                            </button>
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+                        ) : null}
+                        {selectedRims.length > 0 ? (
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                                {selectedRims.map((option) => (
+                                    <span key={option.id} className="inline-flex items-center gap-1 rounded-full border border-(--line) bg-(--chip) py-0.5 pl-2.5 pr-1 text-xs font-medium">
+                                        {option.name}
+                                        <button
+                                            type="button"
+                                            onClick={() => setSelectedRims((current) => current.filter((item) => item.id !== option.id))}
+                                            className="rounded-full p-0.5 text-(--ink-soft) hover:bg-white hover:text-(--brand)"
+                                            aria-label={`Remove ${option.name}`}
+                                        >
+                                            <X className="h-3 w-3" aria-hidden="true" />
+                                        </button>
+                                    </span>
+                                ))}
+                            </div>
+                        ) : null}
+                    </label>
+
+                    <label className="relative block">
+                        <span className="mb-2 block text-sm font-medium">Tire Width</span>
+                        <div className="relative">
+                            <Search
+                                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-(--ink-soft)"
+                                aria-hidden="true"
+                            />
+                            <input
+                                value={widthQuery}
+                                onChange={(event) => {
+                                    setWidthQuery(event.target.value);
+                                    setWidthMenuOpen(true);
+                                }}
+                                onFocus={() => setWidthMenuOpen(true)}
+                                onBlur={() => window.setTimeout(() => setWidthMenuOpen(false), 120)}
+                                placeholder={widthsLoading ? "Loading..." : "Search widths"}
+                                className="w-full rounded-xl border border-(--line) bg-white py-2 pl-10 pr-3"
+                                disabled={widthsLoading}
+                            />
+                        </div>
+
+                        {widthMenuOpen && filteredWidths.length > 0 ? (
+                            <ul className="absolute z-20 mt-2 max-h-64 w-full overflow-auto rounded-xl border border-(--line) bg-white p-1 shadow-lg">
+                                {filteredWidths.map((option) => {
+                                    const picked = selectedWidths.some((item) => item.id === option.id);
+                                    return (
+                                        <li key={option.id}>
+                                            <button
+                                                type="button"
+                                                onMouseDown={(event) => {
+                                                    event.preventDefault();
+                                                    setSelectedWidths((current) =>
+                                                        picked ? current.filter((item) => item.id !== option.id) : [...current, option]
+                                                    );
+                                                }}
+                                                className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-(--chip) ${picked ? "bg-(--chip) font-medium text-(--brand)" : ""}`}
+                                            >
+                                                <input type="checkbox" checked={picked} readOnly tabIndex={-1} className="h-4 w-4 shrink-0 rounded border-(--line)" />
+                                                {option.name}
+                                            </button>
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+                        ) : null}
+                        {selectedWidths.length > 0 ? (
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                                {selectedWidths.map((option) => (
+                                    <span key={option.id} className="inline-flex items-center gap-1 rounded-full border border-(--line) bg-(--chip) py-0.5 pl-2.5 pr-1 text-xs font-medium">
+                                        {option.name}
+                                        <button
+                                            type="button"
+                                            onClick={() => setSelectedWidths((current) => current.filter((item) => item.id !== option.id))}
+                                            className="rounded-full p-0.5 text-(--ink-soft) hover:bg-white hover:text-(--brand)"
+                                            aria-label={`Remove ${option.name}`}
+                                        >
+                                            <X className="h-3 w-3" aria-hidden="true" />
+                                        </button>
+                                    </span>
+                                ))}
+                            </div>
+                        ) : null}
+                    </label>
+
+                    <label className="relative block">
+                        <span className="mb-2 block text-sm font-medium">Aspect Ratio</span>
+                        <div className="relative">
+                            <Search
+                                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-(--ink-soft)"
+                                aria-hidden="true"
+                            />
+                            <input
+                                value={ratioQuery}
+                                onChange={(event) => {
+                                    setRatioQuery(event.target.value);
+                                    setRatioMenuOpen(true);
+                                }}
+                                onFocus={() => setRatioMenuOpen(true)}
+                                onBlur={() => window.setTimeout(() => setRatioMenuOpen(false), 120)}
+                                placeholder={ratiosLoading ? "Loading..." : "Search ratios"}
+                                className="w-full rounded-xl border border-(--line) bg-white py-2 pl-10 pr-3"
+                                disabled={ratiosLoading}
+                            />
+                        </div>
+
+                        {ratioMenuOpen && filteredRatios.length > 0 ? (
+                            <ul className="absolute z-20 mt-2 max-h-64 w-full overflow-auto rounded-xl border border-(--line) bg-white p-1 shadow-lg">
+                                {filteredRatios.map((option) => {
+                                    const picked = selectedRatios.some((item) => item.id === option.id);
+                                    return (
+                                        <li key={option.id}>
+                                            <button
+                                                type="button"
+                                                onMouseDown={(event) => {
+                                                    event.preventDefault();
+                                                    setSelectedRatios((current) =>
+                                                        picked ? current.filter((item) => item.id !== option.id) : [...current, option]
+                                                    );
+                                                }}
+                                                className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-(--chip) ${picked ? "bg-(--chip) font-medium text-(--brand)" : ""}`}
+                                            >
+                                                <input type="checkbox" checked={picked} readOnly tabIndex={-1} className="h-4 w-4 shrink-0 rounded border-(--line)" />
+                                                {option.name}
+                                            </button>
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+                        ) : null}
+                        {selectedRatios.length > 0 ? (
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                                {selectedRatios.map((option) => (
+                                    <span key={option.id} className="inline-flex items-center gap-1 rounded-full border border-(--line) bg-(--chip) py-0.5 pl-2.5 pr-1 text-xs font-medium">
+                                        {option.name}
+                                        <button
+                                            type="button"
+                                            onClick={() => setSelectedRatios((current) => current.filter((item) => item.id !== option.id))}
+                                            className="rounded-full p-0.5 text-(--ink-soft) hover:bg-white hover:text-(--brand)"
+                                            aria-label={`Remove ${option.name}`}
+                                        >
+                                            <X className="h-3 w-3" aria-hidden="true" />
+                                        </button>
+                                    </span>
+                                ))}
+                            </div>
+                        ) : null}
+                    </label>
+
+
 
                     <div className="grid gap-4 sm:grid-cols-2 lg:col-span-2">
                         <label className="block">

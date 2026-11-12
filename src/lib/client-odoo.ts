@@ -211,6 +211,9 @@ export function getProductsPerformanceReport(input: {
     categoryId?: number | null;
     categoryIds?: number[];
     originIds?: number[];
+    rimIds?: number[];
+    widthValues?: string[];
+    ratioValues?: string[];
     startDate: string;
     endDate: string;
     dateBasis?: "order" | "transaction" | null;
@@ -359,6 +362,10 @@ export function createSalesQuotation(input: {
         "/api/odoo/sales-quotation",
         input
     );
+}
+
+export function getTireDimensionOptions(key: "width" | "ratio") {
+    return post<{ options: Array<{ value: string; label: string }> }>("/api/odoo/tire-dimensions", { key });
 }
 
 export function getProductOrigins() {

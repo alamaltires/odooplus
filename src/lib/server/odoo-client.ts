@@ -7522,6 +7522,9 @@ export async function getProductsPerformanceReport(
         categoryId?: number | null;
         categoryIds?: number[];
         originIds?: number[];
+        rimIds?: number[];
+        widthValues?: string[];
+        ratioValues?: string[];
         startDate: string;
         endDate: string;
         /**
@@ -7549,8 +7552,14 @@ export async function getProductsPerformanceReport(
     const hasCategory = categoryIds.length > 0;
     const originIds = Array.from(new Set((input.originIds ?? []).map(Number).filter((id) => Number.isFinite(id) && id > 0)));
     const hasOrigin = originIds.length > 0;
+    const rimIds = Array.from(new Set((input.rimIds ?? []).map(Number).filter((id) => Number.isFinite(id) && id > 0)));
+    const hasRim = rimIds.length > 0;
+    const widthValues = (input.widthValues ?? []).map(String).filter(Boolean);
+    const ratioValues = (input.ratioValues ?? []).map(String).filter(Boolean);
+    const hasWidth = widthValues.length > 0;
+    const hasRatio = ratioValues.length > 0;
 
-    if (!hasPurchaseOrder && !hasProduct && !hasBrand && !hasCategory && !hasOrigin) {
+    if (!hasPurchaseOrder && !hasProduct && !hasBrand && !hasCategory && !hasOrigin && !hasRim && !hasWidth && !hasRatio) {
         throw new Error("Select a purchase order, product, brand, or category.");
     }
 
@@ -7637,6 +7646,25 @@ export async function getProductsPerformanceReport(
 
     if (hasOrigin) {
         const productIds = await getProductIdsForTemplateDomain(credentials, uid, [["origin", "in", originIds]]);
+        if (productIds.length === 0) {
+            return emptyProductsPerformanceReport(startDate, endDate);
+        }
+        idSets.push(new Set(productIds));
+    }
+
+    for (const [key, values] of [["width", widthValues], ["ratio", ratioValues]] as const) {
+        if (values.length === 0) continue;
+        const field = await findTireDimensionField(credentials, uid, key);
+        if (!field) throw new Error(`The ${key === "width" ? "tire width" : "aspect ratio"} field was not found in Odoo.`);
+        const productIds = await getProductIdsForTemplateDomain(credentials, uid, [[field.name, "in", tireDimensionValues(field.type, values)]]);
+        if (productIds.length === 0) {
+            return emptyProductsPerformanceReport(startDate, endDate);
+        }
+        idSets.push(new Set(productIds));
+    }
+
+    if (hasRim) {
+        const productIds = await getProductIdsForTemplateDomain(credentials, uid, [["rim_diameter", "in", rimIds]]);
         if (productIds.length === 0) {
             return emptyProductsPerformanceReport(startDate, endDate);
         }
@@ -10746,6 +10774,59 @@ export async function getProductOrigins(credentials: OdooCredentials): Promise<A
         .map((row) => ({ id: getRelationalId(row.origin) ?? 0, name: getRelationalName(row.origin) }))
         .filter((origin) => origin.id > 0 && origin.name)
         .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export type TireDimensionKey = "width" | "ratio";
+
+const TIRE_DIMENSION_LABELS: Record<TireDimensionKey, string[]> = {
+    width: ["tire width", "section width", "width"],
+    ratio: ["aspect ratio", "tire aspect ratio", "tire profile", "profile", "aspect"],
+};
+
+/** The product template field holding the tire width / aspect ratio, found by its label or technical name. */
+async function findTireDimensionField(credentials: OdooCredentials, uid: number, key: TireDimensionKey) {
+    const meta = await getModelFieldsMeta(credentials, uid, "product.template");
+    const labels = TIRE_DIMENSION_LABELS[key];
+    const entries = Object.entries(meta);
+    for (const label of labels) {
+        const hit = entries.find(([, fieldMeta]) => toDisplayString(fieldMeta?.string).trim().toLowerCase() === label);
+        if (hit) return { name: hit[0], type: hit[1].type ?? "char" };
+    }
+    const hit = entries.find(([name]) => (key === "width" ? /width/i : /aspect|profile|ratio/i).test(name) && !/website|image/i.test(name));
+    return hit ? { name: hit[0], type: hit[1].type ?? "char" } : null;
+}
+
+/** Values of a template field to match against: ids for relations, numbers for numeric fields. */
+function tireDimensionValues(type: string, values: string[]): Array<number | string> {
+    return values.map((value) => (type === "many2one" || type === "integer" || type === "float" ? Number(value) : value)).filter((value) => value !== "" && !(typeof value === "number" && !Number.isFinite(value)));
+}
+
+export async function getTireDimensionOptions(credentials: OdooCredentials, key: TireDimensionKey): Promise<Array<{ value: string; label: string }>> {
+    const uid = await authenticate(credentials);
+    const field = await findTireDimensionField(credentials, uid, key);
+    if (!field) return [];
+    const meta = (await getModelFieldsMeta(credentials, uid, "product.template"))[field.name];
+
+    if (field.type === "selection" && Array.isArray(meta?.selection)) {
+        return meta.selection.map(([value, label]) => ({ value: String(value), label: String(label) }));
+    }
+
+    const grouped = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "product.template",
+        "read_group",
+        [[[field.name, "!=", false]], [field.name], [field.name]],
+        { lazy: false }
+    );
+    const options = grouped
+        .map((row) => {
+            const raw = row[field.name];
+            if (field.type === "many2one") return { value: String(getRelationalId(raw) ?? ""), label: getRelationalName(raw) };
+            return { value: String(raw ?? ""), label: String(raw ?? "") };
+        })
+        .filter((option) => option.value && option.label && option.value !== "0");
+    return options.sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
 }
 
 export async function getRimDiameters(credentials: OdooCredentials): Promise<Array<{ id: number; name: string }>> {
