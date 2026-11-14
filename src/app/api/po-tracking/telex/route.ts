@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getOdooCredentialsFromRequest } from "@/lib/server/auth-helpers";
+import { invalidateSavedPoTracking } from "@/lib/server/po-tracking-saved";
 import { getAdminDb } from "@/lib/server/firebase-admin";
 
 /** Sets or clears the Telex Release date of a B/L. Stored in our own database only. */
@@ -20,6 +21,7 @@ export async function POST(request: Request) {
         } else {
             await doc.delete();
         }
+        invalidateSavedPoTracking();
         return NextResponse.json({ ok: true });
     } catch (error) {
         return NextResponse.json(

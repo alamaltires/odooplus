@@ -1,3 +1,4 @@
+import { invalidateSavedPoTracking } from "@/lib/server/po-tracking-saved";
 import { NextResponse } from "next/server";
 import { getOdooCredentialsFromRequest, verifyPoTrackingPassword } from "@/lib/server/auth-helpers";
 import { getAdminDb } from "@/lib/server/firebase-admin";
@@ -221,6 +222,7 @@ export async function POST(request: Request) {
                     .doc(bl.replace(/[^A-Za-z0-9_-]/g, "_"))
                     .set({ blNumber: bl, carrierCode: usedCarrier });
             }
+            invalidateSavedPoTracking();
         } catch (saveError) {
             console.error("Failed to save PO tracking result", saveError);
         }

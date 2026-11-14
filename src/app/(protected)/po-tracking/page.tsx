@@ -62,7 +62,7 @@ type BlGroup = {
 };
 
 type Stage = "waiting" | "departed" | "arrived" | "delivered";
-type FilterKey = "all" | "transit" | "arrived" | "released" | "untracked";
+type FilterKey = "all" | "transit" | "atport" | "arrived" | "released" | "untracked";
 type ShipmentSort = "smart" | "arrival-asc" | "arrival-desc" | "units-desc" | "units-asc" | "order-desc" | "order-asc" | "vendor";
 
 const SHIPMENT_SORTS: Array<{ key: ShipmentSort; label: string }> = [
@@ -165,6 +165,20 @@ function stageOf(tracking: ShipmentTracking | undefined): Stage {
 
     if (status.includes("DELIVER") || has(/Empty Container Returned|Delivery to Consignee/i)) return "delivered";
     if (has(/Arrival at Port of Discharg|Unloaded.*Discharg/i)) return "arrived";
+    // Carriers word the arrival in many ways ("Import Discharged from Vessel", "Vessel arrival at final POD", …):
+    // anything that really happened at the destination port after the vessel got there counts.
+    const port = (tracking.destination?.name ?? "").trim().toLowerCase().split(",")[0].trim();
+    if (
+        port &&
+        actual.some(
+            (event) =>
+                event.location.trim().toLowerCase().split(",")[0].trim() === port &&
+                !/^empty/i.test(event.description.trim()) &&
+                /arriv|discharg|berth|unload|gate.?out|withdrawn|positioning|truck|consignee/i.test(event.description)
+        )
+    ) {
+        return "arrived";
+    }
     const departure = toDate(tracking.origin?.departure);
     if (has(/Departure from Port of Loading|Loaded on/i) || (departure && departure.getTime() <= Date.now())) {
         return "departed";
@@ -224,7 +238,6 @@ export default function PoTrackingPage() {
     const [orders, setOrders] = useState<PoTrackingOrder[]>([]);
     const [ordersLoading, setOrdersLoading] = useState(true);
     const [ordersError, setOrdersError] = useState<string | null>(null);
-    const [includeReceived, setIncludeReceived] = useState(false);
 
     const [tracked, setTracked] = useState<Record<string, ShipmentTracking>>({});
     // Shipping line remembered per B/L, and the list to choose it from.
@@ -305,14 +318,14 @@ export default function PoTrackingPage() {
         setOrdersLoading(true);
         setOrdersError(null);
         try {
-            const data = await getPoTrackingOrders({ includeReceived });
+            const data = await getPoTrackingOrders({ includeReceived: true });
             setOrders(data.orders);
         } catch (error) {
             setOrdersError(error instanceof Error ? error.message : "Failed to load purchase orders.");
         } finally {
             setOrdersLoading(false);
         }
-    }, [includeReceived]);
+    }, []);
 
     useEffect(() => {
         void loadOrders();
@@ -351,16 +364,19 @@ export default function PoTrackingPage() {
                 const trackedStage = stageOf(tracking);
                 const stage: Stage = received && trackedStage !== "delivered" ? "arrived" : trackedStage;
                 const eta = etaOf(group, tracking);
-                return { group, tracking, stage, eta, received };
+                // The carrier says it is at the destination port (received in Odoo or not): kept together and still updateable.
+                const atPort = trackedStage === "arrived";
+                return { group, tracking, stage, eta, received, atPort };
             }),
         [groups, tracked]
     );
 
     const counts = useMemo(() => {
-        const result = { transit: 0, arrived: 0, released: 0, untracked: 0 };
-        for (const { group, tracking, stage, received } of enriched) {
+        const result = { transit: 0, atport: 0, arrived: 0, released: 0, untracked: 0 };
+        for (const { group, tracking, stage, received, atPort } of enriched) {
             if (telexByBl[group.blNumber]) result.released += 1;
             if (!tracking && !received) result.untracked += 1;
+            else if (atPort) result.atport += 1;
             else if (stage === "arrived" || stage === "delivered") result.arrived += 1;
             else result.transit += 1;
         }
@@ -382,17 +398,18 @@ export default function PoTrackingPage() {
     // The list is paged, so the page holding it is opened first (see the scrollTarget effect).
     function showInList(item: (typeof enriched)[number]) {
         setSearch("");
-        setFilter(item.stage === "arrived" || item.stage === "delivered" ? "arrived" : "transit");
+        setFilter(item.atPort ? "atport" : item.stage === "arrived" || item.stage === "delivered" ? "arrived" : "transit");
         setScrollTarget(item.group.blNumber);
     }
 
     const visible = useMemo(() => {
         const query = search.trim().toLowerCase();
         return enriched
-            .filter(({ group, tracking, stage, received }) => {
+            .filter(({ group, tracking, stage, received, atPort }) => {
                 if (filter === "untracked" && (tracking || received)) return false;
                 if (filter === "transit" && (!(tracking || received) || stage === "arrived" || stage === "delivered")) return false;
-                if (filter === "arrived" && (!(tracking || received) || (stage !== "arrived" && stage !== "delivered"))) return false;
+                if (filter === "atport" && !atPort) return false;
+                if (filter === "arrived" && (!(tracking || received) || atPort || (stage !== "arrived" && stage !== "delivered"))) return false;
                 if (filter === "released" && !telexByBl[group.blNumber]) return false;
                 if (!query) return true;
                 return (
@@ -455,7 +472,7 @@ export default function PoTrackingPage() {
     // A new filter / search / sort starts again from the first page.
     useEffect(() => {
         setPage(1);
-    }, [filter, search, shipmentSort, includeReceived]);
+    }, [filter, search, shipmentSort]);
 
     // Open the page that holds the requested shipment, then scroll to it and flash it.
     useEffect(() => {
@@ -698,12 +715,13 @@ export default function PoTrackingPage() {
     const filters: Array<{ key: FilterKey; label: string; count: number; tone?: string }> = [
         { key: "all", label: "All", count: enriched.length },
         { key: "transit", label: "On the way", count: counts.transit },
+        { key: "atport", label: "At destination port", count: counts.atport },
         { key: "arrived", label: "Arrived", count: counts.arrived },
         { key: "released", label: "Released", count: counts.released },
         { key: "untracked", label: "Not tracked", count: counts.untracked },
     ];
 
-    const renderCard = ({ group, tracking, stage, eta, received }: (typeof enriched)[number], pinned = false) => {
+    const renderCard = ({ group, tracking, stage, eta, received, atPort }: (typeof enriched)[number], pinned = false) => {
                     const isOpen = pinned || expanded.has(group.blNumber);
                     const isUpdating = updating.has(group.blNumber);
                     const error = trackingErrors[group.blNumber];
@@ -912,7 +930,7 @@ export default function PoTrackingPage() {
                                             <Mail className="h-4 w-4" />
                                             {telexByBl[group.blNumber] ? "Telex date" : "Telex release"}
                                         </button>
-                                        {stage === "arrived" || stage === "delivered" ? null : (
+                                        {(stage === "arrived" || stage === "delivered") && !atPort ? null : (
                                             <button
                                                 type="button"
                                                 onClick={() => void updateOne(group.blNumber)}
@@ -1083,7 +1101,7 @@ export default function PoTrackingPage() {
     const bulkTargets =
         view === "map"
             ? shownOnMap.filter((item) => item.stage !== "delivered").map((item) => item.blNumber)
-            : visible.filter(({ stage, tracking, received }) => !(received || (tracking && stage === "delivered"))).map(({ group }) => group.blNumber);
+            : visible.filter(({ stage, tracking, received, atPort }) => !((received && !atPort) || (tracking && stage === "delivered"))).map(({ group }) => group.blNumber);
 
     // The Excel export covers what the current view is showing (all pages, or the ticked map shipments).
     async function exportToExcel() {
@@ -1260,11 +1278,6 @@ export default function PoTrackingPage() {
                     </button>
                 </div>
 
-                <label className="flex items-center gap-2 text-sm">
-                    <input type="checkbox" checked={includeReceived} onChange={(event) => setIncludeReceived(event.target.checked)} className="h-4 w-4" />
-                    Include fully received
-                </label>
-
                 {confirmBulk ? (
                     <div className="flex items-center gap-2 rounded-xl bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
                         This uses {bulkTargets.length} request{bulkTargets.length === 1 ? "" : "s"}.
@@ -1324,7 +1337,7 @@ export default function PoTrackingPage() {
                             <CheckCircle2 className="h-5 w-5 text-emerald-600" />
                             Tracking result · {resultItem.group.orders.map((order) => order.name).join(" · ")}
                             <span className="font-normal text-(--ink-soft)">
-                                — now listed under {resultItem.stage === "arrived" || resultItem.stage === "delivered" ? "Arrived" : "On the way"}
+                                — now listed under {resultItem.atPort ? "At destination port" : resultItem.stage === "arrived" || resultItem.stage === "delivered" ? "Arrived" : "On the way"}
                             </span>
                         </p>
                         <div className="flex items-center gap-2">
