@@ -4170,7 +4170,7 @@ export async function getSalespersonMonthlyInvoices(
             ["invoice_date", "<=", endDate],
         ]],
         {
-            fields: ["id", "amount_total", "amount_residual", "currency_id"],
+            fields: ["id", "amount_total", "amount_residual", "currency_id", "invoice_payment_term_id"],
             order: "invoice_date desc",
             limit: 20000,
         }
@@ -4236,18 +4236,83 @@ export async function getSalespersonMonthlyInvoices(
             .toFixed(2)
     );
 
-    // Cash collected: what has been paid on these invoices so far, converted the same way as the total.
+    // Cash collected: the paid part (total minus what is still due, so partial payments count) of posted
+    // invoices on a "Cash" payment term, minus the cash-term credit notes, converted like the total.
+    const cashTermRecords = await executeKw<Array<Record<string, unknown>>>(
+        credentials,
+        uid,
+        "account.payment.term",
+        "search_read",
+        [[["name", "ilike", "cash"]]],
+        { fields: ["id"], context: { active_test: false } }
+    ).catch(() => []);
+    const cashTermIds = new Set(cashTermRecords.map((term) => Number(term.id ?? 0)));
+    const isCashTerm = (value: unknown) => {
+        const termId = getRelationalId(value);
+        return termId !== null && cashTermIds.has(termId);
+    };
     const residualByInvoiceId = new Map(invoices.map((invoice) => [Number(invoice.id ?? 0), Number(invoice.amount_residual ?? 0)]));
-    const paidInvoiced = Number(
-        convertibleInvoiceIds
-            .reduce((sum, id) => {
-                const entry = invoiceTransactionAmounts.get(id);
-                if (!entry) return sum;
-                const paid = Math.max(0, entry.amount - (residualByInvoiceId.get(id) ?? 0));
-                return sum + paid * (multiplierByCurrencyId.get(entry.currencyId) ?? 0);
-            }, 0)
-            .toFixed(2)
-    );
+    const cashInvoiceIds = new Set(invoices.filter((invoice) => isCashTerm(invoice.invoice_payment_term_id)).map((invoice) => Number(invoice.id ?? 0)));
+    const cashPaid = convertibleInvoiceIds.reduce((sum, id) => {
+        if (!cashInvoiceIds.has(id)) return sum;
+        const entry = invoiceTransactionAmounts.get(id);
+        if (!entry) return sum;
+        const paid = Math.max(0, entry.amount - (residualByInvoiceId.get(id) ?? 0));
+        return sum + paid * (multiplierByCurrencyId.get(entry.currencyId) ?? 0);
+    }, 0);
+
+    // A credit note counts as cash when it carries a Cash term itself or reverses an invoice that does.
+    let cashCredit = 0;
+    if (cashTermIds.size > 0) {
+        const cashCreditNotes = await executeKw<Array<Record<string, unknown>>>(
+            credentials,
+            uid,
+            "account.move",
+            "search_read",
+            [[
+                [salespersonField, "=", salespersonId],
+                ["move_type", "=", "out_refund"],
+                ["state", "=", "posted"],
+                ["invoice_date", ">=", startDate],
+                ["invoice_date", "<=", endDate],
+            ]],
+            { fields: ["id", "amount_total", "currency_id", "invoice_payment_term_id", "reversed_entry_id"], limit: 20000 }
+        ).catch(() => [] as Array<Record<string, unknown>>);
+
+        const reversedIds = cashCreditNotes
+            .map((note) => getRelationalId(note.reversed_entry_id))
+            .filter((id): id is number => id !== null);
+        const reversedTerms = reversedIds.length
+            ? await executeKw<Array<Record<string, unknown>>>(
+                  credentials,
+                  uid,
+                  "account.move",
+                  "read",
+                  [reversedIds],
+                  { fields: ["invoice_payment_term_id"] }
+              ).catch(() => [] as Array<Record<string, unknown>>)
+            : [];
+        const reversedIsCash = new Set(
+            reversedTerms.filter((move) => isCashTerm(move.invoice_payment_term_id)).map((move) => Number(move.id ?? 0))
+        );
+
+        const cashNotes = cashCreditNotes.filter((note) => {
+            const reversedId = getRelationalId(note.reversed_entry_id);
+            return isCashTerm(note.invoice_payment_term_id) || (reversedId !== null && reversedIsCash.has(reversedId));
+        });
+        const cashNoteAmounts = getInvoiceTransactionAmounts(cashNotes);
+        const noteCurrencyIds = Array.from(new Set(Array.from(cashNoteAmounts.values()).map((entry) => entry.currencyId)))
+            .filter((currencyId) => !multiplierByCurrencyId.has(currencyId));
+        const noteMultipliers = new Map([
+            ...multiplierByCurrencyId,
+            ...(await buildTargetMultipliers(credentials, uid, homeCompanyId, primaryCurrencyId, noteCurrencyIds, todayStr)),
+        ]);
+        cashCredit = Array.from(cashNoteAmounts.values()).reduce(
+            (sum, entry) => sum + Math.abs(entry.amount) * (noteMultipliers.get(entry.currencyId) ?? 0),
+            0
+        );
+    }
+    const paidInvoiced = Number(Math.max(0, cashPaid - cashCredit).toFixed(2));
 
     let creditNoteTotal = 0;
     let creditNoteIds: number[] = [];

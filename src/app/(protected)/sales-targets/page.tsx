@@ -61,10 +61,10 @@ function currentYear() {
 }
 
 const GENERAL_BRAND_VALUE = "general";
-// Bump the "v4" suffix whenever the persisted report shape changes, so a
+// Bump the "v5" suffix whenever the persisted report shape changes, so a
 // stale cached report from an older build (missing newer fields, e.g.
 // brandTotals) is discarded instead of silently restored with defaults.
-const REPORT_STATE_STORAGE_KEY = "sales-targets:report-state:v4";
+const REPORT_STATE_STORAGE_KEY = "sales-targets:report-state:v5";
 
 type PersistedReportState = {
     selectedSalespersonId: string;
@@ -389,7 +389,7 @@ export default function SalesTargetsPage() {
         [savedTargets]
     );
 
-    // Cash target = the chosen % of the whole target; collected = what customers have paid on this month's invoices.
+    // Cash target = the chosen % of the whole target; collected = this month posted Cash-term invoices (paid part) minus Cash-term credit notes.
     const savedCashPercent = Number(target?.cashPercent ?? 0);
     const cashTarget = Number(((totalTargetAmount * savedCashPercent) / 100).toFixed(2));
     const cashCollected = report?.paidInvoiced ?? 0;

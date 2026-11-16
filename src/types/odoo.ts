@@ -243,7 +243,7 @@ export type OdooSalespersonMonthlyInvoices = {
     /** Pieces sold / returned on those invoices (lines linked to sales orders). */
     totalQuantity?: number;
     creditNoteQuantity?: number;
-    /** Part of `totalInvoiced` already paid by customers. */
+    /** Part of `totalInvoiced` paid on Cash-term invoices (partial payments included) minus Cash-term credit notes. */
     paidInvoiced: number;
     creditNoteTotal: number;
     invoiceCount: number;
