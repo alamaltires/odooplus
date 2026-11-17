@@ -338,11 +338,16 @@ export function SalesStockBrowser({
     const showCosts = role !== "salesperson";
 
     const [view, setView] = useState<ViewMode>("list");
-    const [rows, setRows] = useState<SalesStockRow[]>([]);
+    const [allRows, setAllRows] = useState<SalesStockRow[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [totalCount, setTotalCount] = useState(0);
     const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+    // Sections are built from the rows in hand, so a grouped search loads every matching line at once; otherwise a group would be cut in half by a page boundary.
+    const [groupBy, setGroupBy] = useState<GroupBy[]>([]);
+    const grouped = groupBy.length > 0;
+    const foldLocations = !groupBy.includes("location");
+    const effectivePageSize = grouped ? 0 : pageSize;
     // The page number belongs to one search; a new keyword / filter / page size starts again at page 1.
     const [pageState, setPageState] = useState<{ key: string; page: number }>({ key: "", page: 1 });
     const [unresolved, setUnresolved] = useState<string[]>([]);
@@ -458,26 +463,38 @@ export function SalesStockBrowser({
             .finally(() => setSmartLoading(false));
     }, [smartOpen, smartOptions, smartLoading]);
 
-    const searchKey = JSON.stringify([trimmed, smartFilters, pageSize]);
-    const page = pageState.key === searchKey ? pageState.page : 1;
-    const limitPerPage = pageSize === 0 ? ALL_LIMIT : pageSize;
-    const pageCount = Math.max(1, Math.ceil(totalCount / limitPerPage));
+    // Every matching line (up to ALL_LIMIT) is fetched once per search and paged here, by folded line: the same product and lot in several locations is one line,
+    // so a server-side page boundary could cut it in half.
+    const searchKey = JSON.stringify([trimmed, smartFilters]);
+    const pageKey = JSON.stringify([trimmed, smartFilters, effectivePageSize]);
+    const foldKeyOf = (row: SalesStockRow) => (foldLocations ? `${row.productId}|${row.lotName}` : `row:${row.id}`);
+    const lineKeys = useMemo(() => Array.from(new Set(allRows.map(foldKeyOf))),
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [allRows, foldLocations]);
+    const linesPerPage = effectivePageSize === 0 ? Math.max(1, lineKeys.length) : effectivePageSize;
+    const pageCount = Math.max(1, Math.ceil(lineKeys.length / linesPerPage));
+    const page = Math.min(pageState.key === pageKey ? pageState.page : 1, pageCount);
+    const rows = useMemo(() => {
+        if (effectivePageSize === 0) return allRows;
+        const keep = new Set(lineKeys.slice((page - 1) * linesPerPage, page * linesPerPage));
+        return allRows.filter((row) => keep.has(foldKeyOf(row)));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [allRows, lineKeys, page, linesPerPage, effectivePageSize, foldLocations]);
 
     useEffect(() => {
         if (!canSearch) {
-            setRows([]);
+            setAllRows([]);
             setTotalCount(0);
             setError(null);
             return;
         }
-        // Pages already seen in this visit come back instantly; a slow older answer can never replace a newer one.
-        const cacheKey = JSON.stringify([searchKey, page]);
-        const cachedAnswer = searchCache.get(cacheKey);
+        // Searches already seen in this visit come back instantly; a slow older answer can never replace a newer one.
+        const cachedAnswer = searchCache.get(searchKey);
         let stale = false;
         const controller = new AbortController();
         const debounceId = window.setTimeout(() => {
             if (cachedAnswer) {
-                setRows(cachedAnswer.rows);
+                setAllRows(cachedAnswer.rows);
                 setTotalCount(cachedAnswer.totalCount);
                 setUnresolved(cachedAnswer.unresolvedFields);
                 setError(null);
@@ -486,24 +503,24 @@ export function SalesStockBrowser({
             }
             setLoading(true);
             setError(null);
-            searchSalesStock({ query: "", queries: terms, limit: limitPerPage, offset: (page - 1) * limitPerPage, filters: smartFilters }, controller.signal)
+            searchSalesStock({ query: "", queries: terms, limit: ALL_LIMIT, offset: 0, filters: smartFilters }, controller.signal)
                 .then((data) => {
                     if (stale) return;
-                    searchCache.set(cacheKey, data);
+                    searchCache.set(searchKey, data);
                     if (searchCache.size > 60) searchCache.delete(searchCache.keys().next().value as string);
-                    setRows(data.rows);
+                    setAllRows(data.rows);
                     setTotalCount(data.totalCount);
                     setUnresolved(data.unresolvedFields);
                 })
                 .catch((fetchError) => {
                     if (stale) return;
                     setError(fetchError instanceof Error ? fetchError.message : "Failed to search products.");
-                    setRows([]);
+                    setAllRows([]);
                 })
                 .finally(() => {
                     if (!stale) setLoading(false);
                 });
-        }, cachedAnswer || page > 1 ? 0 : 0);
+        }, 0);
         return () => {
             stale = true;
             // A request still running for an older keystroke is dropped, not waited for.
@@ -512,7 +529,7 @@ export function SalesStockBrowser({
         };
     // `draft` only sets how long to wait, so it is read through a ref-free closure on purpose.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [trimmed, canSearch, smartFilters, searchKey, page, pageSize]);
+    }, [trimmed, canSearch, smartFilters, searchKey]);
 
     useEffect(() => {
         const missing = Array.from(
@@ -553,7 +570,7 @@ export function SalesStockBrowser({
     }
 
     function goToPage(next: number) {
-        setPageState({ key: searchKey, page: Math.min(Math.max(1, next), pageCount) });
+        setPageState({ key: pageKey, page: Math.min(Math.max(1, next), pageCount) });
     }
 
     function changePageSize(next: number) {
@@ -707,8 +724,6 @@ export function SalesStockBrowser({
 
     // Sections on the rows of the current page, nested in the order they were chosen. Without a location section, the same product and lot sitting in several
     // locations is folded into one line instead; opening it shows each location.
-    const [groupBy, setGroupBy] = useState<GroupBy[]>([]);
-    const foldLocations = !groupBy.includes("location");
     const sectionLevels = groupBy;
     const groups = useMemo(() => {
         const byKey = new Map<string, SalesStockRow[]>();
@@ -1148,10 +1163,11 @@ export function SalesStockBrowser({
                 <div className={`space-y-4 transition-opacity duration-200 ${loading ? "pointer-events-none opacity-60" : ""}`}>
                     <div className="flex flex-wrap items-center justify-between gap-3">
                         <p className="text-xs text-(--ink-soft)">
-                            Showing {(page - 1) * limitPerPage + 1}&ndash;{(page - 1) * limitPerPage + rows.length} of {totalCount} stock line{totalCount === 1 ? "" : "s"}.
+                            Showing {(page - 1) * linesPerPage + 1}&ndash;{Math.min(page * linesPerPage, lineKeys.length)} of {lineKeys.length} stock line{lineKeys.length === 1 ? "" : "s"}.
+                            {totalCount > allRows.length ? ` Only the first ${allRows.length} of ${totalCount} matches are loaded — narrow the search to see the rest.` : ""}
                         </p>
                         <div className="flex flex-wrap items-center justify-end gap-3 text-xs">
-                            <label className="inline-flex items-center gap-2 text-(--ink-soft)">
+                            {grouped ? null : <label className="inline-flex items-center gap-2 text-(--ink-soft)">
                                 Show
                                 <select
                                     value={pageSize}
@@ -1164,7 +1180,7 @@ export function SalesStockBrowser({
                                         </option>
                                     ))}
                                 </select>
-                            </label>
+                            </label>}
                             {pageCount > 1 ? (
                                 <nav className="inline-flex items-center gap-1" aria-label="Pagination">
                                     <button
