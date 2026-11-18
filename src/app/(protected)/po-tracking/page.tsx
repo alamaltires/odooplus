@@ -933,6 +933,16 @@ export default function PoTrackingPage() {
                                             <Mail className="h-4 w-4" />
                                             {telexByBl[group.blNumber] ? "Telex date" : "Telex release"}
                                         </button>
+                                        {tracking?.origin?.name && tracking.destination?.name && (atPort || (stage !== "arrived" && stage !== "delivered")) ? (
+                                            <button
+                                                type="button"
+                                                onClick={() => showOnlyOnMap(group.blNumber)}
+                                                className="inline-flex items-center gap-2 rounded-xl border border-(--line) bg-white px-3 py-1.5 text-sm font-medium"
+                                            >
+                                                <MapIcon className="h-4 w-4" aria-hidden="true" />
+                                                Show on the Map
+                                            </button>
+                                        ) : null}
                                         {(stage === "arrived" || stage === "delivered") && !atPort ? null : (
                                             <button
                                                 type="button"
@@ -1177,6 +1187,14 @@ export default function PoTrackingPage() {
             }
             return next;
         });
+    }
+
+    // Opens the map showing just this shipment (everything else is hidden, as with "Only" in the map list) and zooms to it.
+    function showOnlyOnMap(blNumber: string) {
+        setHiddenBls(new Set(enriched.map((item) => item.group.blNumber).filter((other) => other !== blNumber)));
+        setMapFocus((current) => ({ blNumber, n: (current?.n ?? 0) + 1 }));
+        setView("map");
+        window.scrollTo({ top: 0, behavior: "smooth" });
     }
 
     function toggleOnMap(blNumber: string) {
