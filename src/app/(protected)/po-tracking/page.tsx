@@ -62,7 +62,7 @@ type BlGroup = {
 };
 
 type Stage = "waiting" | "departed" | "arrived" | "delivered";
-type FilterKey = "all" | "transit" | "atport" | "arrived" | "released" | "untracked";
+type FilterKey = "all" | "transit" | "arrived" | "released" | "untracked";
 type ShipmentSort = "smart" | "arrival-asc" | "arrival-desc" | "units-desc" | "units-asc" | "order-desc" | "order-asc" | "vendor";
 
 const SHIPMENT_SORTS: Array<{ key: ShipmentSort; label: string }> = [
@@ -260,7 +260,7 @@ export default function PoTrackingPage() {
     const [poModal, setPoModal] = useState<{ id: number; name: string; loading: boolean; error: string | null; data: PoDetails | null } | null>(null);
 
     const [search, setSearch] = useState("");
-    const [filter, setFilter] = useState<FilterKey>("all");
+    const [filter, setFilter] = useState<FilterKey>("transit");
     const [view, setView] = useState<"list" | "map">("list");
     const [page, setPage] = useState(1);
     // Tyre brands per PO, fetched only for the shipments on the visible page (or when exporting).
@@ -372,11 +372,12 @@ export default function PoTrackingPage() {
     );
 
     const counts = useMemo(() => {
-        const result = { transit: 0, atport: 0, arrived: 0, released: 0, untracked: 0 };
+        const result = { transit: 0, arrived: 0, released: 0, untracked: 0 };
         for (const { group, tracking, stage, received, atPort } of enriched) {
             if (telexByBl[group.blNumber]) result.released += 1;
             if (!tracking && !received) result.untracked += 1;
-            else if (atPort) result.atport += 1;
+            // At the destination port still counts as on the way until it is received/delivered.
+            else if (atPort) result.transit += 1;
             else if (stage === "arrived" || stage === "delivered") result.arrived += 1;
             else result.transit += 1;
         }
@@ -398,7 +399,7 @@ export default function PoTrackingPage() {
     // The list is paged, so the page holding it is opened first (see the scrollTarget effect).
     function showInList(item: (typeof enriched)[number]) {
         setSearch("");
-        setFilter(item.atPort ? "atport" : item.stage === "arrived" || item.stage === "delivered" ? "arrived" : "transit");
+        setFilter(!item.atPort && (item.stage === "arrived" || item.stage === "delivered") ? "arrived" : "transit");
         setScrollTarget(item.group.blNumber);
     }
 
@@ -407,8 +408,7 @@ export default function PoTrackingPage() {
         return enriched
             .filter(({ group, tracking, stage, received, atPort }) => {
                 if (filter === "untracked" && (tracking || received)) return false;
-                if (filter === "transit" && (!(tracking || received) || stage === "arrived" || stage === "delivered")) return false;
-                if (filter === "atport" && !atPort) return false;
+                if (filter === "transit" && !atPort && (!(tracking || received) || stage === "arrived" || stage === "delivered")) return false;
                 if (filter === "arrived" && (!(tracking || received) || atPort || (stage !== "arrived" && stage !== "delivered"))) return false;
                 if (filter === "released" && !telexByBl[group.blNumber]) return false;
                 if (!query) return true;
@@ -715,7 +715,6 @@ export default function PoTrackingPage() {
     const filters: Array<{ key: FilterKey; label: string; count: number; tone?: string }> = [
         { key: "all", label: "All", count: enriched.length },
         { key: "transit", label: "On the way", count: counts.transit },
-        { key: "atport", label: "At destination port", count: counts.atport },
         { key: "arrived", label: "Arrived", count: counts.arrived },
         { key: "released", label: "Released", count: counts.released },
         { key: "untracked", label: "Not tracked", count: counts.untracked },
@@ -1214,24 +1213,22 @@ export default function PoTrackingPage() {
             </div>
 
             {/* Controls */}
-            <div className="mt-5 flex flex-wrap items-center gap-2">
-                {filters.map((item) => (
-                    <button
-                        key={item.key}
-                        type="button"
-                        onClick={() => setFilter(item.key)}
-                        className={`rounded-full border px-3.5 py-1.5 text-sm transition ${
-                            filter === item.key
-                                ? "border-(--brand) bg-(--brand) font-medium text-white"
-                                : `border-(--line) bg-(--card) ${item.tone ?? ""}`
-                        }`}
+            <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+                <label className="flex flex-wrap items-center gap-2">
+                    <span className="text-(--ink-soft)">Filter</span>
+                    <select
+                        value={filter}
+                        onChange={(event) => setFilter(event.target.value as FilterKey)}
+                        className="rounded-xl border border-(--line) bg-white px-3 py-1.5 text-sm"
                     >
-                        {item.label} <span className="opacity-70">{item.count}</span>
-                    </button>
-                ))}
-            </div>
-
-            <label className="mt-3 flex flex-wrap items-center gap-2 text-sm">
+                        {filters.map((item) => (
+                            <option key={item.key} value={item.key}>
+                                {item.label} ({item.count})
+                            </option>
+                        ))}
+                    </select>
+                </label>
+                <label className="flex flex-wrap items-center gap-2">
                     <span className="text-(--ink-soft)">Order by</span>
                     <select
                         value={shipmentSort}
@@ -1245,6 +1242,7 @@ export default function PoTrackingPage() {
                         ))}
                     </select>
                 </label>
+            </div>
 
             <div className="mt-3 flex flex-wrap items-center gap-3 rounded-2xl border border-(--line) bg-(--card) p-3">
                 <div className="relative min-w-[14rem] flex-1">
@@ -1337,7 +1335,7 @@ export default function PoTrackingPage() {
                             <CheckCircle2 className="h-5 w-5 text-emerald-600" />
                             Tracking result · {resultItem.group.orders.map((order) => order.name).join(" · ")}
                             <span className="font-normal text-(--ink-soft)">
-                                — now listed under {resultItem.atPort ? "At destination port" : resultItem.stage === "arrived" || resultItem.stage === "delivered" ? "Arrived" : "On the way"}
+                                — now listed under {!resultItem.atPort && (resultItem.stage === "arrived" || resultItem.stage === "delivered") ? "Arrived" : "On the way"}
                             </span>
                         </p>
                         <div className="flex items-center gap-2">
