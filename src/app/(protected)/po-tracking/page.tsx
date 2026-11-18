@@ -63,10 +63,11 @@ type BlGroup = {
 
 type Stage = "waiting" | "departed" | "arrived" | "delivered";
 type FilterKey = "all" | "transit" | "arrived" | "released" | "untracked";
-type ShipmentSort = "smart" | "arrival-asc" | "arrival-desc" | "units-desc" | "units-asc" | "order-desc" | "order-asc" | "vendor";
+type ShipmentSort = "smart" | "port-first" | "arrival-asc" | "arrival-desc" | "units-desc" | "units-asc" | "order-desc" | "order-asc" | "vendor";
 
 const SHIPMENT_SORTS: Array<{ key: ShipmentSort; label: string }> = [
     { key: "smart", label: "Smart · overdue first, then soonest" },
+    { key: "port-first", label: "At destination port · first" },
     { key: "arrival-asc", label: "Arrival date · nearest first" },
     { key: "arrival-desc", label: "Arrival date · furthest first" },
     { key: "units-desc", label: "Units · most first" },
@@ -437,6 +438,9 @@ export default function PoTrackingPage() {
                         return (arrival(a) - arrival(b)) * direction;
                     };
                     switch (shipmentSort) {
+                        case "port-first":
+                            // Shipments waiting at the destination port first, each group by nearest arrival.
+                            return a.atPort !== b.atPort ? (a.atPort ? -1 : 1) : byArrival(1);
                         case "arrival-asc":
                             return byArrival(1);
                         case "arrival-desc":
@@ -1213,22 +1217,24 @@ export default function PoTrackingPage() {
             </div>
 
             {/* Controls */}
-            <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
-                <label className="flex flex-wrap items-center gap-2">
-                    <span className="text-(--ink-soft)">Filter</span>
-                    <select
-                        value={filter}
-                        onChange={(event) => setFilter(event.target.value as FilterKey)}
-                        className="rounded-xl border border-(--line) bg-white px-3 py-1.5 text-sm"
+            <div className="mt-5 flex flex-wrap items-center gap-2">
+                {filters.map((item) => (
+                    <button
+                        key={item.key}
+                        type="button"
+                        onClick={() => setFilter(item.key)}
+                        className={`rounded-full border px-3.5 py-1.5 text-sm transition ${
+                            filter === item.key
+                                ? "border-(--brand) bg-(--brand) font-medium text-white"
+                                : `border-(--line) bg-(--card) ${item.tone ?? ""}`
+                        }`}
                     >
-                        {filters.map((item) => (
-                            <option key={item.key} value={item.key}>
-                                {item.label} ({item.count})
-                            </option>
-                        ))}
-                    </select>
-                </label>
-                <label className="flex flex-wrap items-center gap-2">
+                        {item.label} <span className="opacity-70">{item.count}</span>
+                    </button>
+                ))}
+            </div>
+
+            <label className="mt-3 flex flex-wrap items-center gap-2 text-sm">
                     <span className="text-(--ink-soft)">Order by</span>
                     <select
                         value={shipmentSort}
@@ -1242,7 +1248,6 @@ export default function PoTrackingPage() {
                         ))}
                     </select>
                 </label>
-            </div>
 
             <div className="mt-3 flex flex-wrap items-center gap-3 rounded-2xl border border-(--line) bg-(--card) p-3">
                 <div className="relative min-w-[14rem] flex-1">
