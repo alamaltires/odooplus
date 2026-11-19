@@ -7,6 +7,7 @@ import {
     OdooDashboardActivityType,
     OdooDashboardStats,
     OdooCustomerActivityReport,
+    OdooCustomerFollowupReport,
     OdooContact,
     OdooCustomerReport,
     OdooPartnerLedger,
@@ -1045,6 +1046,10 @@ export function diagnosePoTracking(poName: string) {
 
 export function getCustomerActivityReport(input: { customerId: number; startDate: string; endDate: string }) {
     return post<OdooCustomerActivityReport>("/api/odoo/customer-activity-report", input);
+}
+
+export function getCustomerFollowupReport(input: { customerIds: number[]; onlyWithOrders?: boolean; startDate: string; endDate: string }) {
+    return post<OdooCustomerFollowupReport>("/api/odoo/customer-followup-report", input);
 }
 
 export function getPartnerLedger(input: { customerId: number; asOfDate: string; unreconciledOnly?: boolean }) {

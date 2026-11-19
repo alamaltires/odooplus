@@ -1,7 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { validateFollowupRange } from "@/lib/followup-range";
 import {
     OdooCredentials,
     OdooCustomerActivityReport,
+    OdooCustomerFollowupReport,
+    OdooCustomerFollowupRow,
     OdooDashboardActivityType,
     OdooPartnerLedger,
     OdooOrderLineInput,
@@ -12196,6 +12199,186 @@ export async function getCustomerActivityReport(
         topCategories: brandReport.topCategories,
         brandTree: brandReport.brandTree,
     };
+}
+
+/**
+ * Customer Followup Report: for each chosen customer, what they ordered in a short period (at most one
+ * month), the margin on it, and what they owe today. Everything is read in a handful of batched
+ * queries for all customers together, so the cost does not grow with the number of customers.
+ * `customerIds` must already be limited to the customers the caller may see.
+ */
+export async function getCustomerFollowupReport(
+    credentials: OdooCredentials,
+    input: { customerIds: number[]; onlyWithOrders?: boolean; startDate: string; endDate: string; includeCost?: boolean }
+): Promise<OdooCustomerFollowupReport> {
+    const uid = await authenticate(credentials);
+    const { startDate, endDate } = input;
+    ensureDateRange(startDate, endDate);
+    const rangeError = validateFollowupRange(startDate, endDate);
+    if (rangeError) throw new Error(rangeError);
+
+    const customerIds = Array.from(new Set(input.customerIds.map(Number).filter((id) => Number.isFinite(id) && id > 0)));
+    if (customerIds.length === 0) throw new Error("Choose at least one customer.");
+
+    const timeZone = await getUserTimezone(credentials, uid);
+    const rangeStart = toOdooDateBoundary(startDate, false, timeZone);
+    const rangeEnd = toOdooDateBoundary(endDate, true, timeZone);
+    const costAvailable = input.includeCost !== false;
+
+    const [orders, termFieldsAvailable, money] = await Promise.all([
+        searchReadAll(
+            credentials,
+            uid,
+            "sale.order",
+            [
+                ["partner_id.commercial_partner_id", "in", customerIds],
+                ["state", "in", ["sale", "done"]],
+                ["date_order", ">=", rangeStart],
+                ["date_order", "<=", rangeEnd],
+            ],
+            ["id", "name", "amount_total", "currency_id", "date_order", "user_id", "state", "partner_id"]
+        ),
+        executeKw<Record<string, unknown>>(credentials, uid, "res.partner", "fields_get", [["property_payment_term_id", "credit"]], {
+            attributes: ["string"],
+        }).catch(() => ({} as Record<string, unknown>)),
+        getMoneyConverter(credentials, uid),
+    ]);
+
+    // Orders are placed by delivery/contact addresses too: roll each up to its customer (commercial partner).
+    const orderPartnerIds = Array.from(new Set(orders.map((order) => getRelationalId(order.partner_id)).filter((id): id is number => !!id)));
+    const orderPartners = orderPartnerIds.length > 0 ? await readInBatches(credentials, uid, "res.partner", orderPartnerIds, ["id", "commercial_partner_id"]) : [];
+    const customerIdByPartnerId = new Map(
+        orderPartners.map((partner) => [Number(partner.id), getRelationalId(partner.commercial_partner_id) ?? Number(partner.id)])
+    );
+
+    // Margin on what has been delivered: same method as the Customer Activity report.
+    const gpByOrderId = await getOrdersGrossProfit(
+        credentials,
+        uid,
+        money,
+        orders.map((order) => Number(order.id)),
+        costAvailable
+    );
+
+    const ordersByCustomer = new Map<number, OdooCustomerFollowupRow["orders"]>();
+    for (const order of orders) {
+        const customerId = customerIdByPartnerId.get(getRelationalId(order.partner_id) ?? -1);
+        if (!customerId) continue;
+        const gp = gpByOrderId.get(Number(order.id));
+        const list = ordersByCustomer.get(customerId) ?? [];
+        list.push({
+            id: Number(order.id),
+            name: toDisplayString(order.name),
+            date: normalizeOdooDate(order.date_order),
+            state: toDisplayString(order.state),
+            salespersonName: getRelationalName(order.user_id) || "-",
+            amount: Number(money.convert(Number(order.amount_total ?? 0), getRelationalId(order.currency_id)).toFixed(2)),
+            deliveredRevenue: Number((gp?.delivered ?? 0).toFixed(2)),
+            grossProfit: Number(((gp?.delivered ?? 0) - (gp?.cost ?? 0)).toFixed(2)),
+        });
+        ordersByCustomer.set(customerId, list);
+    }
+
+    const shownIds = input.onlyWithOrders ? customerIds.filter((id) => ordersByCustomer.has(id)) : customerIds;
+    const termFields = ["property_payment_term_id", "credit"].filter((field) => field in termFieldsAvailable);
+    const partners = shownIds.length > 0 ? await readInBatches(credentials, uid, "res.partner", shownIds, ["id", "name", "user_id", ...termFields]) : [];
+
+    const rows: OdooCustomerFollowupRow[] = partners.map((partner) => {
+        const customerId = Number(partner.id);
+        const customerOrders = (ordersByCustomer.get(customerId) ?? []).sort((a, b) => b.date.localeCompare(a.date));
+        const salesTotal = Number(customerOrders.reduce((sum, order) => sum + order.amount, 0).toFixed(2));
+        const deliveredRevenue = Number(customerOrders.reduce((sum, order) => sum + order.deliveredRevenue, 0).toFixed(2));
+        const grossProfit = Number(customerOrders.reduce((sum, order) => sum + order.grossProfit, 0).toFixed(2));
+        return {
+            customerId,
+            customerName: toDisplayString(partner.name),
+            salespersonName: getRelationalName(partner.user_id) || "-",
+            paymentTerm: getRelationalName(partner.property_payment_term_id),
+            orderCount: customerOrders.length,
+            salesTotal,
+            deliveredRevenue,
+            grossProfit,
+            gpPercent: costAvailable && deliveredRevenue > 0 ? Number(((grossProfit / deliveredRevenue) * 100).toFixed(1)) : null,
+            totalDue: "credit" in partner ? Number(partner.credit ?? 0) || 0 : null,
+            orders: customerOrders,
+        };
+    });
+    rows.sort((a, b) => b.salesTotal - a.salesTotal || a.customerName.localeCompare(b.customerName));
+
+    const salesTotal = Number(rows.reduce((sum, row) => sum + row.salesTotal, 0).toFixed(2));
+    const deliveredRevenue = Number(rows.reduce((sum, row) => sum + row.deliveredRevenue, 0).toFixed(2));
+    const grossProfit = Number(rows.reduce((sum, row) => sum + row.grossProfit, 0).toFixed(2));
+    return {
+        startDate,
+        endDate,
+        costAvailable,
+        rows,
+        totals: {
+            customerCount: rows.length,
+            orderCount: rows.reduce((sum, row) => sum + row.orderCount, 0),
+            salesTotal,
+            grossProfit,
+            deliveredRevenue,
+            gpPercent: costAvailable && deliveredRevenue > 0 ? Number(((grossProfit / deliveredRevenue) * 100).toFixed(1)) : null,
+            totalDue: Number(rows.reduce((sum, row) => sum + (row.totalDue ?? 0), 0).toFixed(2)),
+        },
+    };
+}
+
+/**
+ * Per sale order: revenue (ex VAT), the part of it already delivered, and what that delivered stock cost
+ * (from Odoo's own stock valuation entries). Salespeople never see margins, so with `costAvailable` false
+ * nothing is read from stock valuation (which also needs extra Odoo rights).
+ */
+async function getOrdersGrossProfit(
+    credentials: OdooCredentials,
+    uid: number,
+    money: MoneyConverter,
+    orderIds: number[],
+    costAvailable: boolean
+): Promise<Map<number, { revenue: number; delivered: number; cost: number }>> {
+    const result = new Map<number, { revenue: number; delivered: number; cost: number }>();
+    if (orderIds.length === 0 || !costAvailable) return result;
+
+    const saleLines = await searchReadAll(
+        credentials,
+        uid,
+        "sale.order.line",
+        [
+            ["order_id", "in", orderIds],
+            ["display_type", "=", false],
+            ["product_id", "!=", false],
+        ],
+        ["order_id", "price_subtotal", "product_uom_qty", "qty_delivered", "currency_id"]
+    );
+    const saleLineIds = saleLines.map((line) => Number(line.id));
+    const costLayers = saleLineIds.length > 0
+        ? await searchReadAll(credentials, uid, "stock.valuation.layer", [["stock_move_id.sale_line_id", "in", saleLineIds]], ["stock_move_id", "value", "currency_id"])
+        : [];
+    const layerMoveIds = Array.from(new Set(costLayers.map((layer) => getRelationalId(layer.stock_move_id)).filter((id): id is number => !!id)));
+    const layerMoves = layerMoveIds.length > 0 ? await readInBatches(credentials, uid, "stock.move", layerMoveIds, ["id", "sale_line_id"]) : [];
+    const saleLineIdByMoveId = new Map(layerMoves.map((move) => [Number(move.id), getRelationalId(move.sale_line_id)]));
+
+    const costByLineId = new Map<number, number>();
+    for (const layer of costLayers) {
+        const lineId = saleLineIdByMoveId.get(getRelationalId(layer.stock_move_id) ?? -1);
+        if (!lineId) continue;
+        costByLineId.set(lineId, (costByLineId.get(lineId) ?? 0) - money.convert(Number(layer.value ?? 0), getRelationalId(layer.currency_id)));
+    }
+
+    for (const line of saleLines) {
+        const orderId = getRelationalId(line.order_id);
+        if (!orderId) continue;
+        const ordered = Number(line.product_uom_qty ?? 0);
+        const deliveredQty = Math.min(Math.max(Number(line.qty_delivered ?? 0), 0), ordered);
+        const revenue = money.convert(Number(line.price_subtotal ?? 0), getRelationalId(line.currency_id));
+        const entry = result.get(orderId) ?? { revenue: 0, delivered: 0, cost: 0 };
+        entry.revenue += revenue;
+        entry.delivered += ordered > 0 ? revenue * (deliveredQty / ordered) : 0;
+        entry.cost += costByLineId.get(Number(line.id)) ?? 0;
+        result.set(orderId, entry);
+    }
+    return result;
 }
 
 /**

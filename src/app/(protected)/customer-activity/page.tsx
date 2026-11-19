@@ -6,6 +6,7 @@ import { CalendarDays, CreditCard, Download, FileText, Mail, MapPin, Phone, Shop
 import { getCustomerActivityReport, getCustomers } from "@/lib/client-odoo";
 import { Select2 } from "@/components/select2";
 import { BrandSalesTree } from "@/components/brand-sales-tree";
+import { CustomerFollowupReport } from "@/components/customer-followup-report";
 import type { OdooCustomerActivityOrder, OdooCustomerActivityReport, OdooCustomerOption } from "@/types/odoo";
 import { getDisplayCurrency } from "@/lib/display-currency";
 import { writeWorkbook } from "@/lib/client-activity";
@@ -57,7 +58,7 @@ function targetTone(percent: number | null) {
 // Months shown in "Month by month vs target" before expanding.
 const MONTHS_COLLAPSED = 6;
 
-export default function CustomerActivityPage() {
+function CustomerActivityView() {
     const [customers, setCustomers] = useState<OdooCustomerOption[]>([]);
     const [customersLoading, setCustomersLoading] = useState(true);
     const [customersError, setCustomersError] = useState<string | null>(null);
@@ -538,6 +539,50 @@ function OrdersTable({ rows, empty, showGp = false }: { rows: OdooCustomerActivi
                 Total {formatCurrency(total)}
                 {showGp ? ` · GP ${formatCurrency(rows.reduce((sum, row) => sum + row.grossProfit, 0))}` : ""}
             </p>
+        </>
+    );
+}
+
+type ActivityTab = "activity" | "followup";
+
+export default function CustomerActivityPage() {
+    const [tab, setTab] = useState<ActivityTab>("activity");
+    // The followup tab loads its customer list only once it is first opened; both tabs then keep their state while switching.
+    const [followupOpened, setFollowupOpened] = useState(false);
+    const tabs: Array<{ key: ActivityTab; label: string }> = [
+        { key: "activity", label: "Customer Activity" },
+        { key: "followup", label: "Customer Followup Report" },
+    ];
+
+    return (
+        <>
+            <div className="flex flex-wrap gap-1 border-b border-(--line)" role="tablist" aria-label="Customer reports">
+                {tabs.map((item) => (
+                    <button
+                        key={item.key}
+                        type="button"
+                        role="tab"
+                        aria-selected={tab === item.key}
+                        onClick={() => {
+                            setTab(item.key);
+                            if (item.key === "followup") setFollowupOpened(true);
+                        }}
+                        className={`-mb-px border-b-2 px-4 py-2.5 text-sm transition ${
+                            tab === item.key ? "border-(--brand) font-semibold text-(--brand)" : "border-transparent text-(--ink-soft) hover:text-(--ink)"
+                        }`}
+                    >
+                        {item.label}
+                    </button>
+                ))}
+            </div>
+            <div className="mt-6" hidden={tab !== "activity"}>
+                <CustomerActivityView />
+            </div>
+            {followupOpened ? (
+                <div className="mt-6" hidden={tab !== "followup"}>
+                    <CustomerFollowupReport />
+                </div>
+            ) : null}
         </>
     );
 }

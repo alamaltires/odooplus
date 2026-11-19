@@ -509,6 +509,52 @@ export type OdooCustomerActivityOrder = {
     grossProfit: number;
 };
 
+export type OdooFollowupOrder = {
+    id: number;
+    name: string;
+    date: string;
+    state: string;
+    salespersonName: string;
+    /** Order total in the display currency. */
+    amount: number;
+    /** Margin on what has been delivered so far (0 when margins are hidden). */
+    deliveredRevenue: number;
+    grossProfit: number;
+};
+
+export type OdooCustomerFollowupRow = {
+    customerId: number;
+    customerName: string;
+    salespersonName: string;
+    paymentTerm: string;
+    orderCount: number;
+    /** Sum of the confirmed sales orders dated in the period. */
+    salesTotal: number;
+    deliveredRevenue: number;
+    grossProfit: number;
+    gpPercent: number | null;
+    /** The customer's open receivable balance today (null when the database doesn't expose it). */
+    totalDue: number | null;
+    orders: OdooFollowupOrder[];
+};
+
+export type OdooCustomerFollowupReport = {
+    startDate: string;
+    endDate: string;
+    /** False for salespeople: margins are not calculated or shown. */
+    costAvailable: boolean;
+    rows: OdooCustomerFollowupRow[];
+    totals: {
+        customerCount: number;
+        orderCount: number;
+        salesTotal: number;
+        grossProfit: number;
+        deliveredRevenue: number;
+        gpPercent: number | null;
+        totalDue: number;
+    };
+};
+
 export type OdooCustomerActivityReport = {
     customer: OdooCustomerSummary;
     startDate: string;
