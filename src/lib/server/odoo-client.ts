@@ -12206,6 +12206,26 @@ export async function getCustomerActivityReport(
 }
 
 /**
+ * One sale order with its lines, for the Customer Followup Report's details window. Any salesperson's order
+ * can be opened, but only when its customer is one the caller may see (`allowedCustomerIds`).
+ */
+export async function getFollowupOrderDetails(
+    credentials: OdooCredentials,
+    orderId: number,
+    allowedCustomerIds: Set<number>
+): Promise<MyOrderDetails> {
+    const uid = await authenticate(credentials);
+    if (!Number.isFinite(orderId) || orderId <= 0) throw new Error("Invalid order.");
+    const [order] = await executeKw<Array<Record<string, unknown>>>(credentials, uid, "sale.order", "read", [[orderId]], { fields: ["partner_id"] });
+    const partnerId = getRelationalId(order?.partner_id);
+    if (!partnerId) throw new Error("This order was not found.");
+    const [partner] = await readPartnersByIds(credentials, uid, [partnerId], ["id", "commercial_partner_id"]);
+    const customerId = getRelationalId(partner?.commercial_partner_id) ?? partnerId;
+    if (!allowedCustomerIds.has(customerId)) throw new Error("You don't have access to this customer's orders.");
+    return getMyOrderDetails(credentials, orderId, { anySalesperson: true });
+}
+
+/**
  * Customer Followup Report: for each chosen customer, what they ordered in a short period (at most one
  * month), the margin on it, and what they owe today. Everything is read in a handful of batched
  * queries for all customers together, so the cost does not grow with the number of customers.
@@ -13900,7 +13920,11 @@ export type MyOrderDetails = {
 };
 
 /** One of the signed-in user's own quotations / sales orders, with its lines. Orders of other salespeople are refused. */
-export async function getMyOrderDetails(credentials: OdooCredentials, orderId: number): Promise<MyOrderDetails> {
+export async function getMyOrderDetails(
+    credentials: OdooCredentials,
+    orderId: number,
+    options: { anySalesperson?: boolean } = {}
+): Promise<MyOrderDetails> {
     const uid = await authenticate(credentials);
     if (!Number.isFinite(orderId) || orderId <= 0) throw new Error("Invalid order.");
 
@@ -13910,7 +13934,7 @@ export async function getMyOrderDetails(credentials: OdooCredentials, orderId: n
     ]);
     const only = (meta: Record<string, OdooFieldMeta>, names: string[]) => names.filter((name) => meta[name]);
 
-    const [order] = await executeKw<Array<Record<string, unknown>>>(credentials, uid, "sale.order", "search_read", [[["id", "=", orderId], ["user_id", "=", uid]]], {
+    const [order] = await executeKw<Array<Record<string, unknown>>>(credentials, uid, "sale.order", "search_read", [[["id", "=", orderId], ...(options.anySalesperson ? [] : [["user_id", "=", uid]])]], {
         fields: only(orderMeta, [
             "name", "state", "partner_id", "date_order", "validity_date", "user_id", "team_id", "client_order_ref", "payment_term_id",
             "pricelist_id", "company_id", "currency_id", "amount_untaxed", "amount_tax", "amount_total", "note",

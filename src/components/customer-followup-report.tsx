@@ -1,8 +1,8 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { Fragment, FormEvent, useEffect, useMemo, useState } from "react";
 import { AlertCircle, ChevronDown, ChevronUp, Download, Eye, Loader2, Search, Users, X } from "lucide-react";
-import { getCustomerFollowupReport, getFollowupCustomers, type FollowupCustomerList } from "@/lib/client-odoo";
+import { getCustomerFollowupReport, getFollowupCustomers, getFollowupOrderDetails, type FollowupCustomerList, type MyOrderDetails } from "@/lib/client-odoo";
 import { LimitedMultiSelect } from "@/components/limited-multi-select";
 import { getDisplayCurrency } from "@/lib/display-currency";
 import { writeWorkbook } from "@/lib/client-activity";
@@ -101,6 +101,11 @@ export function CustomerFollowupReport() {
     const [sortKey, setSortKey] = useState<SortKey>("salesTotal");
     const [sortDesc, setSortDesc] = useState(true);
     const [detail, setDetail] = useState<OdooCustomerFollowupRow | null>(null);
+    // The order opened inside the details window (one at a time), with the lines already fetched so reopening is instant.
+    const [openOrderId, setOpenOrderId] = useState<number | null>(null);
+    const [orderDetails, setOrderDetails] = useState<Record<number, MyOrderDetails>>({});
+    const [orderErrors, setOrderErrors] = useState<Record<number, string>>({});
+    const [orderLoading, setOrderLoading] = useState<number | null>(null);
 
     // Loads the customer list for the chosen list type; a newer choice makes an older, slower answer be ignored.
     useEffect(() => {
@@ -148,6 +153,27 @@ export function CustomerFollowupReport() {
         else if (endDate > limit) setEndDate(limit);
     }
 
+    function toggleOrder(orderId: number) {
+        if (openOrderId === orderId) {
+            setOpenOrderId(null);
+            return;
+        }
+        setOpenOrderId(orderId);
+        if (orderDetails[orderId]) return;
+        setOrderLoading(orderId);
+        setOrderErrors((current) => {
+            const next = { ...current };
+            delete next[orderId];
+            return next;
+        });
+        getFollowupOrderDetails(orderId)
+            .then((data) => setOrderDetails((current) => ({ ...current, [orderId]: data.order })))
+            .catch((loadError) =>
+                setOrderErrors((current) => ({ ...current, [orderId]: loadError instanceof Error ? loadError.message : "Could not load this order." }))
+            )
+            .finally(() => setOrderLoading((current) => (current === orderId ? null : current)));
+    }
+
     // Back to how the tab opens: nothing chosen, last 7 days, no report.
     function handleClear() {
         const [from, to] = DEFAULT_PRESET.range();
@@ -159,6 +185,7 @@ export function CustomerFollowupReport() {
         setError(null);
         setFilter("");
         setDetail(null);
+        setOpenOrderId(null);
     }
 
     async function handleGenerate(event: FormEvent) {
@@ -502,7 +529,10 @@ export function CustomerFollowupReport() {
                                                 <td className="px-3 py-2.5 text-right">
                                                     <button
                                                         type="button"
-                                                        onClick={() => setDetail(row)}
+                                                        onClick={() => {
+                                                            setOpenOrderId(null);
+                                                            setDetail(row);
+                                                        }}
                                                         disabled={row.orderCount === 0}
                                                         className="inline-flex items-center gap-1.5 rounded-lg border border-(--line) bg-white px-2.5 py-1 text-xs font-medium hover:bg-(--chip) disabled:cursor-not-allowed disabled:opacity-40"
                                                         title={row.orderCount === 0 ? "No sales orders in this period" : "See this customer's sales orders"}
@@ -546,7 +576,7 @@ export function CustomerFollowupReport() {
                         if (event.target === event.currentTarget) setDetail(null);
                     }}
                 >
-                    <div role="dialog" aria-modal="true" aria-label={`Sales orders of ${detail.customerName}`} className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-2xl border border-(--line) bg-(--card) shadow-xl">
+                    <div role="dialog" aria-modal="true" aria-label={`Sales orders of ${detail.customerName}`} className="flex max-h-[85vh] w-full max-w-4xl flex-col rounded-2xl border border-(--line) bg-(--card) shadow-xl">
                         <div className="flex items-start justify-between gap-4 border-b border-(--line) p-5">
                             <div className="min-w-0">
                                 <h2 className="truncate font-display text-xl">{detail.customerName}</h2>
@@ -577,26 +607,64 @@ export function CustomerFollowupReport() {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {detail.orders.map((order) => (
-                                        <tr key={order.id} className="border-t border-(--line)">
-                                            <td className="px-3 py-2 font-medium">{order.name}</td>
-                                            <td className="px-3 py-2 text-(--ink-soft)">{formatDate(order.date)}</td>
-                                            <td className="px-3 py-2 text-(--ink-soft)">{order.salespersonName}</td>
-                                            <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(order.amount)}</td>
-                                            {report.costAvailable ? (
-                                                <td className={`px-3 py-2 text-right tabular-nums ${order.grossProfit < 0 ? "text-red-600" : ""}`}>
-                                                    {order.deliveredRevenue > 0 ? (
-                                                        <>
-                                                            {formatCurrency(order.grossProfit)}
-                                                            <span className="block text-xs text-(--ink-soft)">{formatNumber((order.grossProfit / order.deliveredRevenue) * 100)}%</span>
-                                                        </>
-                                                    ) : (
-                                                        <span className="text-xs text-(--ink-soft)">not delivered yet</span>
-                                                    )}
-                                                </td>
-                                            ) : null}
-                                        </tr>
-                                    ))}
+                                    {detail.orders.map((order) => {
+                                        const open = openOrderId === order.id;
+                                        const columns = report.costAvailable ? 5 : 4;
+                                        return (
+                                            <Fragment key={order.id}>
+                                                <tr
+                                                    onClick={() => toggleOrder(order.id)}
+                                                    className={`cursor-pointer border-t border-(--line) hover:bg-(--chip)/40 ${open ? "bg-(--chip)/50" : ""}`}
+                                                >
+                                                    <td className="px-3 py-2 font-medium">
+                                                        <button
+                                                            type="button"
+                                                            aria-expanded={open}
+                                                            onClick={(event) => {
+                                                                event.stopPropagation();
+                                                                toggleOrder(order.id);
+                                                            }}
+                                                            className="inline-flex items-center gap-1.5 text-left"
+                                                            title={open ? "Hide the order lines" : "Show the order lines"}
+                                                        >
+                                                            <ChevronDown className={`h-4 w-4 shrink-0 text-(--ink-soft) transition ${open ? "" : "-rotate-90"}`} aria-hidden="true" />
+                                                            {order.name}
+                                                        </button>
+                                                    </td>
+                                                    <td className="px-3 py-2 text-(--ink-soft)">{formatDate(order.date)}</td>
+                                                    <td className="px-3 py-2 text-(--ink-soft)">{order.salespersonName}</td>
+                                                    <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(order.amount)}</td>
+                                                    {report.costAvailable ? (
+                                                        <td className={`px-3 py-2 text-right tabular-nums ${order.grossProfit < 0 ? "text-red-600" : ""}`}>
+                                                            {order.deliveredRevenue > 0 ? (
+                                                                <>
+                                                                    {formatCurrency(order.grossProfit)}
+                                                                    <span className="block text-xs text-(--ink-soft)">{formatNumber((order.grossProfit / order.deliveredRevenue) * 100)}%</span>
+                                                                </>
+                                                            ) : (
+                                                                <span className="text-xs text-(--ink-soft)">not delivered yet</span>
+                                                            )}
+                                                        </td>
+                                                    ) : null}
+                                                </tr>
+                                                {open ? (
+                                                    <tr className="bg-(--chip)/30">
+                                                        <td colSpan={columns} className="px-3 pb-4 pt-2">
+                                                            <OrderLines
+                                                                order={orderDetails[order.id]}
+                                                                loading={orderLoading === order.id}
+                                                                error={orderErrors[order.id]}
+                                                                onRetry={() => {
+                                                                    setOpenOrderId(null);
+                                                                    window.setTimeout(() => toggleOrder(order.id), 0);
+                                                                }}
+                                                            />
+                                                        </td>
+                                                    </tr>
+                                                ) : null}
+                                            </Fragment>
+                                        );
+                                    })}
                                 </tbody>
                                 <tfoot>
                                     <tr className="border-t-2 border-(--line) font-semibold">
@@ -613,6 +681,91 @@ export function CustomerFollowupReport() {
                 </div>
             ) : null}
         </section>
+    );
+}
+
+function OrderLines({ order, loading, error, onRetry }: { order: MyOrderDetails | undefined; loading: boolean; error: string | undefined; onRetry: () => void }) {
+    if (loading || (!order && !error)) {
+        return (
+            <p className="flex items-center gap-2 py-3 text-sm text-(--ink-soft)">
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> Loading the order lines...
+            </p>
+        );
+    }
+    if (error || !order) {
+        return (
+            <p className="flex flex-wrap items-center gap-3 py-3 text-sm text-red-600">
+                <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" /> {error ?? "Could not load this order."}
+                <button type="button" onClick={onRetry} className="rounded-lg border border-(--line) bg-white px-2.5 py-1 text-xs font-medium text-(--ink)">
+                    Try again
+                </button>
+            </p>
+        );
+    }
+    const money = (value: number) => `${order.currencyCode} ${formatNumber(value)}`;
+    return (
+        <div className="rounded-xl border border-(--line) bg-white p-4">
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-4">
+                <div>
+                    <dt className="text-xs text-(--ink-soft)">Status</dt>
+                    <dd className="font-medium">{order.state}</dd>
+                </div>
+                <div>
+                    <dt className="text-xs text-(--ink-soft)">Payment terms</dt>
+                    <dd className="font-medium">{order.paymentTerms || "Not set"}</dd>
+                </div>
+                <div>
+                    <dt className="text-xs text-(--ink-soft)">Salesperson</dt>
+                    <dd className="font-medium">{order.salesperson || "-"}</dd>
+                </div>
+                <div>
+                    <dt className="text-xs text-(--ink-soft)">Customer reference</dt>
+                    <dd className="font-medium">{order.customerRef || "-"}</dd>
+                </div>
+            </dl>
+            <div className="mt-3 overflow-x-auto">
+                <table className="min-w-full text-left text-sm">
+                    <thead className="text-xs text-(--ink-soft)">
+                        <tr>
+                            <th className="py-1.5 pr-3 font-medium">Product</th>
+                            <th className="px-3 py-1.5 text-right font-medium">Qty</th>
+                            <th className="px-3 py-1.5 text-right font-medium">Delivered</th>
+                            <th className="px-3 py-1.5 text-right font-medium">Unit price</th>
+                            <th className="px-3 py-1.5 text-right font-medium">Disc.</th>
+                            <th className="py-1.5 pl-3 text-right font-medium">Subtotal</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {order.lines.map((line) =>
+                            line.kind === "product" ? (
+                                <tr key={line.id} className="border-t border-(--line)">
+                                    <td className="py-1.5 pr-3">
+                                        <span className="block font-medium">{line.productName || line.description}</span>
+                                    </td>
+                                    <td className="px-3 py-1.5 text-right tabular-nums">{formatNumber(line.quantity)}</td>
+                                    <td className="px-3 py-1.5 text-right tabular-nums text-(--ink-soft)">{line.delivered === null ? "-" : formatNumber(line.delivered)}</td>
+                                    <td className="px-3 py-1.5 text-right tabular-nums">{formatNumber(line.priceUnit)}</td>
+                                    <td className="px-3 py-1.5 text-right tabular-nums text-(--ink-soft)">{line.discount ? `${formatNumber(line.discount)}%` : "-"}</td>
+                                    <td className="py-1.5 pl-3 text-right font-medium tabular-nums">{formatNumber(line.subtotal)}</td>
+                                </tr>
+                            ) : (
+                                <tr key={line.id} className="border-t border-(--line)">
+                                    <td colSpan={6} className={`py-1.5 text-xs ${line.kind === "section" ? "font-semibold" : "italic text-(--ink-soft)"}`}>
+                                        {line.description}
+                                    </td>
+                                </tr>
+                            )
+                        )}
+                    </tbody>
+                </table>
+            </div>
+            <div className="mt-3 flex flex-col items-end gap-0.5 border-t border-(--line) pt-2 text-sm">
+                <p className="text-(--ink-soft)">Untaxed {money(order.amountUntaxed)}</p>
+                <p className="text-(--ink-soft)">VAT {money(order.amountTax)}</p>
+                <p className="font-semibold">Total {money(order.amountTotal)}</p>
+            </div>
+            {order.note ? <p className="mt-2 text-xs text-(--ink-soft)">Note: {order.note}</p> : null}
+        </div>
     );
 }
 

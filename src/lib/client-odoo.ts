@@ -1305,6 +1305,11 @@ export type MyOrderDetails = {
     }>;
 };
 
+/** Any order of a customer the user may see (Customer Followup Report), not only the user's own. */
+export function getFollowupOrderDetails(orderId: number) {
+    return post<{ order: MyOrderDetails }>("/api/odoo/followup-order", { orderId });
+}
+
 export function getMyOrderDetails(orderId: number) {
     return post<{ order: MyOrderDetails }>("/api/odoo/my-order", { orderId });
 }
