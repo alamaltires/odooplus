@@ -12272,19 +12272,24 @@ export async function getCustomerFollowupReport(
             ],
             ["id", "name", "amount_total", "currency_id", "date_order", "user_id", "state", "partner_id"]
         ),
-        // Customer payments received (and refunded) in the period, plus the customers invoiced in it.
-        searchReadAll(
-            credentials,
-            uid,
-            "account.payment",
-            [
-                ["partner_type", "=", "customer"],
-                ["partner_id.commercial_partner_id", "in", customerIds],
-                ["move_id.state", "=", "posted"],
-                ["date", ">=", startDate],
-                ["date", "<=", endDate],
-            ],
-            ["partner_id", "amount", "payment_type", "currency_id"]
+        // Money received in the period, read the way Odoo's Partner Ledger sees it: the credits that non-invoice entries
+        // (customer payments, bank statement lines, cheques, manual receipts) post to the customer's receivable account.
+        // Entries that debit it (refunds paid back) reduce the total. This does not depend on how the payment was recorded.
+        getReceivableAccountDomainTriple(credentials, uid).then((receivableDomain) =>
+            searchReadAll(
+                credentials,
+                uid,
+                "account.move.line",
+                [
+                    receivableDomain,
+                    ["parent_state", "=", "posted"],
+                    ["move_id.move_type", "=", "entry"],
+                    ["partner_id.commercial_partner_id", "in", customerIds],
+                    ["date", ">=", startDate],
+                    ["date", "<=", endDate],
+                ],
+                ["partner_id", "debit", "credit", "company_id"]
+            )
         ),
         searchReadAll(
             credentials,
@@ -12350,7 +12355,7 @@ export async function getCustomerFollowupReport(
     for (const payment of payments) {
         const customerId = customerIdByPaymentPartner.get(getRelationalId(payment.partner_id) ?? -1);
         if (!customerId) continue;
-        const amount = money.convert(Number(payment.amount ?? 0), getRelationalId(payment.currency_id)) * (payment.payment_type === "outbound" ? -1 : 1);
+        const amount = money.convertFromCompany(Number(payment.credit ?? 0) - Number(payment.debit ?? 0), getRelationalId(payment.company_id));
         periodPaymentsByCustomer.set(customerId, (periodPaymentsByCustomer.get(customerId) ?? 0) + amount);
     }
     const invoicedCustomers = new Set<number>(invoices.map((invoice) => getRelationalId(invoice.commercial_partner_id)).filter((id): id is number => !!id));
