@@ -601,8 +601,10 @@ export function getFollowupCustomers(list: FollowupCustomerList) {
     return post<{ customers: OdooCustomerOption[] }>("/api/odoo/followup-customers", { list });
 }
 
+// Not kept in the browser cache: the list depends on the user's Customer Tags setting, which an admin can change at any
+// time, and the server already shares one result per scope for a few minutes.
 export function getMyContacts() {
-    return cachedCustomerList("my-contacts", () => post<{ contacts: OdooContact[] }>("/api/odoo/my-contacts", {}));
+    return post<{ contacts: OdooContact[] }>("/api/odoo/my-contacts", {});
 }
 
 export function getProducts(input?: { query?: string; limit?: number; offset?: number }) {

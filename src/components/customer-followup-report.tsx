@@ -9,7 +9,7 @@ import { writeWorkbook } from "@/lib/client-activity";
 import { maxFollowupEnd, validateFollowupRange } from "@/lib/followup-range";
 import type { OdooCustomerFollowupReport, OdooCustomerFollowupRow, OdooCustomerOption } from "@/types/odoo";
 
-type SortKey = "customerName" | "paymentTerm" | "orderCount" | "salesTotal" | "grossProfit" | "periodDue" | "totalDue";
+type SortKey = "customerName" | "paymentTerm" | "orderCount" | "salesTotal" | "grossProfit" | "periodPayments" | "totalDue";
 
 function isoDate(date: Date) {
     return date.toISOString().slice(0, 10);
@@ -60,6 +60,10 @@ const PRESETS: Array<{ label: string; range: () => [string, string] }> = [
     {
         label: "Last 7 days",
         range: () => [isoDate(new Date(Date.now() - 6 * 86_400_000)), todayISO()],
+    },
+    {
+        label: "Last 15 days",
+        range: () => [isoDate(new Date(Date.now() - 14 * 86_400_000)), todayISO()],
     },
     {
         label: "Last 30 days",
@@ -186,27 +190,23 @@ export function CustomerFollowupReport() {
         setFilter("");
         setDetail(null);
         setOpenOrderId(null);
-        setLastRequest(null);
         setInactiveOnly(false);
     }
 
-    // What the last report was built from, so the "Not active" switch can search again without touching the form.
-    const [lastRequest, setLastRequest] = useState<{ ids: number[]; allSelected: boolean; startDate: string; endDate: string } | null>(null);
     const [inactiveOnly, setInactiveOnly] = useState(false);
 
-    async function runReport(request: { ids: number[]; allSelected: boolean; startDate: string; endDate: string }, inactive: boolean) {
+    async function runReport(ids: number[], allCustomers: boolean, inactive: boolean) {
         setLoading(true);
         setError(null);
         try {
             const data = await getCustomerFollowupReport({
-                customerIds: request.ids,
-                onlyWithOrders: request.allSelected && !inactive,
+                customerIds: ids,
+                onlyWithOrders: allCustomers && !inactive,
                 onlyInactive: inactive,
-                startDate: request.startDate,
-                endDate: request.endDate,
+                startDate,
+                endDate,
             });
             setReport(data);
-            setLastRequest(request);
             setInactiveOnly(inactive);
             setFilter("");
             setDetail(null);
@@ -223,7 +223,13 @@ export function CustomerFollowupReport() {
         event.preventDefault();
         if (!canGenerate) return;
         const ids = allSelected ? customers.map((customer) => customer.id) : selectedIds.map(Number);
-        await runReport({ ids, allSelected, startDate, endDate }, false);
+        await runReport(ids, allSelected, false);
+    }
+
+    // Every customer of the chosen list that was not invoiced in the period: only the dates are needed.
+    async function handleNotActive() {
+        if (loading || rangeError || customers.length === 0) return;
+        await runReport(customers.map((customer) => customer.id), true, true);
     }
 
     const rows = useMemo(() => {
@@ -264,7 +270,7 @@ export function CustomerFollowupReport() {
                     "Sales orders": row.orderCount,
                     "Sales total": row.salesTotal,
                     ...(withGp ? { Margin: row.grossProfit, "Margin %": row.gpPercent ?? "" } : {}),
-                    "Period due": row.periodDue,
+                    "Period payments": row.periodPayments,
                     "Total due": row.totalDue ?? "",
                 }))
             ),
@@ -442,6 +448,15 @@ export function CustomerFollowupReport() {
                     </button>
                     <button
                         type="button"
+                        onClick={() => void handleNotActive()}
+                        disabled={loading || !!rangeError || customersLoading || customers.length === 0}
+                        title="List the customers of the chosen customer list that were not invoiced at all in the period. No customer needs to be picked."
+                        className="inline-flex items-center gap-2 rounded-xl border border-(--brand) bg-white px-5 py-2.5 text-sm font-medium text-(--brand) hover:bg-(--chip) disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                        Not active customers only
+                    </button>
+                    <button
+                        type="button"
                         onClick={handleClear}
                         disabled={loading}
                         className="inline-flex items-center gap-2 rounded-xl border border-(--line) bg-white px-5 py-2.5 text-sm font-medium hover:bg-(--chip) disabled:cursor-not-allowed disabled:opacity-50"
@@ -474,7 +489,7 @@ export function CustomerFollowupReport() {
                                 note={report.totals.gpPercent !== null ? `${formatNumber(report.totals.gpPercent)}% of delivered` : undefined}
                             />
                         ) : null}
-                        <SummaryCard label="Period due" value={formatCurrency(report.totals.periodDue)} tone="due" note="unpaid, invoiced in the period" />
+                        <SummaryCard label="Period payments" value={formatCurrency(report.totals.periodPayments)} note="received in the period" />
                         <SummaryCard label="Total due" value={formatCurrency(report.totals.totalDue)} tone="due" />
                     </div>
 
@@ -491,20 +506,6 @@ export function CustomerFollowupReport() {
                                 />
                             </div>
                             <div className="flex items-center gap-3">
-                                <button
-                                    type="button"
-                                    role="switch"
-                                    aria-checked={inactiveOnly}
-                                    disabled={loading || !lastRequest}
-                                    onClick={() => lastRequest && void runReport(lastRequest, !inactiveOnly)}
-                                    title="Search again for the chosen customers that were not invoiced at all in this period"
-                                    className="inline-flex items-center gap-2 text-sm disabled:opacity-50"
-                                >
-                                    <span className={`relative inline-block h-5 w-9 rounded-full transition ${inactiveOnly ? "bg-(--brand)" : "bg-(--line)"}`}>
-                                        <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${inactiveOnly ? "left-4.5" : "left-0.5"}`} />
-                                    </span>
-                                    Not active only
-                                </button>
                                 <span className="text-xs text-(--ink-soft)">
                                     {rows.length === report.rows.length ? `${rows.length} customers` : `${rows.length} of ${report.rows.length} customers`}
                                 </span>
@@ -520,7 +521,7 @@ export function CustomerFollowupReport() {
                         </div>
 
                         {report.rows.length === 0 ? (
-                            <p className="p-6 text-center text-sm text-(--ink-soft)">{inactiveOnly ? "Every chosen customer was invoiced in this period." : "No customer had confirmed, invoiced sales orders between these dates."}</p>
+                            <p className="p-6 text-center text-sm text-(--ink-soft)">{inactiveOnly ? "Every customer in the list was invoiced in this period." : "No customer had confirmed, invoiced sales orders between these dates."}</p>
                         ) : rows.length === 0 ? (
                             <p className="p-6 text-center text-sm text-(--ink-soft)">No customer matches &ldquo;{filter}&rdquo;.</p>
                         ) : (
@@ -533,7 +534,7 @@ export function CustomerFollowupReport() {
                                             {headerCell("Sales orders", "orderCount", "right")}
                                             {headerCell("Sales total", "salesTotal", "right")}
                                             {report.costAvailable ? headerCell("Margin", "grossProfit", "right") : null}
-                                            {headerCell("Period due", "periodDue", "right")}
+                                            {headerCell("Period payments", "periodPayments", "right")}
                                             {headerCell("Total due", "totalDue", "right")}
                                             <th className="px-3 py-2.5 text-right font-medium">Details</th>
                                         </tr>
@@ -560,8 +561,8 @@ export function CustomerFollowupReport() {
                                                         )}
                                                     </td>
                                                 ) : null}
-                                                <td className={`px-3 py-2.5 text-right tabular-nums ${row.periodDue > 0 ? "font-medium text-amber-700" : "text-(--ink-soft)"}`}>
-                                                    {formatCurrency(row.periodDue)}
+                                                <td className={`px-3 py-2.5 text-right tabular-nums ${row.periodPayments > 0 ? "font-medium text-green-700" : "text-(--ink-soft)"}`}>
+                                                    {formatCurrency(row.periodPayments)}
                                                 </td>
                                                 <td className={`px-3 py-2.5 text-right tabular-nums ${row.totalDue && row.totalDue > 0 ? "font-medium text-amber-700" : "text-(--ink-soft)"}`}>
                                                     {row.totalDue === null ? "-" : formatCurrency(row.totalDue)}
@@ -593,7 +594,7 @@ export function CustomerFollowupReport() {
                                             {report.costAvailable ? (
                                                 <td className="px-3 py-2.5 text-right tabular-nums">{formatCurrency(rows.reduce((sum, row) => sum + row.grossProfit, 0))}</td>
                                             ) : null}
-                                            <td className="px-3 py-2.5 text-right tabular-nums">{formatCurrency(rows.reduce((sum, row) => sum + row.periodDue, 0))}</td>
+                                            <td className="px-3 py-2.5 text-right tabular-nums">{formatCurrency(rows.reduce((sum, row) => sum + row.periodPayments, 0))}</td>
                                             <td className="px-3 py-2.5 text-right tabular-nums">{formatCurrency(rows.reduce((sum, row) => sum + (row.totalDue ?? 0), 0))}</td>
                                             <td />
                                         </tr>
@@ -605,7 +606,7 @@ export function CustomerFollowupReport() {
                     <p className="text-xs text-(--ink-soft)">
                         Sales total = confirmed and invoiced sales orders dated {formatDate(report.startDate)} to {formatDate(report.endDate)} (VAT included).
                         {report.costAvailable ? " Margin is measured on what has been delivered so far. " : " "}
-                        Period due = still unpaid on the invoices issued in the period. Total due = the customer&apos;s open receivable balance today.
+                        Period payments = what the customers paid between these dates (refunds paid back are subtracted). Total due = the customer&apos;s open receivable balance today.
                     </p>
                 </div>
             ) : null}

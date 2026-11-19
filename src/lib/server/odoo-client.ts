@@ -1890,7 +1890,15 @@ export async function getMyContacts(
     assignedToUserId?: number | null,
     tagFilter: CustomerTagFilter = null
 ): Promise<CustomerSummary[]> {
-    return getCustomerSummaries(credentials, assignedToUserId, tagFilter);
+    const contacts = await getCustomerSummaries(credentials, assignedToUserId, tagFilter);
+    if (tagFilter && "all" in tagFilter) return contacts;
+
+    // A customer is listed because one of its tags is allowed, but it may carry other tags too (e.g. WhatsApp):
+    // show only the allowed ones, so it isn't grouped or labelled under a tag the user was not given.
+    const allowedNames = tagFilter
+        ? new Set((await getCustomerTags(credentials)).filter((tag) => tagFilter.ids.includes(tag.id)).map((tag) => tag.name))
+        : new Set([DEFAULT_CUSTOMER_TAG]);
+    return contacts.map((contact) => ({ ...contact, tags: (contact.tags ?? []).filter((tag) => allowedNames.has(tag)) }));
 }
 
 export async function getProducts(
@@ -12249,7 +12257,7 @@ export async function getCustomerFollowupReport(
     const rangeEnd = toOdooDateBoundary(endDate, true, timeZone);
     const costAvailable = input.includeCost !== false;
 
-    const [orders, invoices, termFieldsAvailable, money] = await Promise.all([
+    const [orders, payments, invoices, termFieldsAvailable, money] = await Promise.all([
         searchReadAll(
             credentials,
             uid,
@@ -12264,7 +12272,20 @@ export async function getCustomerFollowupReport(
             ],
             ["id", "name", "amount_total", "currency_id", "date_order", "user_id", "state", "partner_id"]
         ),
-        // Invoices (and credit notes) issued in the period: who was invoiced, and how much of it is still unpaid.
+        // Customer payments received (and refunded) in the period, plus the customers invoiced in it.
+        searchReadAll(
+            credentials,
+            uid,
+            "account.payment",
+            [
+                ["partner_type", "=", "customer"],
+                ["partner_id.commercial_partner_id", "in", customerIds],
+                ["move_id.state", "=", "posted"],
+                ["date", ">=", startDate],
+                ["date", "<=", endDate],
+            ],
+            ["partner_id", "amount", "payment_type", "currency_id"]
+        ),
         searchReadAll(
             credentials,
             uid,
@@ -12276,7 +12297,7 @@ export async function getCustomerFollowupReport(
                 ["invoice_date", ">=", startDate],
                 ["invoice_date", "<=", endDate],
             ],
-            ["commercial_partner_id", "amount_residual_signed", "company_id"]
+            ["commercial_partner_id"]
         ),
         executeKw<Record<string, unknown>>(credentials, uid, "res.partner", "fields_get", [["property_payment_term_id", "credit"]], {
             attributes: ["string"],
@@ -12319,18 +12340,20 @@ export async function getCustomerFollowupReport(
         ordersByCustomer.set(customerId, list);
     }
 
-    // What is still unpaid on the invoices issued in the period (credit notes reduce it).
-    const periodDueByCustomer = new Map<number, number>();
-    const invoicedCustomers = new Set<number>();
-    for (const invoice of invoices) {
-        const customerId = getRelationalId(invoice.commercial_partner_id);
+    // Payments the customer made in the period (refunds paid back reduce it); a payment may come from a contact of the customer.
+    const paymentPartnerIds = Array.from(new Set(payments.map((payment) => getRelationalId(payment.partner_id)).filter((id): id is number => !!id)));
+    const paymentPartners = paymentPartnerIds.length > 0 ? await readInBatches(credentials, uid, "res.partner", paymentPartnerIds, ["id", "commercial_partner_id"]) : [];
+    const customerIdByPaymentPartner = new Map(
+        paymentPartners.map((partner) => [Number(partner.id), getRelationalId(partner.commercial_partner_id) ?? Number(partner.id)])
+    );
+    const periodPaymentsByCustomer = new Map<number, number>();
+    for (const payment of payments) {
+        const customerId = customerIdByPaymentPartner.get(getRelationalId(payment.partner_id) ?? -1);
         if (!customerId) continue;
-        invoicedCustomers.add(customerId);
-        periodDueByCustomer.set(
-            customerId,
-            (periodDueByCustomer.get(customerId) ?? 0) + money.convertFromCompany(Number(invoice.amount_residual_signed ?? 0), getRelationalId(invoice.company_id))
-        );
+        const amount = money.convert(Number(payment.amount ?? 0), getRelationalId(payment.currency_id)) * (payment.payment_type === "outbound" ? -1 : 1);
+        periodPaymentsByCustomer.set(customerId, (periodPaymentsByCustomer.get(customerId) ?? 0) + amount);
     }
+    const invoicedCustomers = new Set<number>(invoices.map((invoice) => getRelationalId(invoice.commercial_partner_id)).filter((id): id is number => !!id));
 
     const shownIds = input.onlyInactive
         ? customerIds.filter((id) => !invoicedCustomers.has(id))
@@ -12356,7 +12379,7 @@ export async function getCustomerFollowupReport(
             deliveredRevenue,
             grossProfit,
             gpPercent: costAvailable && deliveredRevenue > 0 ? Number(((grossProfit / deliveredRevenue) * 100).toFixed(1)) : null,
-            periodDue: Number((periodDueByCustomer.get(customerId) ?? 0).toFixed(2)),
+            periodPayments: Number((periodPaymentsByCustomer.get(customerId) ?? 0).toFixed(2)),
             totalDue: "credit" in partner ? Number(partner.credit ?? 0) || 0 : null,
             orders: customerOrders,
         };
@@ -12378,7 +12401,7 @@ export async function getCustomerFollowupReport(
             grossProfit,
             deliveredRevenue,
             gpPercent: costAvailable && deliveredRevenue > 0 ? Number(((grossProfit / deliveredRevenue) * 100).toFixed(1)) : null,
-            periodDue: Number(rows.reduce((sum, row) => sum + row.periodDue, 0).toFixed(2)),
+            periodPayments: Number(rows.reduce((sum, row) => sum + row.periodPayments, 0).toFixed(2)),
             totalDue: Number(rows.reduce((sum, row) => sum + (row.totalDue ?? 0), 0).toFixed(2)),
         },
     };

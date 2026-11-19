@@ -533,8 +533,8 @@ export type OdooCustomerFollowupRow = {
     deliveredRevenue: number;
     grossProfit: number;
     gpPercent: number | null;
-    /** Still unpaid on the invoices issued in the period (credit notes reduce it). */
-    periodDue: number;
+    /** Payments received from the customer in the period (refunds paid back reduce it). */
+    periodPayments: number;
     /** The customer's open receivable balance today (null when the database doesn't expose it). */
     totalDue: number | null;
     orders: OdooFollowupOrder[];
@@ -553,7 +553,7 @@ export type OdooCustomerFollowupReport = {
         grossProfit: number;
         deliveredRevenue: number;
         gpPercent: number | null;
-        periodDue: number;
+        periodPayments: number;
         totalDue: number;
     };
 };
