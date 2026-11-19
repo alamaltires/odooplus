@@ -67,14 +67,10 @@ const PRESETS: Array<{ label: string; range: () => [string, string] }> = [
     },
 ];
 
-// "inactive" is the whole customer list, narrowed by the report to those not invoiced in the period.
-type ListChoice = FollowupCustomerList | "inactive";
-
-const LISTS: Array<{ key: ListChoice; label: string; hint: string }> = [
+const LISTS: Array<{ key: FollowupCustomerList; label: string; hint: string }> = [
     { key: "act", label: "Customer ACT", hint: "Only customers tagged Customer ACT" },
     { key: "assigned", label: "Assigned only", hint: "Only customers that have a salesperson assigned" },
     { key: "all", label: "All (including untagged)", hint: "Every customer, whatever its tag" },
-    { key: "inactive", label: "Not active", hint: "Customers that were not invoiced at all in the selected period" },
 ];
 
 const ALL_CUSTOMERS = "all";
@@ -90,7 +86,7 @@ export function CustomerFollowupReport() {
     const [customersLoading, setCustomersLoading] = useState(true);
     const [customersError, setCustomersError] = useState<string | null>(null);
 
-    const [list, setList] = useState<ListChoice>("act");
+    const [list, setList] = useState<FollowupCustomerList>("act");
     // The picked customer ids; the special ALL_CUSTOMERS entry stands for every customer in the list.
     const [selectedIds, setSelectedIds] = useState<string[]>([]);
     const allSelected = selectedIds.includes(ALL_CUSTOMERS);
@@ -116,7 +112,7 @@ export function CustomerFollowupReport() {
         let stale = false;
         setCustomersLoading(true);
         setCustomersError(null);
-        getFollowupCustomers(list === "inactive" ? "all" : list)
+        getFollowupCustomers(list)
             .then((data) => {
                 if (stale) return;
                 setCustomers(data.customers);
@@ -190,24 +186,44 @@ export function CustomerFollowupReport() {
         setFilter("");
         setDetail(null);
         setOpenOrderId(null);
+        setLastRequest(null);
+        setInactiveOnly(false);
     }
 
-    async function handleGenerate(event: FormEvent) {
-        event.preventDefault();
-        if (!canGenerate) return;
+    // What the last report was built from, so the "Not active" switch can search again without touching the form.
+    const [lastRequest, setLastRequest] = useState<{ ids: number[]; allSelected: boolean; startDate: string; endDate: string } | null>(null);
+    const [inactiveOnly, setInactiveOnly] = useState(false);
+
+    async function runReport(request: { ids: number[]; allSelected: boolean; startDate: string; endDate: string }, inactive: boolean) {
         setLoading(true);
         setError(null);
         try {
-            const ids = allSelected ? customers.map((customer) => customer.id) : selectedIds.map(Number);
-            const data = await getCustomerFollowupReport({ customerIds: ids, onlyWithOrders: allSelected && list !== "inactive", onlyInactive: list === "inactive", startDate, endDate });
+            const data = await getCustomerFollowupReport({
+                customerIds: request.ids,
+                onlyWithOrders: request.allSelected && !inactive,
+                onlyInactive: inactive,
+                startDate: request.startDate,
+                endDate: request.endDate,
+            });
             setReport(data);
+            setLastRequest(request);
+            setInactiveOnly(inactive);
             setFilter("");
+            setDetail(null);
+            setOpenOrderId(null);
         } catch (generateError) {
             setReport(null);
             setError(generateError instanceof Error ? generateError.message : "Failed to build the report.");
         } finally {
             setLoading(false);
         }
+    }
+
+    async function handleGenerate(event: FormEvent) {
+        event.preventDefault();
+        if (!canGenerate) return;
+        const ids = allSelected ? customers.map((customer) => customer.id) : selectedIds.map(Number);
+        await runReport({ ids, allSelected, startDate, endDate }, false);
     }
 
     const rows = useMemo(() => {
@@ -335,7 +351,7 @@ export function CustomerFollowupReport() {
                                 {
                                     value: ALL_CUSTOMERS,
                                     label: `All customers${customersLoading ? "" : ` (${customers.length})`}`,
-                                    description: list === "inactive" ? "Every customer with no invoice in the period" : "Every customer in the list above that has invoiced sales orders in the period",
+                                    description: "Every customer in the list above that has invoiced sales orders in the period",
                                 },
                                 ...customers.map((customer) => ({
                                     value: String(customer.id),
@@ -475,6 +491,20 @@ export function CustomerFollowupReport() {
                                 />
                             </div>
                             <div className="flex items-center gap-3">
+                                <button
+                                    type="button"
+                                    role="switch"
+                                    aria-checked={inactiveOnly}
+                                    disabled={loading || !lastRequest}
+                                    onClick={() => lastRequest && void runReport(lastRequest, !inactiveOnly)}
+                                    title="Search again for the chosen customers that were not invoiced at all in this period"
+                                    className="inline-flex items-center gap-2 text-sm disabled:opacity-50"
+                                >
+                                    <span className={`relative inline-block h-5 w-9 rounded-full transition ${inactiveOnly ? "bg-(--brand)" : "bg-(--line)"}`}>
+                                        <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${inactiveOnly ? "left-4.5" : "left-0.5"}`} />
+                                    </span>
+                                    Not active only
+                                </button>
                                 <span className="text-xs text-(--ink-soft)">
                                     {rows.length === report.rows.length ? `${rows.length} customers` : `${rows.length} of ${report.rows.length} customers`}
                                 </span>
@@ -490,7 +520,7 @@ export function CustomerFollowupReport() {
                         </div>
 
                         {report.rows.length === 0 ? (
-                            <p className="p-6 text-center text-sm text-(--ink-soft)">No customer had confirmed sales orders between these dates.</p>
+                            <p className="p-6 text-center text-sm text-(--ink-soft)">{inactiveOnly ? "Every chosen customer was invoiced in this period." : "No customer had confirmed, invoiced sales orders between these dates."}</p>
                         ) : rows.length === 0 ? (
                             <p className="p-6 text-center text-sm text-(--ink-soft)">No customer matches &ldquo;{filter}&rdquo;.</p>
                         ) : (
