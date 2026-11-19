@@ -67,6 +67,8 @@ const PRESETS: Array<{ label: string; range: () => [string, string] }> = [
     },
 ];
 
+const DEFAULT_PRESET = PRESETS.find((preset) => preset.label === "Last 7 days") ?? PRESETS[0];
+
 function sanitizeFileName(value: string) {
     return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "report";
 }
@@ -76,10 +78,10 @@ export function CustomerFollowupReport() {
     const [customersLoading, setCustomersLoading] = useState(true);
     const [customersError, setCustomersError] = useState<string | null>(null);
 
-    const [scope, setScope] = useState<"all" | "selected">("all");
+    const [scope, setScope] = useState<"all" | "selected">("selected");
     const [selectedIds, setSelectedIds] = useState<string[]>([]);
-    const [startDate, setStartDate] = useState(() => PRESETS[0].range()[0]);
-    const [endDate, setEndDate] = useState(() => PRESETS[0].range()[1]);
+    const [startDate, setStartDate] = useState(() => DEFAULT_PRESET.range()[0]);
+    const [endDate, setEndDate] = useState(() => DEFAULT_PRESET.range()[1]);
 
     const [report, setReport] = useState<OdooCustomerFollowupReport | null>(null);
     const [loading, setLoading] = useState(false);
@@ -117,6 +119,19 @@ export function CustomerFollowupReport() {
         const limit = maxFollowupEnd(value);
         if (endDate < value) setEndDate(value);
         else if (endDate > limit) setEndDate(limit);
+    }
+
+    // Back to how the tab opens: nothing chosen, last 7 days, no report.
+    function handleClear() {
+        const [from, to] = DEFAULT_PRESET.range();
+        setScope("selected");
+        setSelectedIds([]);
+        setStartDate(from);
+        setEndDate(to);
+        setReport(null);
+        setError(null);
+        setFilter("");
+        setDetail(null);
     }
 
     async function handleGenerate(event: FormEvent) {
@@ -235,19 +250,19 @@ export function CustomerFollowupReport() {
                     <div className="inline-flex overflow-hidden rounded-xl border border-(--line) bg-white" role="group" aria-label="Customers">
                         <button
                             type="button"
-                            onClick={() => setScope("all")}
-                            aria-pressed={scope === "all"}
-                            className={`px-4 py-2 text-sm ${scope === "all" ? "bg-(--chip) font-medium text-(--brand)" : "text-(--ink-soft)"}`}
+                            onClick={() => setScope("selected")}
+                            aria-pressed={scope === "selected"}
+                            className={`px-4 py-2 text-sm ${scope === "selected" ? "bg-(--chip) font-medium text-(--brand)" : "text-(--ink-soft)"}`}
                         >
-                            All customers{customersLoading ? "" : ` (${customers.length})`}
+                            Choose customers
                         </button>
                         <button
                             type="button"
-                            onClick={() => setScope("selected")}
-                            aria-pressed={scope === "selected"}
-                            className={`border-l border-(--line) px-4 py-2 text-sm ${scope === "selected" ? "bg-(--chip) font-medium text-(--brand)" : "text-(--ink-soft)"}`}
+                            onClick={() => setScope("all")}
+                            aria-pressed={scope === "all"}
+                            className={`border-l border-(--line) px-4 py-2 text-sm ${scope === "all" ? "bg-(--chip) font-medium text-(--brand)" : "text-(--ink-soft)"}`}
                         >
-                            Choose customers
+                            All customers{customersLoading ? "" : ` (${customers.length})`}
                         </button>
                     </div>
                     {scope === "selected" ? (
@@ -277,7 +292,7 @@ export function CustomerFollowupReport() {
                 <div>
                     <p className="mb-2 text-sm font-medium">
                         <span className="mr-2 inline-flex h-5 w-5 items-center justify-center rounded-full bg-(--brand) text-xs text-white">2</span>
-                        Which period? <span className="font-normal text-(--ink-soft)">(up to 1 month)</span>
+                        Which period?
                     </p>
                     <div className="flex flex-wrap items-end gap-3">
                         <label className="block">
@@ -337,6 +352,14 @@ export function CustomerFollowupReport() {
                         {loading ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : null}
                         {loading ? "Building report..." : "Generate report"}
                     </button>
+                    <button
+                        type="button"
+                        onClick={handleClear}
+                        disabled={loading}
+                        className="inline-flex items-center gap-2 rounded-xl border border-(--line) bg-white px-5 py-2.5 text-sm font-medium hover:bg-(--chip) disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                        Clear
+                    </button>
                     {scope === "selected" && selectedIds.length === 0 ? (
                         <span className="text-xs text-(--ink-soft)">Pick at least one customer to continue.</span>
                     ) : null}
@@ -350,7 +373,11 @@ export function CustomerFollowupReport() {
                     {/* Summary */}
                     <div className={`grid grid-cols-2 gap-3 ${report.costAvailable ? "lg:grid-cols-5" : "lg:grid-cols-4"}`}>
                         <SummaryCard label="Customers" value={String(report.totals.customerCount)} />
-                        <SummaryCard label="Sales orders" value={String(report.totals.orderCount)} />
+                        <SummaryCard
+                            label="Sales orders"
+                            value={String(report.totals.orderCount)}
+                            note={`${formatDate(report.startDate)} – ${formatDate(report.endDate)}`}
+                        />
                         <SummaryCard label="Sales total" value={formatCurrency(report.totals.salesTotal)} />
                         {report.costAvailable ? (
                             <SummaryCard
