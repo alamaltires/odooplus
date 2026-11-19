@@ -10,9 +10,10 @@ export async function POST(request: Request) {
         const ownUserId = await getOwnSalespersonScope(request, credentials);
         const tagFilter = await getCustomerTagScope(request);
         const companyIds = await getCompanyIdsFromRequest(request);
-        const { customerIds, onlyWithOrders, startDate, endDate } = (await request.json()) as {
+        const { customerIds, onlyWithOrders, onlyInactive, startDate, endDate } = (await request.json()) as {
             customerIds: number[];
             onlyWithOrders?: boolean;
+            onlyInactive?: boolean;
             startDate: string;
             endDate: string;
         };
@@ -24,6 +25,7 @@ export async function POST(request: Request) {
             return getCustomerFollowupReport(credentials, {
                 customerIds: allowedIds,
                 onlyWithOrders: onlyWithOrders === true,
+                onlyInactive: onlyInactive === true,
                 startDate,
                 endDate,
                 includeCost: role !== "salesperson",

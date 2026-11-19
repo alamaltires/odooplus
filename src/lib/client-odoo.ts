@@ -1055,7 +1055,7 @@ export function getCustomerActivityReport(input: { customerId: number; startDate
     return post<OdooCustomerActivityReport>("/api/odoo/customer-activity-report", input);
 }
 
-export function getCustomerFollowupReport(input: { customerIds: number[]; onlyWithOrders?: boolean; startDate: string; endDate: string }) {
+export function getCustomerFollowupReport(input: { customerIds: number[]; onlyWithOrders?: boolean; onlyInactive?: boolean; startDate: string; endDate: string }) {
     return post<OdooCustomerFollowupReport>("/api/odoo/customer-followup-report", input);
 }
 

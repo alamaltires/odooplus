@@ -9,7 +9,7 @@ import { writeWorkbook } from "@/lib/client-activity";
 import { maxFollowupEnd, validateFollowupRange } from "@/lib/followup-range";
 import type { OdooCustomerFollowupReport, OdooCustomerFollowupRow, OdooCustomerOption } from "@/types/odoo";
 
-type SortKey = "customerName" | "paymentTerm" | "orderCount" | "salesTotal" | "grossProfit" | "totalDue";
+type SortKey = "customerName" | "paymentTerm" | "orderCount" | "salesTotal" | "grossProfit" | "periodDue" | "totalDue";
 
 function isoDate(date: Date) {
     return date.toISOString().slice(0, 10);
@@ -67,10 +67,14 @@ const PRESETS: Array<{ label: string; range: () => [string, string] }> = [
     },
 ];
 
-const LISTS: Array<{ key: FollowupCustomerList; label: string; hint: string }> = [
+// "inactive" is the whole customer list, narrowed by the report to those not invoiced in the period.
+type ListChoice = FollowupCustomerList | "inactive";
+
+const LISTS: Array<{ key: ListChoice; label: string; hint: string }> = [
     { key: "act", label: "Customer ACT", hint: "Only customers tagged Customer ACT" },
     { key: "assigned", label: "Assigned only", hint: "Only customers that have a salesperson assigned" },
     { key: "all", label: "All (including untagged)", hint: "Every customer, whatever its tag" },
+    { key: "inactive", label: "Not active", hint: "Customers that were not invoiced at all in the selected period" },
 ];
 
 const ALL_CUSTOMERS = "all";
@@ -86,7 +90,7 @@ export function CustomerFollowupReport() {
     const [customersLoading, setCustomersLoading] = useState(true);
     const [customersError, setCustomersError] = useState<string | null>(null);
 
-    const [list, setList] = useState<FollowupCustomerList>("act");
+    const [list, setList] = useState<ListChoice>("act");
     // The picked customer ids; the special ALL_CUSTOMERS entry stands for every customer in the list.
     const [selectedIds, setSelectedIds] = useState<string[]>([]);
     const allSelected = selectedIds.includes(ALL_CUSTOMERS);
@@ -112,7 +116,7 @@ export function CustomerFollowupReport() {
         let stale = false;
         setCustomersLoading(true);
         setCustomersError(null);
-        getFollowupCustomers(list)
+        getFollowupCustomers(list === "inactive" ? "all" : list)
             .then((data) => {
                 if (stale) return;
                 setCustomers(data.customers);
@@ -195,7 +199,7 @@ export function CustomerFollowupReport() {
         setError(null);
         try {
             const ids = allSelected ? customers.map((customer) => customer.id) : selectedIds.map(Number);
-            const data = await getCustomerFollowupReport({ customerIds: ids, onlyWithOrders: allSelected, startDate, endDate });
+            const data = await getCustomerFollowupReport({ customerIds: ids, onlyWithOrders: allSelected && list !== "inactive", onlyInactive: list === "inactive", startDate, endDate });
             setReport(data);
             setFilter("");
         } catch (generateError) {
@@ -244,6 +248,7 @@ export function CustomerFollowupReport() {
                     "Sales orders": row.orderCount,
                     "Sales total": row.salesTotal,
                     ...(withGp ? { Margin: row.grossProfit, "Margin %": row.gpPercent ?? "" } : {}),
+                    "Period due": row.periodDue,
                     "Total due": row.totalDue ?? "",
                 }))
             ),
@@ -330,7 +335,7 @@ export function CustomerFollowupReport() {
                                 {
                                     value: ALL_CUSTOMERS,
                                     label: `All customers${customersLoading ? "" : ` (${customers.length})`}`,
-                                    description: "Every customer in the list above that has sales orders in the period",
+                                    description: list === "inactive" ? "Every customer with no invoice in the period" : "Every customer in the list above that has invoiced sales orders in the period",
                                 },
                                 ...customers.map((customer) => ({
                                     value: String(customer.id),
@@ -438,7 +443,7 @@ export function CustomerFollowupReport() {
             {report ? (
                 <div className="mt-6 space-y-4">
                     {/* Summary */}
-                    <div className={`grid grid-cols-2 gap-3 ${report.costAvailable ? "lg:grid-cols-5" : "lg:grid-cols-4"}`}>
+                    <div className={`grid grid-cols-2 gap-3 ${report.costAvailable ? "lg:grid-cols-6" : "lg:grid-cols-5"}`}>
                         <SummaryCard label="Customers" value={String(report.totals.customerCount)} />
                         <SummaryCard
                             label="Sales orders"
@@ -453,6 +458,7 @@ export function CustomerFollowupReport() {
                                 note={report.totals.gpPercent !== null ? `${formatNumber(report.totals.gpPercent)}% of delivered` : undefined}
                             />
                         ) : null}
+                        <SummaryCard label="Period due" value={formatCurrency(report.totals.periodDue)} tone="due" note="unpaid, invoiced in the period" />
                         <SummaryCard label="Total due" value={formatCurrency(report.totals.totalDue)} tone="due" />
                     </div>
 
@@ -497,6 +503,7 @@ export function CustomerFollowupReport() {
                                             {headerCell("Sales orders", "orderCount", "right")}
                                             {headerCell("Sales total", "salesTotal", "right")}
                                             {report.costAvailable ? headerCell("Margin", "grossProfit", "right") : null}
+                                            {headerCell("Period due", "periodDue", "right")}
                                             {headerCell("Total due", "totalDue", "right")}
                                             <th className="px-3 py-2.5 text-right font-medium">Details</th>
                                         </tr>
@@ -523,6 +530,9 @@ export function CustomerFollowupReport() {
                                                         )}
                                                     </td>
                                                 ) : null}
+                                                <td className={`px-3 py-2.5 text-right tabular-nums ${row.periodDue > 0 ? "font-medium text-amber-700" : "text-(--ink-soft)"}`}>
+                                                    {formatCurrency(row.periodDue)}
+                                                </td>
                                                 <td className={`px-3 py-2.5 text-right tabular-nums ${row.totalDue && row.totalDue > 0 ? "font-medium text-amber-700" : "text-(--ink-soft)"}`}>
                                                     {row.totalDue === null ? "-" : formatCurrency(row.totalDue)}
                                                 </td>
@@ -553,6 +563,7 @@ export function CustomerFollowupReport() {
                                             {report.costAvailable ? (
                                                 <td className="px-3 py-2.5 text-right tabular-nums">{formatCurrency(rows.reduce((sum, row) => sum + row.grossProfit, 0))}</td>
                                             ) : null}
+                                            <td className="px-3 py-2.5 text-right tabular-nums">{formatCurrency(rows.reduce((sum, row) => sum + row.periodDue, 0))}</td>
                                             <td className="px-3 py-2.5 text-right tabular-nums">{formatCurrency(rows.reduce((sum, row) => sum + (row.totalDue ?? 0), 0))}</td>
                                             <td />
                                         </tr>
@@ -562,9 +573,9 @@ export function CustomerFollowupReport() {
                         )}
                     </div>
                     <p className="text-xs text-(--ink-soft)">
-                        Sales total = confirmed sales orders dated {formatDate(report.startDate)} to {formatDate(report.endDate)} (VAT included).
+                        Sales total = confirmed and invoiced sales orders dated {formatDate(report.startDate)} to {formatDate(report.endDate)} (VAT included).
                         {report.costAvailable ? " Margin is measured on what has been delivered so far. " : " "}
-                        Total due = the customer&apos;s open receivable balance today.
+                        Period due = still unpaid on the invoices issued in the period. Total due = the customer&apos;s open receivable balance today.
                     </p>
                 </div>
             ) : null}

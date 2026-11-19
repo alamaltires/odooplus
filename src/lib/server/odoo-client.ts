@@ -12233,7 +12233,7 @@ export async function getFollowupOrderDetails(
  */
 export async function getCustomerFollowupReport(
     credentials: OdooCredentials,
-    input: { customerIds: number[]; onlyWithOrders?: boolean; startDate: string; endDate: string; includeCost?: boolean }
+    input: { customerIds: number[]; onlyWithOrders?: boolean; onlyInactive?: boolean; startDate: string; endDate: string; includeCost?: boolean }
 ): Promise<OdooCustomerFollowupReport> {
     const uid = await authenticate(credentials);
     const { startDate, endDate } = input;
@@ -12249,7 +12249,7 @@ export async function getCustomerFollowupReport(
     const rangeEnd = toOdooDateBoundary(endDate, true, timeZone);
     const costAvailable = input.includeCost !== false;
 
-    const [orders, termFieldsAvailable, money] = await Promise.all([
+    const [orders, invoices, termFieldsAvailable, money] = await Promise.all([
         searchReadAll(
             credentials,
             uid,
@@ -12257,10 +12257,26 @@ export async function getCustomerFollowupReport(
             [
                 ["partner_id.commercial_partner_id", "in", customerIds],
                 ["state", "in", ["sale", "done"]],
+                // Only orders that are already invoiced count.
+                ["invoice_status", "=", "invoiced"],
                 ["date_order", ">=", rangeStart],
                 ["date_order", "<=", rangeEnd],
             ],
             ["id", "name", "amount_total", "currency_id", "date_order", "user_id", "state", "partner_id"]
+        ),
+        // Invoices (and credit notes) issued in the period: who was invoiced, and how much of it is still unpaid.
+        searchReadAll(
+            credentials,
+            uid,
+            "account.move",
+            [
+                ["commercial_partner_id", "in", customerIds],
+                ["move_type", "in", ["out_invoice", "out_refund"]],
+                ["state", "=", "posted"],
+                ["invoice_date", ">=", startDate],
+                ["invoice_date", "<=", endDate],
+            ],
+            ["commercial_partner_id", "amount_residual_signed", "company_id"]
         ),
         executeKw<Record<string, unknown>>(credentials, uid, "res.partner", "fields_get", [["property_payment_term_id", "credit"]], {
             attributes: ["string"],
@@ -12303,7 +12319,24 @@ export async function getCustomerFollowupReport(
         ordersByCustomer.set(customerId, list);
     }
 
-    const shownIds = input.onlyWithOrders ? customerIds.filter((id) => ordersByCustomer.has(id)) : customerIds;
+    // What is still unpaid on the invoices issued in the period (credit notes reduce it).
+    const periodDueByCustomer = new Map<number, number>();
+    const invoicedCustomers = new Set<number>();
+    for (const invoice of invoices) {
+        const customerId = getRelationalId(invoice.commercial_partner_id);
+        if (!customerId) continue;
+        invoicedCustomers.add(customerId);
+        periodDueByCustomer.set(
+            customerId,
+            (periodDueByCustomer.get(customerId) ?? 0) + money.convertFromCompany(Number(invoice.amount_residual_signed ?? 0), getRelationalId(invoice.company_id))
+        );
+    }
+
+    const shownIds = input.onlyInactive
+        ? customerIds.filter((id) => !invoicedCustomers.has(id))
+        : input.onlyWithOrders
+          ? customerIds.filter((id) => ordersByCustomer.has(id))
+          : customerIds;
     const termFields = ["property_payment_term_id", "credit"].filter((field) => field in termFieldsAvailable);
     const partners = shownIds.length > 0 ? await readInBatches(credentials, uid, "res.partner", shownIds, ["id", "name", "user_id", ...termFields]) : [];
 
@@ -12323,6 +12356,7 @@ export async function getCustomerFollowupReport(
             deliveredRevenue,
             grossProfit,
             gpPercent: costAvailable && deliveredRevenue > 0 ? Number(((grossProfit / deliveredRevenue) * 100).toFixed(1)) : null,
+            periodDue: Number((periodDueByCustomer.get(customerId) ?? 0).toFixed(2)),
             totalDue: "credit" in partner ? Number(partner.credit ?? 0) || 0 : null,
             orders: customerOrders,
         };
@@ -12344,6 +12378,7 @@ export async function getCustomerFollowupReport(
             grossProfit,
             deliveredRevenue,
             gpPercent: costAvailable && deliveredRevenue > 0 ? Number(((grossProfit / deliveredRevenue) * 100).toFixed(1)) : null,
+            periodDue: Number(rows.reduce((sum, row) => sum + row.periodDue, 0).toFixed(2)),
             totalDue: Number(rows.reduce((sum, row) => sum + (row.totalDue ?? 0), 0).toFixed(2)),
         },
     };

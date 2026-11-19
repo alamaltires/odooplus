@@ -528,11 +528,13 @@ export type OdooCustomerFollowupRow = {
     salespersonName: string;
     paymentTerm: string;
     orderCount: number;
-    /** Sum of the confirmed sales orders dated in the period. */
+    /** Sum of the confirmed, invoiced sales orders dated in the period. */
     salesTotal: number;
     deliveredRevenue: number;
     grossProfit: number;
     gpPercent: number | null;
+    /** Still unpaid on the invoices issued in the period (credit notes reduce it). */
+    periodDue: number;
     /** The customer's open receivable balance today (null when the database doesn't expose it). */
     totalDue: number | null;
     orders: OdooFollowupOrder[];
@@ -551,6 +553,7 @@ export type OdooCustomerFollowupReport = {
         grossProfit: number;
         deliveredRevenue: number;
         gpPercent: number | null;
+        periodDue: number;
         totalDue: number;
     };
 };
