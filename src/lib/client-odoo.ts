@@ -594,6 +594,13 @@ export function getCustomers() {
     return cachedCustomerList("customers", () => post<{ customers: OdooCustomerOption[] }>("/api/odoo/customers", {}));
 }
 
+export type FollowupCustomerList = "act" | "all" | "assigned";
+
+/** Customers for the Customer Followup Report: the "Customer ACT" tag, every customer, or only those with a salesperson. */
+export function getFollowupCustomers(list: FollowupCustomerList) {
+    return post<{ customers: OdooCustomerOption[] }>("/api/odoo/followup-customers", { list });
+}
+
 export function getMyContacts() {
     return cachedCustomerList("my-contacts", () => post<{ contacts: OdooContact[] }>("/api/odoo/my-contacts", {}));
 }

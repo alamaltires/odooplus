@@ -1769,7 +1769,8 @@ const customerSummariesCache = new Map<string, { at: number; value: Promise<Cust
 function getCustomerSummaries(
     credentials: OdooCredentials,
     assignedToUserId: number | null | undefined,
-    tagFilter: CustomerTagFilter
+    tagFilter: CustomerTagFilter,
+    requireSalesperson = false
 ): Promise<CustomerSummary[]> {
     const cacheKey = [
         credentials.url,
@@ -1778,11 +1779,12 @@ function getCustomerSummaries(
         (companyContextStorage.getStore() ?? []).join(","),
         assignedToUserId ?? "",
         JSON.stringify(tagFilter),
+        requireSalesperson ? "assigned" : "",
     ].join("|");
     const hit = customerSummariesCache.get(cacheKey);
     if (hit && Date.now() - hit.at < CUSTOMER_SUMMARIES_TTL_MS) return hit.value;
 
-    const value = loadCustomerSummaries(credentials, assignedToUserId, tagFilter);
+    const value = loadCustomerSummaries(credentials, assignedToUserId, tagFilter, requireSalesperson);
     customerSummariesCache.set(cacheKey, { at: Date.now(), value });
     // Failures are never cached.
     value.catch(() => customerSummariesCache.delete(cacheKey));
@@ -1792,7 +1794,8 @@ function getCustomerSummaries(
 async function loadCustomerSummaries(
     credentials: OdooCredentials,
     assignedToUserId: number | null | undefined,
-    tagFilter: CustomerTagFilter
+    tagFilter: CustomerTagFilter,
+    requireSalesperson = false
 ): Promise<CustomerSummary[]> {
     const uid = await authenticate(credentials);
     const partnerFields = [...(await getAvailablePartnerFields(credentials, uid)), "company_id", "category_id"];
@@ -1808,7 +1811,7 @@ async function loadCustomerSummaries(
                 : tagFilter && tagFilter.ids.length > 0
                   ? [["category_id", "in", tagFilter.ids]]
                   : [["category_id.name", "=", DEFAULT_CUSTOMER_TAG]]),
-            ...(assignedToUserId ? [["user_id", "=", assignedToUserId]] : []),
+            ...(assignedToUserId ? [["user_id", "=", assignedToUserId]] : requireSalesperson ? [["user_id", "!=", false]] : []),
         ]],
         {
             fields: partnerFields,
@@ -1870,9 +1873,10 @@ async function loadCustomerSummaries(
 export async function getCustomers(
     credentials: OdooCredentials,
     assignedToUserId?: number | null,
-    tagFilter: CustomerTagFilter = null
+    tagFilter: CustomerTagFilter = null,
+    options: { onlyAssigned?: boolean } = {}
 ): Promise<CustomerOption[]> {
-    const summaries = await getCustomerSummaries(credentials, assignedToUserId, tagFilter);
+    const summaries = await getCustomerSummaries(credentials, assignedToUserId, tagFilter, options.onlyAssigned === true);
     return summaries.map((summary) => ({
         id: summary.customerId,
         name: summary.customerName,

@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { AlertCircle, ChevronDown, ChevronUp, Download, Eye, Loader2, Search, Users, X } from "lucide-react";
-import { getCustomerFollowupReport, getCustomers } from "@/lib/client-odoo";
+import { getCustomerFollowupReport, getFollowupCustomers, type FollowupCustomerList } from "@/lib/client-odoo";
 import { LimitedMultiSelect } from "@/components/limited-multi-select";
 import { getDisplayCurrency } from "@/lib/display-currency";
 import { writeWorkbook } from "@/lib/client-activity";
@@ -67,6 +67,14 @@ const PRESETS: Array<{ label: string; range: () => [string, string] }> = [
     },
 ];
 
+const LISTS: Array<{ key: FollowupCustomerList; label: string; hint: string }> = [
+    { key: "act", label: "Customer ACT", hint: "Only customers tagged Customer ACT" },
+    { key: "assigned", label: "Assigned only", hint: "Only customers that have a salesperson assigned" },
+    { key: "all", label: "All (including untagged)", hint: "Every customer, whatever its tag" },
+];
+
+const ALL_CUSTOMERS = "all";
+
 const DEFAULT_PRESET = PRESETS.find((preset) => preset.label === "Last 7 days") ?? PRESETS[0];
 
 function sanitizeFileName(value: string) {
@@ -78,8 +86,10 @@ export function CustomerFollowupReport() {
     const [customersLoading, setCustomersLoading] = useState(true);
     const [customersError, setCustomersError] = useState<string | null>(null);
 
-    const [scope, setScope] = useState<"all" | "selected">("selected");
+    const [list, setList] = useState<FollowupCustomerList>("act");
+    // The picked customer ids; the special ALL_CUSTOMERS entry stands for every customer in the list.
     const [selectedIds, setSelectedIds] = useState<string[]>([]);
+    const allSelected = selectedIds.includes(ALL_CUSTOMERS);
     const [startDate, setStartDate] = useState(() => DEFAULT_PRESET.range()[0]);
     const [endDate, setEndDate] = useState(() => DEFAULT_PRESET.range()[1]);
 
@@ -92,12 +102,29 @@ export function CustomerFollowupReport() {
     const [sortDesc, setSortDesc] = useState(true);
     const [detail, setDetail] = useState<OdooCustomerFollowupRow | null>(null);
 
+    // Loads the customer list for the chosen list type; a newer choice makes an older, slower answer be ignored.
     useEffect(() => {
-        getCustomers()
-            .then((data) => setCustomers(data.customers))
-            .catch((loadError) => setCustomersError(loadError instanceof Error ? loadError.message : "Failed to load customers."))
-            .finally(() => setCustomersLoading(false));
-    }, []);
+        let stale = false;
+        setCustomersLoading(true);
+        setCustomersError(null);
+        getFollowupCustomers(list)
+            .then((data) => {
+                if (stale) return;
+                setCustomers(data.customers);
+                // Keep only the picked customers that are still in the new list.
+                const available = new Set(data.customers.map((customer) => String(customer.id)));
+                setSelectedIds((current) => current.filter((id) => id === ALL_CUSTOMERS || available.has(id)));
+            })
+            .catch((loadError) => {
+                if (!stale) setCustomersError(loadError instanceof Error ? loadError.message : "Failed to load customers.");
+            })
+            .finally(() => {
+                if (!stale) setCustomersLoading(false);
+            });
+        return () => {
+            stale = true;
+        };
+    }, [list]);
 
     useEffect(() => {
         if (!detail) return undefined;
@@ -109,7 +136,7 @@ export function CustomerFollowupReport() {
     }, [detail]);
 
     const rangeError = validateFollowupRange(startDate, endDate);
-    const customerCount = scope === "all" ? customers.length : selectedIds.length;
+    const customerCount = allSelected ? customers.length : selectedIds.length;
     const canGenerate = !loading && !rangeError && customerCount > 0;
 
     function changeStart(value: string) {
@@ -124,7 +151,7 @@ export function CustomerFollowupReport() {
     // Back to how the tab opens: nothing chosen, last 7 days, no report.
     function handleClear() {
         const [from, to] = DEFAULT_PRESET.range();
-        setScope("selected");
+        setList("act");
         setSelectedIds([]);
         setStartDate(from);
         setEndDate(to);
@@ -140,8 +167,8 @@ export function CustomerFollowupReport() {
         setLoading(true);
         setError(null);
         try {
-            const ids = scope === "all" ? customers.map((customer) => customer.id) : selectedIds.map(Number);
-            const data = await getCustomerFollowupReport({ customerIds: ids, onlyWithOrders: scope === "all", startDate, endDate });
+            const ids = allSelected ? customers.map((customer) => customer.id) : selectedIds.map(Number);
+            const data = await getCustomerFollowupReport({ customerIds: ids, onlyWithOrders: allSelected, startDate, endDate });
             setReport(data);
             setFilter("");
         } catch (generateError) {
@@ -247,44 +274,50 @@ export function CustomerFollowupReport() {
                         <span className="mr-2 inline-flex h-5 w-5 items-center justify-center rounded-full bg-(--brand) text-xs text-white">1</span>
                         Which customers?
                     </p>
-                    <div className="inline-flex overflow-hidden rounded-xl border border-(--line) bg-white" role="group" aria-label="Customers">
-                        <button
-                            type="button"
-                            onClick={() => setScope("selected")}
-                            aria-pressed={scope === "selected"}
-                            className={`px-4 py-2 text-sm ${scope === "selected" ? "bg-(--chip) font-medium text-(--brand)" : "text-(--ink-soft)"}`}
-                        >
-                            Choose customers
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => setScope("all")}
-                            aria-pressed={scope === "all"}
-                            className={`border-l border-(--line) px-4 py-2 text-sm ${scope === "all" ? "bg-(--chip) font-medium text-(--brand)" : "text-(--ink-soft)"}`}
-                        >
-                            All customers{customersLoading ? "" : ` (${customers.length})`}
-                        </button>
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <span className="text-xs text-(--ink-soft)">Customer list</span>
+                        {LISTS.map((item) => (
+                            <button
+                                key={item.key}
+                                type="button"
+                                onClick={() => setList(item.key)}
+                                aria-pressed={list === item.key}
+                                title={item.hint}
+                                className={`rounded-full border px-3 py-1.5 text-xs transition ${
+                                    list === item.key ? "border-(--brand) bg-(--brand) font-medium text-white" : "border-(--line) bg-white hover:bg-(--chip)"
+                                }`}
+                            >
+                                {item.label}
+                            </button>
+                        ))}
                     </div>
-                    {scope === "selected" ? (
-                        <div className="mt-3 max-w-2xl">
-                            <LimitedMultiSelect
-                                values={selectedIds}
-                                onChange={setSelectedIds}
-                                options={customers.map((customer) => ({
+                    <div className="mt-3 max-w-2xl">
+                        <LimitedMultiSelect
+                            values={selectedIds}
+                            onChange={(next) => {
+                                // "All customers" and individual customers don't mix: the last thing picked wins.
+                                if (next.includes(ALL_CUSTOMERS) && !allSelected) setSelectedIds([ALL_CUSTOMERS]);
+                                else setSelectedIds(next.filter((id) => id !== ALL_CUSTOMERS));
+                            }}
+                            options={[
+                                {
+                                    value: ALL_CUSTOMERS,
+                                    label: `All customers${customersLoading ? "" : ` (${customers.length})`}`,
+                                    description: "Every customer in the list above that has sales orders in the period",
+                                },
+                                ...customers.map((customer) => ({
                                     value: String(customer.id),
                                     label: customer.name,
                                     description: customer.salespersonName && customer.salespersonName !== "-" ? customer.salespersonName : undefined,
-                                }))}
-                                max={Math.max(1, customers.length)}
-                                loading={customersLoading}
-                                loadingText="Loading customers..."
-                                placeholder="Search and pick one or more customers"
-                                searchPlaceholder="Type a customer or salesperson name"
-                            />
-                        </div>
-                    ) : (
-                        <p className="mt-2 text-xs text-(--ink-soft)">Only customers that have sales orders in the period are listed.</p>
-                    )}
+                                })),
+                            ]}
+                            max={Math.max(1, customers.length + 1)}
+                            loading={customersLoading}
+                            loadingText="Loading customers..."
+                            placeholder="Search and pick one or more customers, or All customers"
+                            searchPlaceholder="Type a customer or salesperson name"
+                        />
+                    </div>
                     {customersError ? <p className="mt-2 text-sm text-red-600">{customersError}</p> : null}
                 </div>
 
@@ -316,20 +349,27 @@ export function CustomerFollowupReport() {
                             />
                         </label>
                         <div className="flex flex-wrap gap-2">
-                            {PRESETS.map((preset) => (
-                                <button
-                                    key={preset.label}
-                                    type="button"
-                                    onClick={() => {
-                                        const [from, to] = preset.range();
-                                        setStartDate(from);
-                                        setEndDate(to);
-                                    }}
-                                    className="rounded-full border border-(--line) bg-white px-3 py-1.5 text-xs hover:bg-(--chip)"
-                                >
-                                    {preset.label}
-                                </button>
-                            ))}
+                            {PRESETS.map((preset) => {
+                                const [from, to] = preset.range();
+                                // Lit while the dates match this period exactly; typing other dates turns it off.
+                                const active = startDate === from && endDate === to;
+                                return (
+                                    <button
+                                        key={preset.label}
+                                        type="button"
+                                        onClick={() => {
+                                            setStartDate(from);
+                                            setEndDate(to);
+                                        }}
+                                        aria-pressed={active}
+                                        className={`rounded-full border px-3 py-1.5 text-xs transition ${
+                                            active ? "border-(--brand) bg-(--brand) font-medium text-white" : "border-(--line) bg-white hover:bg-(--chip)"
+                                        }`}
+                                    >
+                                        {preset.label}
+                                    </button>
+                                );
+                            })}
                         </div>
                     </div>
                     {rangeError ? (
@@ -360,7 +400,7 @@ export function CustomerFollowupReport() {
                     >
                         Clear
                     </button>
-                    {scope === "selected" && selectedIds.length === 0 ? (
+                    {selectedIds.length === 0 ? (
                         <span className="text-xs text-(--ink-soft)">Pick at least one customer to continue.</span>
                     ) : null}
                 </div>
